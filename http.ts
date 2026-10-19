@@ -13,5 +13,5 @@ const mcpHandler = toNodeHandler(createMcpHandler(createServer));
 app.all("/mcp", useGolbalRateLimiter, (req, res) => mcpHandler(req, res));
 
 app.listen(Number(PORT), () => {
-  logger.info("ChowFlow MCP Server up and running.");
+  logger.info("ChowBot MCP Server up and running.");
 });

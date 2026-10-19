@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 
 const createTestServer = () => {
-  const server = new McpServer({ name: "ChowFlow", version: "test" });
+  const server = new McpServer({ name: "ChowBot", version: "test" });
   registerMenuTools(
     server,
     new ChowdeckClient({ baseUrl: upstream.url.origin, timeoutMs: 1000 }),
@@ -67,7 +67,7 @@ const menuResponse = () =>
   });
 
 describe("get_restaurant_menu", () => {
-  test("is registered on the ChowFlow server", async () => {
+  test("is registered on the ChowBot server", async () => {
     const { tools } = await rpc(createServer, "tools/list", {});
     const tool = tools.find((t: { name: string }) => t.name === "get_restaurant_menu");
 

@@ -1,4 +1,4 @@
-# Chowflow
+# Chowbot
 
 Order food from Chowdeck using AI assistants through MCP.
 
