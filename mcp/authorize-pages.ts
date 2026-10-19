@@ -11,6 +11,7 @@ export const escapeHtml = (value: string) =>
 
 export const AUTHORIZE_FONT_PATH = "/authorize/assets/plus-jakarta-sans.woff2";
 export const AUTHORIZE_LOGO_PATH = "/authorize/assets/chowbot-logo.svg";
+export const AUTHORIZE_ICON_PATH = "/authorize/assets/chowbot-icon.png";
 
 /*
  * The logo is ChowBot's own mark, not Chowdeck's. Palette and type follow
@@ -78,6 +79,8 @@ const layout = (title: string, body: string) => `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)} · ChowBot</title>
+<link rel="icon" href="${AUTHORIZE_LOGO_PATH}" type="image/svg+xml">
+<link rel="apple-touch-icon" href="${AUTHORIZE_ICON_PATH}">
 <link rel="preload" href="${AUTHORIZE_FONT_PATH}" as="font" type="font/woff2" crossorigin>
 <style>${STYLES}</style>
 </head>

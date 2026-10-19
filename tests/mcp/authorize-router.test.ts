@@ -298,6 +298,19 @@ describe("login initiation", () => {
     expect(svg).toStartWith("<svg");
   });
 
+  test("serves a PNG touch icon from ChowBot itself", async () => {
+    const client = await register(harness);
+
+    const { html } = await startSignIn(harness, client);
+    const icon = await fetch(`${harness.baseUrl}/authorize/assets/chowbot-icon.png`);
+    const bytes = new Uint8Array(await icon.arrayBuffer());
+
+    expect(html).toContain('<link rel="apple-touch-icon" href="/authorize/assets/chowbot-icon.png">');
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get("content-type")).toBe("image/png");
+    expect(new TextDecoder().decode(bytes.slice(1, 4))).toBe("PNG");
+  });
+
   test("sends a normalised phone to Chowdeck and shows only a masked number", async () => {
     const client = await register(harness);
 

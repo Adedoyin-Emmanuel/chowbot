@@ -14,12 +14,14 @@ import { bindSession, type SessionStore } from "../lib/session";
 import { ChowdeckApiError, ChowdeckClient } from "../lib/client";
 import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
 import logoPath from "../assets/images/chowbot-logo.svg" with { type: "file" };
+import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
 import fontPath from "../assets/fonts/plus-jakarta-sans-latin.woff2" with { type: "file" };
 import {
   otpPage,
   errorPage,
   phonePage,
   AUTHORIZE_FONT_PATH,
+  AUTHORIZE_ICON_PATH,
   AUTHORIZE_LOGO_PATH,
   type AuthorizationContext,
 } from "./authorize-pages";
@@ -148,6 +150,7 @@ const staticAsset = (path: string, contentType: string) => {
 const STATIC_ASSETS = {
   [AUTHORIZE_FONT_PATH]: staticAsset(fontPath, "font/woff2"),
   [AUTHORIZE_LOGO_PATH]: staticAsset(logoPath, "image/svg+xml"),
+  [AUTHORIZE_ICON_PATH]: staticAsset(iconPath, "image/png"),
 };
 
 const safeEqual = (a: string, b: string) => {

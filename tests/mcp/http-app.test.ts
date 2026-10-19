@@ -191,6 +191,22 @@ describe("/mcp bearer authentication", () => {
     expect(names).not.toContain("verify_login_otp");
   });
 
+  test("advertises the ChowBot icon to clients", async () => {
+    const response = await postMcp(
+      defaultApp,
+      {
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+      },
+      `Bearer ${await issue()}`,
+    );
+    const { serverInfo } = await rpcResult(response);
+
+    expect(serverInfo.icons).toEqual([
+      { src: expect.stringMatching(/^data:image\/png;base64,/), mimeType: "image/png", sizes: ["192x192"] },
+    ]);
+  });
+
   test("binds the session of the user the token belongs to", async () => {
     const token = await issue({ userId: "user-bind" });
 
