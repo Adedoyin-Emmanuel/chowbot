@@ -2,17 +2,17 @@ import {
   CHOWDECK_API_BASE_URL,
   CHOWDECK_REQUEST_TIMEOUT_MS,
   CHOWDECK_STOREFRONT_HEADERS,
-} from "../../constants/chowdeck";
+} from "../constants/chowdeck";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 type QueryValue = string | number | boolean | undefined;
 
 export type ChowdeckRequestOptions = {
-  method?: HttpMethod;
-  query?: Record<string, QueryValue>;
   body?: unknown;
+  method?: HttpMethod;
   headers?: Record<string, string>;
+  query?: Record<string, QueryValue>;
 };
 
 export type ChowdeckClientConfig = {
@@ -20,7 +20,8 @@ export type ChowdeckClientConfig = {
   timeoutMs: number;
 };
 
-export type ChowdeckErrorKind = "http" | "timeout" | "network" | "invalid_response";
+export type ChowdeckErrorKind =
+  "http" | "timeout" | "network" | "invalid_response";
 
 /*
  * Carries only the status and a short upstream message, never the raw
