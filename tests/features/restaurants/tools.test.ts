@@ -48,7 +48,7 @@ const callSearch = (args: Record<string, unknown>) =>
 
 describe("search_restaurants", () => {
   test("is registered on the ChowBot server", async () => {
-    const { tools } = await rpc(createServer, "tools/list", {});
+    const { tools } = await rpc(() => createServer(), "tools/list", {});
     const tool = tools.find((t: { name: string }) => t.name === "search_restaurants");
 
     expect(tool).toBeDefined();

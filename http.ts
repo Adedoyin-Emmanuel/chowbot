@@ -8,7 +8,14 @@ import { createServer } from "./mcp/server";
 import { useGolbalRateLimiter } from "./middlewares/rate-limiter";
 
 const app = express();
-const mcpHandler = toNodeHandler(createMcpHandler(createServer));
+
+/*
+ * No session is bound over HTTP: the handler builds a fresh server per
+ * request and nothing authenticates the caller, so there is no identity that
+ * could safely scope Chowdeck credentials. Login tools refuse until a verified
+ * identity (e.g. OAuth-backed req.auth) is in place.
+ */
+const mcpHandler = toNodeHandler(createMcpHandler(() => createServer()));
 
 app.all("/mcp", useGolbalRateLimiter, (req, res) => mcpHandler(req, res));
 

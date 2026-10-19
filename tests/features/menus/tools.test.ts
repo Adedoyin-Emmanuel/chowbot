@@ -68,7 +68,7 @@ const menuResponse = () =>
 
 describe("get_restaurant_menu", () => {
   test("is registered on the ChowBot server", async () => {
-    const { tools } = await rpc(createServer, "tools/list", {});
+    const { tools } = await rpc(() => createServer(), "tools/list", {});
     const tool = tools.find((t: { name: string }) => t.name === "get_restaurant_menu");
 
     expect(tool).toBeDefined();
