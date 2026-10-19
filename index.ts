@@ -1,11 +1,12 @@
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { createServer } from "./mcp/server";
+import { logger } from "./utils/logger";
 
 
 serveStdio(createServer, {
   onerror: (error) => {
-    console.error("Weather MCP Server error:", error);
+    logger.error("ChowFlow MCP Server error:", error);
   },
 });
 
-console.error("Weather MCP Server running");
+logger.info("ChowFlow MCP Server running");

@@ -3,7 +3,7 @@ import { registerArithmeticTool } from "../features/arithmetic/tools";
 
 export const createServer = () => {
   const server = new McpServer({
-    name: "Arithmetic",
+    name: "ChowFlow",
     version: "1.0.0",
   });
 
