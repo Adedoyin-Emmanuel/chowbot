@@ -5,7 +5,6 @@ import express, {
 import {
   type AuthInfo,
   type McpServer,
-  type OAuthMetadata,
   createMcpHandler,
   verifyBearerToken,
   bearerAuthChallengeResponse,
@@ -14,6 +13,11 @@ import {
 } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 
+import {
+  createOAuthRouter,
+  buildAuthorizationServerMetadata,
+} from "./oauth-router";
+import type { ClientStore } from "../lib/oauth-clients";
 import { createServer, type ServerOptions } from "./server";
 import { bindSession, type SessionStore } from "../lib/session";
 import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
@@ -22,6 +26,7 @@ import { AccessTokenVerifier, type AccessTokenStore } from "../lib/oauth";
 export type HttpAppOptions = {
   serverUrl: URL;
   issuerUrl: URL;
+  clients: ClientStore;
   sessions: SessionStore;
   tokens: AccessTokenStore;
   serverFactory?: (options: ServerOptions) => McpServer;
@@ -37,6 +42,23 @@ const sendWebResponse = async (res: ExpressResponse, response: Response) => {
   res.send(await response.text());
 };
 
+/*
+ * ChowBot is its own authorization server and serves the OAuth endpoints
+ * from this app, so the issuer must be this server's origin with no path.
+ */
+export const assertIssuerHostedBy = (issuerUrl: URL, serverUrl: URL) => {
+  if (
+    issuerUrl.origin !== serverUrl.origin ||
+    issuerUrl.pathname !== "/" ||
+    issuerUrl.search ||
+    issuerUrl.hash
+  ) {
+    throw new Error(
+      `OAUTH_ISSUER_URL must be the MCP server origin (${serverUrl.origin}), got "${issuerUrl.href}"`,
+    );
+  }
+};
+
 const userIdOf = (authInfo?: AuthInfo) => {
   const userId = authInfo?.extra?.userId;
   return typeof userId === "string" && userId ? userId : undefined;
@@ -45,22 +67,14 @@ const userIdOf = (authInfo?: AuthInfo) => {
 export const createHttpApp = ({
   serverUrl,
   issuerUrl,
+  clients,
   tokens,
   sessions,
   serverFactory = createServer,
 }: HttpAppOptions) => {
-  /*
-   * The protected-resource document only uses the issuer. The endpoints are
-   * the ones the ChowBot authorization server will expose; they are required
-   * by the SDK type but are not served until that milestone.
-   */
-  const authorizationServer: OAuthMetadata = {
-    issuer: issuerUrl.href.replace(/\/$/, ""),
-    authorization_endpoint: new URL("/authorize", issuerUrl).href,
-    token_endpoint: new URL("/token", issuerUrl).href,
-    response_types_supported: ["code"],
-  };
+  assertIssuerHostedBy(issuerUrl, serverUrl);
 
+  const authorizationServer = buildAuthorizationServerMetadata(issuerUrl);
   const resourceMetadata = buildOAuthProtectedResourceMetadata({
     oauthMetadata: authorizationServer,
     resourceServerUrl: serverUrl,
@@ -95,6 +109,8 @@ export const createHttpApp = ({
   );
 
   const app = express();
+
+  app.use(createOAuthRouter({ metadata: authorizationServer, clients }));
 
   app.get(
     [new URL(resourceMetadataUrl).pathname, PROTECTED_RESOURCE_ROOT_PATH],

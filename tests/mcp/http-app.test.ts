@@ -8,6 +8,7 @@ import { textResult } from "../../utils/tool-result";
 import type { ServerOptions } from "../../mcp/server";
 import { createHttpApp } from "../../mcp/http-app";
 import { InMemorySessionStore } from "../../lib/session";
+import { InMemoryClientStore } from "../../lib/oauth-clients";
 import {
   issueAccessToken,
   InMemoryAccessTokenStore,
@@ -98,7 +99,13 @@ const callTool = async (token: string, name: string, args: Record<string, unknow
 beforeAll(async () => {
   tokens = new InMemoryAccessTokenStore();
   sessions = new InMemorySessionStore();
-  const options = { serverUrl: SERVER_URL, issuerUrl: ISSUER_URL, tokens, sessions };
+  const options = {
+    serverUrl: SERVER_URL,
+    issuerUrl: ISSUER_URL,
+    clients: new InMemoryClientStore(),
+    tokens,
+    sessions,
+  };
 
   probeApp = await listen(createHttpApp({ ...options, serverFactory: probeServer }));
   defaultApp = await listen(createHttpApp(options));
