@@ -1,8 +1,6 @@
-# Node MCP Boilerplate
+# Chowflow
 
-Simple Node.js/TypeScript template for building MCP servers
-
-![](./md-assets/image.png)
+Order food from Chowdeck using AI assistants through MCP.
 
 ## Find Me
 
