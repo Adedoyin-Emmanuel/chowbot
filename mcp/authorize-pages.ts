@@ -40,27 +40,28 @@ const STYLES = `
   body {
     margin: 0;
     min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    padding: 2rem 1.25rem;
+    padding: 2rem 1.25rem 1.25rem;
     background: #fff;
     color: var(--ink);
     font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
-  main { width: 100%; max-width: 22rem; text-align: center; }
+  main { width: 100%; max-width: 22rem; margin: auto 0; text-align: center; }
   .logo { display: block; width: 3.5rem; height: 3.5rem; margin: 0 auto 1.5rem; }
-  h1 { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: -.02em; }
+  h1 { margin: 0; font-size: clamp(1.375rem, 5vw, 1.5rem); font-weight: 700; letter-spacing: -.02em; }
   .subtitle { margin: .5rem 0 1.75rem; color: var(--muted); }
   .subtitle strong { color: var(--ink); font-weight: 600; }
   form { display: grid; gap: .75rem; }
   input {
-    width: 100%; height: 3.25rem; padding: 0 1.25rem; font: inherit; font-size: 1rem; color: var(--ink);
-    border: 1.5px solid var(--line); border-radius: 999px; background: #fff; text-align: center;
+    width: 100%; height: 3.25rem; padding: 0 1rem; font: inherit; font-size: 1rem; color: var(--ink);
+    border: 1.5px solid var(--line); border-radius: .75rem; background: #fff;
   }
-  input:focus { outline: none; border-color: var(--kiwi); box-shadow: 0 0 0 4px rgba(2, 194, 127, .18); }
-  .code { font-size: 1.35rem; letter-spacing: .4em; font-weight: 600; }
+  input::placeholder { color: var(--muted); }
+  input:focus { outline: none; border-color: var(--muted); }
+  .code { font-size: 1.35rem; letter-spacing: .4em; font-weight: 600; text-align: center; }
   button {
     height: 3.25rem; font: inherit; font-weight: 600; font-size: 1rem; color: #fff;
     border: 0; border-radius: 999px; background: var(--chow-green); cursor: pointer; transition: background .15s;
@@ -68,9 +69,14 @@ const STYLES = `
   button:hover { background: var(--cucumber); }
   button:focus-visible { outline: 3px solid var(--kiwi); outline-offset: 2px; }
   .error { margin: 0 0 1rem; color: var(--pepper); font-weight: 500; font-size: .925rem; }
-  .hint { margin: 1.25rem 0 0; color: var(--muted); font-size: .825rem; }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  footer { margin-top: 3rem; color: var(--muted); font-size: .75rem; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: .6875rem; opacity: .7; }
+  @media (max-width: 30rem) {
+    body { padding-top: 12vh; }
+    main { margin-top: 0; }
+    .logo { width: 3rem; height: 3rem; margin-bottom: 1.25rem; }
+    .subtitle { margin-bottom: 1.5rem; }
+  }
 `;
 
 const layout = (title: string, body: string) => `<!doctype html>
@@ -95,15 +101,11 @@ const layout = (title: string, body: string) => `<!doctype html>
 
 export type AuthorizationContext = {
   clientName?: string;
-  redirectHost: string;
   csrfToken: string;
 };
 
 const errorBlock = (error?: string) =>
   error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : "";
-
-const returnHint = ({ redirectHost }: AuthorizationContext) =>
-  `<p class="hint">Returns to ${escapeHtml(redirectHost)}</p>`;
 
 const csrfField = (csrfToken: string) =>
   `<input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">`;
@@ -119,8 +121,7 @@ export const phonePage = (context: AuthorizationContext, error?: string) =>
     <label class="sr-only" for="phone">Phone number</label>
     <input id="phone" name="phone" type="tel" inputmode="tel" placeholder="Phone number" required maxlength="20" autofocus>
     <button type="submit">Continue</button>
-  </form>
-  ${returnHint(context)}`,
+  </form>`,
   );
 
 export const otpPage = (
@@ -138,8 +139,7 @@ export const otpPage = (
     <label class="sr-only" for="otp">Login code</label>
     <input class="code" id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" required maxlength="8" autofocus>
     <button type="submit">Verify</button>
-  </form>
-  ${returnHint(context)}`,
+  </form>`,
   );
 
 export const errorPage = (title: string, message: string) =>

@@ -8,14 +8,8 @@ import { rateLimit } from "express-rate-limit";
 import { timingSafeEqual } from "node:crypto";
 
 import { logger } from "../utils/logger";
-import { AUTHORIZE_PATH } from "./oauth-router";
 import type { UserStore } from "../lib/users";
-import { bindSession, type SessionStore } from "../lib/session";
-import { ChowdeckApiError, ChowdeckClient } from "../lib/client";
-import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
-import logoPath from "../assets/images/chowbot-logo.svg" with { type: "file" };
-import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
-import fontPath from "../assets/fonts/plus-jakarta-sans-latin.woff2" with { type: "file" };
+import { AUTHORIZE_PATH } from "./oauth-router";
 import {
   otpPage,
   errorPage,
@@ -25,8 +19,14 @@ import {
   AUTHORIZE_LOGO_PATH,
   type AuthorizationContext,
 } from "./authorize-pages";
-import { isRegisteredRedirectUri, type ClientStore } from "../lib/oauth-clients";
-import { issueAuthorizationCode, type AuthorizationCodeStore } from "../lib/oauth-codes";
+import {
+  isRegisteredRedirectUri,
+  type ClientStore,
+} from "../lib/oauth-clients";
+import {
+  issueAuthorizationCode,
+  type AuthorizationCodeStore,
+} from "../lib/oauth-codes";
 import {
   maskPhone,
   toLocalPhone,
@@ -34,16 +34,22 @@ import {
   verifyLoginOtpToken,
   NIGERIAN_PHONE_PATTERN,
 } from "../features/auth/service";
+import { bindSession, type SessionStore } from "../lib/session";
+import { ChowdeckApiError, ChowdeckClient } from "../lib/client";
+import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
+import logoPath from "../assets/images/chowbot-logo.svg" with { type: "file" };
+import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
+import fontPath from "../assets/fonts/plus-jakarta-sans-latin.woff2" with { type: "file" };
 
 export const AUTHORIZE_PHONE_PATH = `${AUTHORIZE_PATH}/phone`;
 export const AUTHORIZE_VERIFY_PATH = `${AUTHORIZE_PATH}/verify`;
 
-const PENDING_AUTHORIZATION_TTL_MS = 10 * 60 * 1000;
 const MAX_OTP_ATTEMPTS = 5;
 const FORM_BODY_LIMIT = "4kb";
-const PKCE_S256_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
-const STATE_PATTERN = /^[\x20-\x7E]{1,512}$/;
 const OTP_PATTERN = /^\d{4,8}$/;
+const STATE_PATTERN = /^[\x20-\x7E]{1,512}$/;
+const PKCE_S256_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+const PENDING_AUTHORIZATION_TTL_MS = 10 * 60 * 1000;
 
 export type AuthorizeLimits = {
   windowMs: number;
@@ -124,7 +130,9 @@ class PhoneRateLimiter {
 
   tryConsume(phone: string) {
     const now = Date.now();
-    const recent = (this.hits.get(phone) ?? []).filter((at) => at > now - this.windowMs);
+    const recent = (this.hits.get(phone) ?? []).filter(
+      (at) => at > now - this.windowMs,
+    );
     if (recent.length >= this.limit) {
       this.hits.set(phone, recent);
       return false;
@@ -143,7 +151,8 @@ const staticAsset = (path: string, contentType: string) => {
   const file = Bun.file(new URL(path, import.meta.url));
   return {
     contentType,
-    load: () => (bytes ??= file.arrayBuffer().then((buffer) => Buffer.from(buffer))),
+    load: () =>
+      (bytes ??= file.arrayBuffer().then((buffer) => Buffer.from(buffer))),
   };
 };
 
@@ -169,12 +178,9 @@ const readCookie = (req: Request, name: string) => {
 
 const redirectSource = (redirectUri: string) => {
   const url = new URL(redirectUri);
-  return url.protocol === "http:" || url.protocol === "https:" ? url.origin : url.protocol;
-};
-
-const redirectHost = (redirectUri: string) => {
-  const url = new URL(redirectUri);
-  return url.host || url.protocol.replace(/:$/, "");
+  return url.protocol === "http:" || url.protocol === "https:"
+    ? url.origin
+    : url.protocol;
 };
 
 /*
@@ -187,7 +193,10 @@ const sendPage = (
   html: string,
   redirectUri?: string,
 ) => {
-  const formAction = ["'self'", ...(redirectUri ? [redirectSource(redirectUri)] : [])].join(" ");
+  const formAction = [
+    "'self'",
+    ...(redirectUri ? [redirectSource(redirectUri)] : []),
+  ].join(" ");
   res
     .status(status)
     .set({
@@ -207,7 +216,10 @@ const sameResource = (value: string, resource: URL) =>
 type ValidationFailure = { ok: false; title: string; message: string };
 type ValidationSuccess = {
   ok: true;
-  pending: Omit<PendingAuthorization, "csrfToken" | "expiresAt" | "otpAttempts" | "verifying">;
+  pending: Omit<
+    PendingAuthorization,
+    "csrfToken" | "expiresAt" | "otpAttempts" | "verifying"
+  >;
 };
 
 const failure = (title: string, message: string): ValidationFailure => ({
@@ -228,7 +240,11 @@ const validateAuthorizationRequest = async (
 ): Promise<ValidationFailure | ValidationSuccess> => {
   const param = (name: string) => {
     const value = query[name];
-    return typeof value === "string" ? value : value === undefined ? undefined : null;
+    return typeof value === "string"
+      ? value
+      : value === undefined
+        ? undefined
+        : null;
   };
 
   const clientId = param("client_id");
@@ -239,7 +255,10 @@ const validateAuthorizationRequest = async (
 
   const redirectUri = param("redirect_uri");
   if (!redirectUri || !isRegisteredRedirectUri(client, redirectUri)) {
-    return failure("Invalid redirect", "This redirect address isn't registered.");
+    return failure(
+      "Invalid redirect",
+      "This redirect address isn't registered.",
+    );
   }
 
   if (param("response_type") !== "code") {
@@ -247,7 +266,11 @@ const validateAuthorizationRequest = async (
   }
 
   const codeChallenge = param("code_challenge");
-  if (param("code_challenge_method") !== "S256" || !codeChallenge || !PKCE_S256_CHALLENGE.test(codeChallenge)) {
+  if (
+    param("code_challenge_method") !== "S256" ||
+    !codeChallenge ||
+    !PKCE_S256_CHALLENGE.test(codeChallenge)
+  ) {
     return failure("Unsupported request", "PKCE with S256 is required.");
   }
 
@@ -257,7 +280,10 @@ const validateAuthorizationRequest = async (
   }
 
   const resource = param("resource");
-  if (resource === null || (resource !== undefined && !sameResource(resource, resourceUrl))) {
+  if (
+    resource === null ||
+    (resource !== undefined && !sameResource(resource, resourceUrl))
+  ) {
     return failure("Invalid request", "Wrong resource for this server.");
   }
 
@@ -274,7 +300,9 @@ const validateAuthorizationRequest = async (
       codeChallenge,
       resource: resourceUrl.href,
       scopes: [],
-      ...(client.client_name !== undefined && { clientName: client.client_name }),
+      ...(client.client_name !== undefined && {
+        clientName: client.client_name,
+      }),
     },
   };
 };
@@ -315,8 +343,13 @@ export const createAuthorizeRouter = ({
 }: AuthorizeRouterOptions) => {
   const limits = { ...DEFAULT_AUTHORIZE_LIMITS, ...limitOverrides };
   const pendingAuthorizations = new PendingAuthorizationStore();
-  const phoneLimiter = new PhoneRateLimiter(limits.otpRequestsPerPhone, limits.windowMs);
-  const cookieName = secureCookies ? "__Host-chowbot_authorization" : "chowbot_authorization";
+  const phoneLimiter = new PhoneRateLimiter(
+    limits.otpRequestsPerPhone,
+    limits.windowMs,
+  );
+  const cookieName = secureCookies
+    ? "__Host-chowbot_authorization"
+    : "chowbot_authorization";
 
   const ipLimiter = (limit: number) =>
     rateLimit({
@@ -325,28 +358,45 @@ export const createAuthorizeRouter = ({
       standardHeaders: "draft-7",
       legacyHeaders: false,
       handler: (_req, res) =>
-        sendPage(res, 429, errorPage("Too many attempts", "Wait a few minutes and try again.")),
+        sendPage(
+          res,
+          429,
+          errorPage("Too many attempts", "Wait a few minutes and try again."),
+        ),
     });
 
-  const formParser = express.urlencoded({ extended: false, limit: FORM_BODY_LIMIT });
+  const formParser = express.urlencoded({
+    extended: false,
+    limit: FORM_BODY_LIMIT,
+  });
 
   const contextOf = (pending: PendingAuthorization): AuthorizationContext => ({
     clientName: pending.clientName,
-    redirectHost: redirectHost(pending.redirectUri),
     csrfToken: pending.csrfToken,
   });
 
   const clearCookie = (res: ExpressResponse) =>
-    res.clearCookie(cookieName, { path: "/", httpOnly: true, sameSite: "strict", secure: secureCookies });
+    res.clearCookie(cookieName, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "strict",
+      secure: secureCookies,
+    });
 
   const sendExpired = (res: ExpressResponse) =>
-    sendPage(res, 403, errorPage("Sign-in expired", "Start again from your assistant."));
+    sendPage(
+      res,
+      403,
+      errorPage("Sign-in expired", "Start again from your assistant."),
+    );
 
   const loadPending = (req: Request) => {
     const id = readCookie(req, cookieName);
     const pending = id ? pendingAuthorizations.get(id) : undefined;
-    const csrfToken = typeof req.body?.csrf_token === "string" ? req.body.csrf_token : "";
-    if (!id || !pending || !safeEqual(csrfToken, pending.csrfToken)) return undefined;
+    const csrfToken =
+      typeof req.body?.csrf_token === "string" ? req.body.csrf_token : "";
+    if (!id || !pending || !safeEqual(csrfToken, pending.csrfToken))
+      return undefined;
     return { id, pending };
   };
 
@@ -365,8 +415,13 @@ export const createAuthorizeRouter = ({
   }
 
   router.get(AUTHORIZE_PATH, useGolbalRateLimiter, async (req, res) => {
-    const result = await validateAuthorizationRequest(req.query, clients, resourceUrl);
-    if (!result.ok) return sendPage(res, 400, errorPage(result.title, result.message));
+    const result = await validateAuthorizationRequest(
+      req.query,
+      clients,
+      resourceUrl,
+    );
+    if (!result.ok)
+      return sendPage(res, 400, errorPage(result.title, result.message));
 
     const pending: PendingAuthorization = {
       ...result.pending,
@@ -397,31 +452,61 @@ export const createAuthorizeRouter = ({
       const { pending } = loaded;
       const context = contextOf(pending);
 
-      const phone = typeof req.body.phone === "string" ? req.body.phone.replace(/[\s-]/g, "") : "";
+      const phone =
+        typeof req.body.phone === "string"
+          ? req.body.phone.replace(/[\s-]/g, "")
+          : "";
       if (!NIGERIAN_PHONE_PATTERN.test(phone)) {
-        return sendPage(res, 400, phonePage(context, "Enter a valid Nigerian mobile number, e.g. 08012345678."), pending.redirectUri);
+        return sendPage(
+          res,
+          400,
+          phonePage(
+            context,
+            "Enter a valid Nigerian mobile number, e.g. 08012345678.",
+          ),
+          pending.redirectUri,
+        );
       }
 
       const localPhone = toLocalPhone(phone);
       if (!phoneLimiter.tryConsume(localPhone)) {
-        return sendPage(res, 429, phonePage(context, "Too many codes have been requested for this number. Please wait and try again."), pending.redirectUri);
+        return sendPage(
+          res,
+          429,
+          phonePage(
+            context,
+            "Too many codes have been requested for this number. Please wait and try again.",
+          ),
+          pending.redirectUri,
+        );
       }
 
       try {
         await sendLoginOtp(chowdeck, localPhone);
       } catch (error) {
-        logger.warn("Authorization OTP request failed:", describeFailure(error));
+        logger.warn(
+          "Authorization OTP request failed:",
+          describeFailure(error),
+        );
         return sendPage(
           res,
           isClientError(error) ? 400 : 502,
-          phonePage(context, "Chowdeck could not send a code to that number. Check it and try again."),
+          phonePage(
+            context,
+            "Chowdeck could not send a code to that number. Check it and try again.",
+          ),
           pending.redirectUri,
         );
       }
 
       pending.phone = localPhone;
       pending.otpAttempts = 0;
-      sendPage(res, 200, otpPage(context, maskPhone(localPhone)), pending.redirectUri);
+      sendPage(
+        res,
+        200,
+        otpPage(context, maskPhone(localPhone)),
+        pending.redirectUri,
+      );
     },
   );
 
@@ -438,18 +523,35 @@ export const createAuthorizeRouter = ({
       const maskedPhone = maskPhone(phone);
 
       if (pending.verifying) {
-        return sendPage(res, 409, errorPage("Sign-in in progress", "Your code is being checked."));
+        return sendPage(
+          res,
+          409,
+          errorPage("Sign-in in progress", "Your code is being checked."),
+        );
       }
 
       const otp = typeof req.body.otp === "string" ? req.body.otp.trim() : "";
       if (!OTP_PATTERN.test(otp)) {
-        return sendPage(res, 400, otpPage(context, maskedPhone, "Enter the numeric code Chowdeck sent you."), pending.redirectUri);
+        return sendPage(
+          res,
+          400,
+          otpPage(
+            context,
+            maskedPhone,
+            "Enter the numeric code Chowdeck sent you.",
+          ),
+          pending.redirectUri,
+        );
       }
 
       if (pending.otpAttempts >= MAX_OTP_ATTEMPTS) {
         pendingAuthorizations.delete(id);
         clearCookie(res);
-        return sendPage(res, 429, errorPage("Too many attempts", "Start again from your assistant."));
+        return sendPage(
+          res,
+          429,
+          errorPage("Too many attempts", "Start again from your assistant."),
+        );
       }
 
       pending.otpAttempts += 1;
@@ -460,11 +562,18 @@ export const createAuthorizeRouter = ({
         ({ token } = await verifyLoginOtpToken(chowdeck, phone, otp));
       } catch (error) {
         pending.verifying = false;
-        logger.warn("Authorization OTP verification failed:", describeFailure(error));
+        logger.warn(
+          "Authorization OTP verification failed:",
+          describeFailure(error),
+        );
         return sendPage(
           res,
           isClientError(error) ? 400 : 502,
-          otpPage(context, maskedPhone, "That code did not work. Check it and try again."),
+          otpPage(
+            context,
+            maskedPhone,
+            "That code did not work. Check it and try again.",
+          ),
           pending.redirectUri,
         );
       }
@@ -488,8 +597,15 @@ export const createAuthorizeRouter = ({
           scopes: pending.scopes,
         });
       } catch (error) {
-        logger.error("Authorization completion failed:", describeFailure(error));
-        return sendPage(res, 500, errorPage("Sign-in failed", "Start again from your assistant."));
+        logger.error(
+          "Authorization completion failed:",
+          describeFailure(error),
+        );
+        return sendPage(
+          res,
+          500,
+          errorPage("Sign-in failed", "Start again from your assistant."),
+        );
       }
 
       const redirect = new URL(pending.redirectUri);
@@ -502,7 +618,11 @@ export const createAuthorizeRouter = ({
   const handleFormError: ErrorRequestHandler = (error, _req, res, next) => {
     if (res.headersSent) return next(error);
     logger.warn("Authorization form rejected:", describeFailure(error));
-    sendPage(res, 400, errorPage("Invalid request", "Start again from your assistant."));
+    sendPage(
+      res,
+      400,
+      errorPage("Invalid request", "Start again from your assistant."),
+    );
   };
 
   router.use(AUTHORIZE_PATH, handleFormError);

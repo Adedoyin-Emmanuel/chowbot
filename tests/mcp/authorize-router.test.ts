@@ -263,7 +263,6 @@ describe("login initiation", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(html).toContain('action="/authorize/phone"');
-    expect(html).toContain("app.example.com");
   });
 
   test("uses the self-hosted brand font and loads nothing from third parties", async () => {
