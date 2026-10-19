@@ -1,4 +1,8 @@
 import { SQL } from "bun";
+import { lte, sql as raw } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/bun-sql";
+
+import * as schema from "./schema";
 
 export class DatabaseConfigError extends Error {
   constructor(message: string) {
@@ -97,7 +101,17 @@ export const connectDatabase = async (
   return sql;
 };
 
+export const createDrizzle = (sql: SQL) => drizzle({ client: sql, schema });
+
+export type Database = ReturnType<typeof createDrizzle>;
+
+export const toEpochSeconds = (date: Date) => Math.floor(date.getTime() / 1000);
+
+export const fromEpochSeconds = (seconds: number) => new Date(seconds * 1000);
+
 export const deleteExpiredRecords = async (sql: SQL) => {
-  await sql`DELETE FROM oauth_authorization_codes WHERE expires_at <= now()`;
-  await sql`DELETE FROM oauth_access_tokens WHERE expires_at <= now()`;
+  const db = createDrizzle(sql);
+  const { oauthAccessTokens, oauthAuthorizationCodes } = schema;
+  await db.delete(oauthAuthorizationCodes).where(lte(oauthAuthorizationCodes.expiresAt, raw`now()`));
+  await db.delete(oauthAccessTokens).where(lte(oauthAccessTokens.expiresAt, raw`now()`));
 };

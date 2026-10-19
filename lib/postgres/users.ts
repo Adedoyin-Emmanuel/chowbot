@@ -1,6 +1,8 @@
-import type { SQL } from "bun";
+import { sql } from "drizzle-orm";
 
+import { users } from "./schema";
 import type { UserStore } from "../users";
+import type { Database } from "./database";
 import type { Keyring } from "../encryption";
 
 /*
@@ -10,17 +12,16 @@ import type { Keyring } from "../encryption";
  */
 export class PostgresUserStore implements UserStore {
   constructor(
-    private readonly sql: SQL,
+    private readonly db: Database,
     private readonly keyring: Keyring,
   ) {}
 
   async findOrCreateByPhone(phone: string) {
-    const [row] = await this.sql`
-      INSERT INTO users (id, phone_hash)
-      VALUES (${crypto.randomUUID()}, ${this.keyring.hashPhone(phone)})
-      ON CONFLICT (phone_hash) DO UPDATE SET phone_hash = EXCLUDED.phone_hash
-      RETURNING id
-    `;
-    return row.id as string;
+    const [row] = await this.db
+      .insert(users)
+      .values({ phoneHash: this.keyring.hashPhone(phone) })
+      .onConflictDoUpdate({ target: users.phoneHash, set: { phoneHash: sql`excluded.phone_hash` } })
+      .returning({ id: users.id });
+    return row!.id;
   }
 }

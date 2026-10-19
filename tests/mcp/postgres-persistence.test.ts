@@ -14,9 +14,9 @@ import { textResult } from "../../utils/tool-result";
 import { migrate } from "../../lib/postgres/migrations";
 import { createPostgresStores } from "../../lib/postgres";
 import { hashToken, issueAccessToken } from "../../lib/oauth";
-import { createTestSchema, describePostgres } from "../helpers/postgres";
+import { createTestDatabase, describePostgres } from "../helpers/postgres";
 
-type TestSchema = Awaited<ReturnType<typeof createTestSchema>>;
+type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
 type Instance = {
   baseUrl: string;
   server: HttpServer;
@@ -29,7 +29,7 @@ const REDIRECT_URI = "https://app.example.com/oauth/callback";
 const CODE_CHALLENGE = new Bun.CryptoHasher("sha256").update("v".repeat(64)).digest("base64url");
 const MASTER_KEY = randomBytes(32);
 
-let schema: TestSchema;
+let database: TestDatabase;
 let chowdeck: BunServer<undefined>;
 const instances: Instance[] = [];
 
@@ -46,7 +46,7 @@ const sessionProbe = ({ session }: ServerOptions) => {
  * for a restarted process or a second server sharing the same database.
  */
 const startInstance = async () => {
-  const stores = createPostgresStores(schema.connect(), createKeyring(MASTER_KEY));
+  const stores = createPostgresStores(database.connect(), createKeyring(MASTER_KEY));
   const app = createHttpApp({
     serverUrl: SERVER_URL,
     issuerUrl: ISSUER_URL,
@@ -111,8 +111,8 @@ const callWhoami = async (instance: Instance, token: string) => {
 
 describePostgres("hosted HTTP server on PostgreSQL", () => {
   beforeAll(async () => {
-    schema = await createTestSchema();
-    await migrate(schema.connect());
+    database = await createTestDatabase();
+    await migrate(database.connect());
     chowdeck = Bun.serve({
       port: 0,
       async fetch(req) {
@@ -127,7 +127,7 @@ describePostgres("hosted HTTP server on PostgreSQL", () => {
   afterAll(async () => {
     for (const { server } of instances) server.close();
     chowdeck.stop(true);
-    await schema.drop();
+    await database.drop();
   });
 
   test("clients, users, sessions and codes survive a restart and are shared across instances", async () => {
@@ -187,7 +187,7 @@ describePostgres("hosted HTTP server on PostgreSQL", () => {
     expect(await callWhoami(serving, aliceToken)).toBe("chowdeck-token-08011112222");
     expect(await callWhoami(serving, bobToken)).toBe("chowdeck-token-08033334444");
 
-    const rows = await schema.connect()`SELECT token_hash FROM oauth_access_tokens`;
+    const rows = await database.connect()`SELECT token_hash FROM oauth_access_tokens`;
     expect(JSON.stringify(rows)).not.toContain(aliceToken);
   });
 });

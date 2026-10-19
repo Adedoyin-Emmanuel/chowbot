@@ -7,15 +7,15 @@ import { registerClient } from "../../../lib/oauth-clients";
 import { issueAuthorizationCode } from "../../../lib/oauth-codes";
 import { migrate } from "../../../lib/postgres/migrations";
 import { createPostgresStores } from "../../../lib/postgres";
-import { createTestSchema, describePostgres } from "../../helpers/postgres";
+import { createTestDatabase, describePostgres } from "../../helpers/postgres";
 
-type TestSchema = Awaited<ReturnType<typeof createTestSchema>>;
+type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
 
 const MASTER_KEY = randomBytes(32);
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
-let schema: TestSchema;
-let sql: ReturnType<TestSchema["connect"]>;
+let database: TestDatabase;
+let sql: ReturnType<TestDatabase["connect"]>;
 
 const freshStores = (key = MASTER_KEY) => createPostgresStores(sql, createKeyring(key));
 
@@ -31,13 +31,13 @@ const createUserAndClient = async (phone: string) => {
 
 describePostgres("PostgreSQL stores", () => {
   beforeAll(async () => {
-    schema = await createTestSchema();
-    sql = schema.connect();
+    database = await createTestDatabase();
+    sql = database.connect();
     await migrate(sql);
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database.drop();
   });
 
   test("clients persist across store and connection re-instantiation", async () => {
@@ -46,7 +46,7 @@ describePostgres("PostgreSQL stores", () => {
       redirect_uris: ["https://claude.ai/api/mcp/auth_callback", 'com.example.app:/cb?x="1"'],
     });
 
-    const reconnected = schema.connect();
+    const reconnected = database.connect();
     try {
       expect(await createPostgresStores(reconnected, createKeyring(MASTER_KEY)).clients.get(client.client_id)).toEqual(client);
     } finally {

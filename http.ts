@@ -19,11 +19,8 @@ const start = async () => {
   const databaseConfig = readDatabaseConfig();
   const sql = await connectDatabase(databaseConfig);
 
-  const applied = await migrate(sql);
-  logger.info(
-    `Connected to PostgreSQL at ${describeDatabase(databaseConfig.url)}; ` +
-      (applied.length ? `applied migrations ${applied.join(", ")}` : "schema up to date"),
-  );
+  await migrate(sql);
+  logger.info(`Connected to PostgreSQL at ${describeDatabase(databaseConfig.url)}`);
 
   const sweepExpired = () =>
     deleteExpiredRecords(sql).catch((error) =>

@@ -1,39 +1,40 @@
-import type { SQL } from "bun";
+import { eq } from "drizzle-orm";
 
+import { oauthAccessTokens } from "./schema";
 import type { AccessTokenRecord, AccessTokenStore } from "../oauth";
+import { fromEpochSeconds, toEpochSeconds, type Database } from "./database";
 
 export class PostgresAccessTokenStore implements AccessTokenStore {
-  constructor(private readonly sql: SQL) {}
+  constructor(private readonly db: Database) {}
 
   async get(tokenHash: string): Promise<AccessTokenRecord | undefined> {
-    const [row] = await this.sql`
-      SELECT user_id, client_id, scopes, resource,
-        floor(extract(epoch FROM expires_at))::float8 AS expires_at
-      FROM oauth_access_tokens
-      WHERE token_hash = ${tokenHash}
-    `;
+    const [row] = await this.db
+      .select()
+      .from(oauthAccessTokens)
+      .where(eq(oauthAccessTokens.tokenHash, tokenHash));
     if (!row) return undefined;
 
     return {
-      userId: row.user_id,
-      clientId: row.client_id,
+      userId: row.userId,
+      clientId: row.clientId,
       scopes: row.scopes,
       resource: row.resource,
-      expiresAt: row.expires_at,
+      expiresAt: toEpochSeconds(row.expiresAt),
     };
   }
 
   async save(tokenHash: string, record: AccessTokenRecord) {
-    await this.sql`
-      INSERT INTO oauth_access_tokens (token_hash, user_id, client_id, resource, scopes, expires_at)
-      VALUES (
-        ${tokenHash}, ${record.userId}, ${record.clientId}, ${record.resource},
-        ${record.scopes}::jsonb, to_timestamp(${record.expiresAt})
-      )
-    `;
+    await this.db.insert(oauthAccessTokens).values({
+      tokenHash,
+      userId: record.userId,
+      clientId: record.clientId,
+      resource: record.resource,
+      scopes: record.scopes,
+      expiresAt: fromEpochSeconds(record.expiresAt),
+    });
   }
 
   async revoke(tokenHash: string) {
-    await this.sql`DELETE FROM oauth_access_tokens WHERE token_hash = ${tokenHash}`;
+    await this.db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.tokenHash, tokenHash));
   }
 }
