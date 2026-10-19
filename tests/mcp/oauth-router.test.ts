@@ -4,7 +4,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { InMemorySessionStore } from "../../lib/session";
 import { InMemoryAccessTokenStore } from "../../lib/oauth";
+import { InMemoryUserStore } from "../../lib/users";
 import { InMemoryClientStore } from "../../lib/oauth-clients";
+import { InMemoryAuthorizationCodeStore } from "../../lib/oauth-codes";
 import { assertIssuerHostedBy, createHttpApp } from "../../mcp/http-app";
 
 const SERVER_URL = new URL("http://localhost:2800/mcp");
@@ -19,7 +21,9 @@ beforeAll(async () => {
   const app = createHttpApp({
     serverUrl: SERVER_URL,
     issuerUrl: ISSUER_URL,
+    users: new InMemoryUserStore(),
     clients,
+    codes: new InMemoryAuthorizationCodeStore(),
     tokens: new InMemoryAccessTokenStore(),
     sessions: new InMemorySessionStore(),
   });
@@ -44,18 +48,25 @@ const register = (body: string, contentType = "application/json") =>
   });
 
 describe("authorization server metadata", () => {
-  test("advertises only the issuer, required endpoints and registration", async () => {
+  test("advertises S256 PKCE and only supported capabilities", async () => {
     const response = await fetch(`${baseUrl}/.well-known/oauth-authorization-server`);
+    const metadata = await json(response);
 
     expect(response.status).toBe(200);
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
-    expect(await response.json()).toEqual({
+    expect(metadata).toEqual({
       issuer: "http://localhost:2800",
       authorization_endpoint: "http://localhost:2800/authorize",
       token_endpoint: "http://localhost:2800/token",
       registration_endpoint: "http://localhost:2800/register",
       response_types_supported: ["code"],
+      response_modes_supported: ["query"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["none"],
     });
+    expect(metadata.grant_types_supported).not.toContain("implicit");
+    expect(metadata.code_challenge_methods_supported).not.toContain("plain");
   });
 
   test("names the same issuer as the protected-resource metadata", async () => {
@@ -164,8 +175,8 @@ describe("POST /register", () => {
 });
 
 describe("endpoints not implemented in this milestone", () => {
-  test.each(["/authorize", "/token"])("%s is not served yet", async (path) => {
-    const response = await fetch(`${baseUrl}${path}`, { method: path === "/token" ? "POST" : "GET" });
+  test("/token is not served yet", async () => {
+    const response = await fetch(`${baseUrl}/token`, { method: "POST" });
 
     expect(response.status).toBe(404);
   });

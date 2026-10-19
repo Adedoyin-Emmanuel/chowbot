@@ -29,6 +29,36 @@ const sessionToken = (body: unknown) => {
   return typeof token === "string" && token ? token : undefined;
 };
 
+export const sendLoginOtp = async (client: ChowdeckClient, phone: string) => {
+  const localPhone = toLocalPhone(phone);
+  await client.request(LOGIN_PATH, {
+    method: "POST",
+    body: { phone: localPhone, ...LOGIN_DEFAULTS },
+  });
+  return localPhone;
+};
+
+export const verifyLoginOtpToken = async (
+  client: ChowdeckClient,
+  phone: string,
+  otp: string,
+) => {
+  const localPhone = toLocalPhone(phone);
+  const body = await client.request(VERIFY_OTP_PATH, {
+    method: "POST",
+    body: { otp, phone: localPhone, ...LOGIN_DEFAULTS },
+  });
+
+  const token = sessionToken(body);
+  if (!token) {
+    throw new ChowdeckApiError(
+      "invalid_response",
+      `POST ${VERIFY_OTP_PATH} did not return a session token`,
+    );
+  }
+  return { phone: localPhone, token };
+};
+
 class AuthService {
   constructor(
     private readonly session: UserSession,
@@ -36,29 +66,15 @@ class AuthService {
   ) {}
 
   async requestLoginOtp(phone: string) {
-    const localPhone = toLocalPhone(phone);
-    await this.client.request(LOGIN_PATH, {
-      method: "POST",
-      body: { phone: localPhone, ...LOGIN_DEFAULTS },
-    });
-    return { phone: maskPhone(localPhone) };
+    return { phone: maskPhone(await sendLoginOtp(this.client, phone)) };
   }
 
   async verifyLoginOtp(phone: string, otp: string) {
-    const localPhone = toLocalPhone(phone);
-    const body = await this.client.request(VERIFY_OTP_PATH, {
-      method: "POST",
-      body: { otp, phone: localPhone, ...LOGIN_DEFAULTS },
-    });
-
-    const token = sessionToken(body);
-    if (!token) {
-      throw new ChowdeckApiError(
-        "invalid_response",
-        `POST ${VERIFY_OTP_PATH} did not return a session token`,
-      );
-    }
-
+    const { phone: localPhone, token } = await verifyLoginOtpToken(
+      this.client,
+      phone,
+      otp,
+    );
     const existing = await this.session.get();
     await this.session.save({ ...existing, token, phone: localPhone });
     return { phone: maskPhone(localPhone) };

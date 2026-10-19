@@ -17,18 +17,29 @@ import {
   createOAuthRouter,
   buildAuthorizationServerMetadata,
 } from "./oauth-router";
+import {
+  createAuthorizeRouter,
+  type AuthorizeLimits,
+} from "./authorize-router";
+import type { UserStore } from "../lib/users";
+import type { ChowdeckClient } from "../lib/client";
 import type { ClientStore } from "../lib/oauth-clients";
 import { createServer, type ServerOptions } from "./server";
 import { bindSession, type SessionStore } from "../lib/session";
+import type { AuthorizationCodeStore } from "../lib/oauth-codes";
 import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
 import { AccessTokenVerifier, type AccessTokenStore } from "../lib/oauth";
 
 export type HttpAppOptions = {
   serverUrl: URL;
   issuerUrl: URL;
+  users: UserStore;
   clients: ClientStore;
   sessions: SessionStore;
   tokens: AccessTokenStore;
+  chowdeck?: ChowdeckClient;
+  codes: AuthorizationCodeStore;
+  authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
 
@@ -67,9 +78,13 @@ const userIdOf = (authInfo?: AuthInfo) => {
 export const createHttpApp = ({
   serverUrl,
   issuerUrl,
+  users,
   clients,
   tokens,
+  codes,
   sessions,
+  chowdeck,
+  authorizeLimits,
   serverFactory = createServer,
 }: HttpAppOptions) => {
   assertIssuerHostedBy(issuerUrl, serverUrl);
@@ -111,6 +126,18 @@ export const createHttpApp = ({
   const app = express();
 
   app.use(createOAuthRouter({ metadata: authorizationServer, clients }));
+  app.use(
+    createAuthorizeRouter({
+      resourceUrl: serverUrl,
+      secureCookies: issuerUrl.protocol === "https:",
+      users,
+      clients,
+      sessions,
+      codes,
+      chowdeck,
+      limits: authorizeLimits,
+    }),
+  );
 
   app.get(
     [new URL(resourceMetadataUrl).pathname, PROTECTED_RESOURCE_ROOT_PATH],

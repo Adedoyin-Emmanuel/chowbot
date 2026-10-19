@@ -79,12 +79,20 @@ const serverFor = (session?: UserSession) => () => {
 const textOf = (result: { content: { text: string }[] }) => result.content[0]!.text;
 
 describe("auth tools", () => {
-  test("are registered on the ChowBot server", async () => {
-    const { tools } = await rpc(() => createServer(), "tools/list", {});
+  test("are registered when chat login is enabled (stdio)", async () => {
+    const { tools } = await rpc(() => createServer({ enableChatLogin: true }), "tools/list", {});
     const names = tools.map((tool: { name: string }) => tool.name);
 
     expect(names).toContain("request_login_otp");
     expect(names).toContain("verify_login_otp");
+  });
+
+  test("are not registered by default (remote HTTP)", async () => {
+    const { tools } = await rpc(() => createServer(), "tools/list", {});
+    const names = tools.map((tool: { name: string }) => tool.name);
+
+    expect(names).not.toContain("request_login_otp");
+    expect(names).not.toContain("verify_login_otp");
   });
 
   test("request_login_otp sends a normalised phone and masks it in the result", async () => {

@@ -8,7 +8,9 @@ import { textResult } from "../../utils/tool-result";
 import type { ServerOptions } from "../../mcp/server";
 import { createHttpApp } from "../../mcp/http-app";
 import { InMemorySessionStore } from "../../lib/session";
+import { InMemoryUserStore } from "../../lib/users";
 import { InMemoryClientStore } from "../../lib/oauth-clients";
+import { InMemoryAuthorizationCodeStore } from "../../lib/oauth-codes";
 import {
   issueAccessToken,
   InMemoryAccessTokenStore,
@@ -102,7 +104,9 @@ beforeAll(async () => {
   const options = {
     serverUrl: SERVER_URL,
     issuerUrl: ISSUER_URL,
+    users: new InMemoryUserStore(),
     clients: new InMemoryClientStore(),
+    codes: new InMemoryAuthorizationCodeStore(),
     tokens,
     sessions,
   };
@@ -176,14 +180,15 @@ describe("/mcp bearer authentication", () => {
     expect(factoryCalls).toBe(0);
   });
 
-  test("lets a valid token reach the real ChowBot server", async () => {
+  test("lets a valid token reach the real ChowBot server without chat login tools", async () => {
     const response = await postMcp(defaultApp, listTools, `Bearer ${await issue()}`);
     const { tools } = await rpcResult(response);
     const names = tools.map((tool: { name: string }) => tool.name);
 
     expect(response.status).toBe(200);
     expect(names).toContain("search_restaurants");
-    expect(names).toContain("verify_login_otp");
+    expect(names).not.toContain("request_login_otp");
+    expect(names).not.toContain("verify_login_otp");
   });
 
   test("binds the session of the user the token belongs to", async () => {

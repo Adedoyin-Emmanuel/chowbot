@@ -22,10 +22,11 @@ export const AUTHORIZATION_SERVER_METADATA_PATH =
 const REGISTRATION_BODY_LIMIT = "16kb";
 
 /*
- * authorization_endpoint and token_endpoint are required by RFC 8414 and the
- * SDK type, so they are advertised ahead of their implementation. Optional
- * capabilities (PKCE methods, grant types, auth methods) are only added once
- * the endpoints that honour them exist.
+ * token_endpoint is required by RFC 8414 and the SDK type, so it is
+ * advertised ahead of its implementation. grant_types, response_modes and
+ * token_endpoint_auth_methods are stated explicitly because their RFC 8414
+ * defaults would otherwise imply implicit, fragment and client_secret_basic
+ * support, none of which ChowBot offers.
  */
 export const buildAuthorizationServerMetadata = (
   issuerUrl: URL,
@@ -37,6 +38,10 @@ export const buildAuthorizationServerMetadata = (
     token_endpoint: `${issuer}${TOKEN_PATH}`,
     registration_endpoint: `${issuer}${REGISTRATION_PATH}`,
     response_types_supported: ["code"],
+    response_modes_supported: ["query"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none"],
   };
 };
 

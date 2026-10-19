@@ -12,7 +12,10 @@ const sessions = new InMemorySessionStore();
  * connection gets its own principal.
  */
 const createConnectionServer = () =>
-  createServer({ session: bindSession(sessions, crypto.randomUUID()) });
+  createServer({
+    session: bindSession(sessions, crypto.randomUUID()),
+    enableChatLogin: true,
+  });
 
 serveStdio(createConnectionServer, {
   onerror: (error) => {
