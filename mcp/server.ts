@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { registerArithmeticTool } from "../features/arithmetic/tools";
+import { registerMenuTools } from "../features/menus/tools";
 import { registerRestaurantTools } from "../features/restaurants/tools";
 
 export const createServer = () => {
@@ -10,6 +11,7 @@ export const createServer = () => {
 
   registerArithmeticTool(server);
   registerRestaurantTools(server);
+  registerMenuTools(server);
 
   return server;
 };

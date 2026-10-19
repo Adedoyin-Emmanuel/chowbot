@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
 
 import RestaurantService from "./service";
 import { logger } from "../../utils/logger";
+import { textResult } from "../../utils/tool-result";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
 const searchRestaurantsSchema = {
@@ -27,11 +28,6 @@ const searchRestaurantsSchema = {
     .default(20)
     .describe("Maximum number of restaurants to return"),
 };
-
-const textResult = (text: string, isError = false): CallToolResult => ({
-  content: [{ type: "text", text }],
-  ...(isError && { isError }),
-});
 
 export const registerRestaurantTools = (
   server: McpServer,

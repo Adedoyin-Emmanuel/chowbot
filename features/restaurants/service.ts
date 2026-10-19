@@ -1,4 +1,5 @@
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
+import { isRecord, pickScalarFields, type ScalarValue } from "../../utils/object";
 
 export type RestaurantSearchParams = {
   page?: number;
@@ -7,9 +8,7 @@ export type RestaurantSearchParams = {
   addressId: number;
 };
 
-type SummaryValue = string | number | boolean | null;
-
-export type RestaurantSummary = Record<string, SummaryValue>;
+export type RestaurantSummary = Record<string, ScalarValue>;
 
 export type RestaurantSearchResult = {
   page?: number;
@@ -35,20 +34,8 @@ const SUMMARY_FIELDS = [
   "minimum_order",
 ] as const;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const isSummaryValue = (value: unknown): value is SummaryValue =>
-  value === null || ["string", "number", "boolean"].includes(typeof value);
-
-const summarizeVendor = (vendor: Record<string, unknown>) => {
-  const summary: RestaurantSummary = {};
-  for (const field of SUMMARY_FIELDS) {
-    const value = vendor[field];
-    if (isSummaryValue(value)) summary[field] = value;
-  }
-  return summary;
-};
+const summarizeVendor = (vendor: Record<string, unknown>): RestaurantSummary =>
+  pickScalarFields(vendor, SUMMARY_FIELDS);
 
 class RestaurantService {
   constructor(private readonly client = new ChowdeckClient()) {}

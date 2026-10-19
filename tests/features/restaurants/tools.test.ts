@@ -7,16 +7,12 @@ import {
   beforeEach,
 } from "bun:test";
 import type { Server } from "bun";
-import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
 
+import { callTool, rpc } from "../../helpers/mcp";
 import { createServer } from "../../../mcp/server";
 import { ChowdeckClient } from "../../../lib/client";
 import { registerRestaurantTools } from "../../../features/restaurants/tools";
-
-type ToolResult = {
-  isError?: boolean;
-  content: { type: string; text: string }[];
-};
 
 let upstream: Server<undefined>;
 let upstreamResponse: () => Response;
@@ -47,32 +43,8 @@ const createTestServer = () => {
   return server;
 };
 
-const rpc = async (
-  factory: () => McpServer,
-  method: string,
-  params: Record<string, unknown>,
-) => {
-  const handler = createMcpHandler(factory);
-  const response = await handler.fetch(
-    new Request("http://localhost/mcp", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        "mcp-protocol-version": "2025-06-18",
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    }),
-  );
-  const text = await response.text();
-  await handler.close();
-
-  const data = text.split("\n").find((line) => line.startsWith("data: "));
-  return JSON.parse(data ? data.slice("data: ".length) : text).result;
-};
-
-const callSearch = (args: Record<string, unknown>): Promise<ToolResult> =>
-  rpc(createTestServer, "tools/call", { name: "search_restaurants", arguments: args });
+const callSearch = (args: Record<string, unknown>) =>
+  callTool(createTestServer, "search_restaurants", args);
 
 describe("search_restaurants", () => {
   test("is registered on the ChowFlow server", async () => {
