@@ -8,7 +8,7 @@ import {
 } from "bun:test";
 import type { Server } from "bun";
 
-import { ChowdeckApiError, ChowdeckClient } from "./client";
+import { ChowdeckApiError, ChowdeckClient } from "../../../features/chowdeck/client";
 
 type ReceivedRequest = {
   url: URL;
