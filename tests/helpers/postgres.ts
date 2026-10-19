@@ -25,7 +25,7 @@ export const createTestDatabase = async () => {
 
   const url = new URL(TEST_DATABASE_URL!);
   url.pathname = `/${name}`;
-  const config = { url: url.href, poolMax: 10, connectionTimeoutSeconds: 5 };
+  const config = { url: url.href, poolMax: 4, connectionTimeoutSeconds: 5 };
   const connections: SQL[] = [];
   const connect = () => {
     const sql = createDatabase(config);

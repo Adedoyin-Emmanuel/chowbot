@@ -174,10 +174,11 @@ describe("POST /register", () => {
   });
 });
 
-describe("endpoints not implemented in this milestone", () => {
-  test("/token is not served yet", async () => {
+describe("advertised endpoints", () => {
+  test("/token is served and refuses an empty request", async () => {
     const response = await fetch(`${baseUrl}/token`, { method: "POST" });
 
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("no-store");
   });
 });

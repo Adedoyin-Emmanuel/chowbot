@@ -43,18 +43,25 @@ export class InMemoryAccessTokenStore implements AccessTokenStore {
 export const hashToken = (token: string) =>
   new Bun.CryptoHasher("sha256").update(token).digest("hex");
 
+export const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
+
+export const generateAccessToken = () => {
+  const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+    "base64url",
+  );
+  return { token, tokenHash: hashToken(token) };
+};
+
 export const issueAccessToken = async (
   store: AccessTokenStore,
   record: AccessTokenRecord,
 ) => {
-  const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
-    "base64url",
-  );
-  await store.save(hashToken(token), record);
+  const { token, tokenHash } = generateAccessToken();
+  await store.save(tokenHash, record);
   return token;
 };
 
-const sameResource = (a: string, b: URL) => {
+export const sameResource = (a: string, b: URL) => {
   const normalise = (value: string) => {
     const url = new URL(value);
     url.hash = "";

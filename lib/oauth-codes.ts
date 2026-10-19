@@ -1,6 +1,23 @@
-import { hashToken } from "./oauth";
+import { timingSafeEqual } from "node:crypto";
+
+import { hashToken, type AccessTokenRecord, type AccessTokenStore } from "./oauth";
 
 export const AUTHORIZATION_CODE_TTL_SECONDS = 300;
+
+/*
+ * RFC 7636 §4.1: 43-128 characters from the unreserved set. Checked before
+ * a code is touched so a malformed request never consumes it.
+ */
+export const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
+
+export const pkceS256Challenge = (verifier: string) =>
+  new Bun.CryptoHasher("sha256").update(verifier).digest("base64url");
+
+export const verifyPkceS256 = (verifier: string, challenge: string) => {
+  const expected = Buffer.from(pkceS256Challenge(verifier));
+  const actual = Buffer.from(challenge);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+};
 
 export type AuthorizationCodeRecord = {
   userId: string;
@@ -42,6 +59,50 @@ export class InMemoryAuthorizationCodeStore implements AuthorizationCodeStore {
     return copyRecord(record);
   }
 }
+
+export type TokenIssue = { tokenHash: string; record: AccessTokenRecord };
+
+export type ExchangeDecision<T> = { result: T; issue?: TokenIssue };
+
+/*
+ * Redeems a code and stores the resulting access token as one unit of work.
+ * decide() inspects the consumed code: returning an issue stores that token,
+ * returning none still leaves the code consumed. If storing the token fails
+ * the code is restored, so a failed exchange can be retried. Resolves to
+ * undefined when the code is unknown, expired or already redeemed.
+ */
+export interface AuthorizationCodeExchange {
+  redeem<T>(
+    codeHash: string,
+    decide: (code: AuthorizationCodeRecord) => ExchangeDecision<T>,
+  ): Promise<T | undefined>;
+}
+
+/*
+ * Only atomic within a single process; intended for the in-memory stores.
+ * Hosted deployments use the PostgreSQL exchange, which runs in a
+ * database transaction.
+ */
+export const createInProcessCodeExchange = (
+  codes: AuthorizationCodeStore,
+  tokens: AccessTokenStore,
+): AuthorizationCodeExchange => ({
+  async redeem(codeHash, decide) {
+    const code = await codes.consume(codeHash);
+    if (!code) return undefined;
+
+    const { result, issue } = decide(code);
+    if (issue) {
+      try {
+        await tokens.save(issue.tokenHash, issue.record);
+      } catch (error) {
+        await codes.save(codeHash, code);
+        throw error;
+      }
+    }
+    return result;
+  },
+});
 
 export const issueAuthorizationCode = async (
   store: AuthorizationCodeStore,

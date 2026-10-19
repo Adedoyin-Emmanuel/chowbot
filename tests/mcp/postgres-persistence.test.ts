@@ -190,4 +190,41 @@ describePostgres("hosted HTTP server on PostgreSQL", () => {
     const rows = await database.connect()`SELECT token_hash FROM oauth_access_tokens`;
     expect(JSON.stringify(rows)).not.toContain(aliceToken);
   });
+
+  test("the full browser sign-in and /token exchange works across instances", async () => {
+    const authorizing = await startInstance();
+    const registration = await fetch(`${authorizing.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await registration.json()) as { client_id: string };
+    const code = await signIn(authorizing, clientId, "08055556666");
+
+    const exchanging = await startInstance();
+    const tokenResponse = await fetch(`${exchanging.baseUrl}/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: clientId,
+        code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: "v".repeat(64),
+        resource: SERVER_URL.href,
+      }).toString(),
+    });
+    const issued = (await tokenResponse.json()) as { access_token: string; token_type: string };
+
+    expect(tokenResponse.status).toBe(200);
+    expect(tokenResponse.headers.get("cache-control")).toBe("no-store");
+    expect(issued.token_type).toBe("Bearer");
+
+    const serving = await startInstance();
+    expect(await callWhoami(serving, issued.access_token)).toBe("chowdeck-token-08055556666");
+
+    const rows = await database.connect()`SELECT token_hash FROM oauth_access_tokens`;
+    expect(JSON.stringify(rows)).not.toContain(issued.access_token);
+    expect(JSON.stringify(rows)).toContain(hashToken(issued.access_token));
+  });
 });

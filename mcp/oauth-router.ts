@@ -22,11 +22,10 @@ export const AUTHORIZATION_SERVER_METADATA_PATH =
 const REGISTRATION_BODY_LIMIT = "16kb";
 
 /*
- * token_endpoint is required by RFC 8414 and the SDK type, so it is
- * advertised ahead of its implementation. grant_types, response_modes and
- * token_endpoint_auth_methods are stated explicitly because their RFC 8414
- * defaults would otherwise imply implicit, fragment and client_secret_basic
- * support, none of which ChowBot offers.
+ * grant_types, response_modes and token_endpoint_auth_methods are stated
+ * explicitly because their RFC 8414 defaults would otherwise imply
+ * implicit, fragment and client_secret_basic support, none of which ChowBot
+ * offers. refresh_token is not listed until refresh tokens are issued.
  */
 export const buildAuthorizationServerMetadata = (
   issuerUrl: URL,

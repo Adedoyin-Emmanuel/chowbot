@@ -22,14 +22,24 @@ import {
   type AuthorizeLimits,
 } from "./authorize-router";
 import type { UserStore } from "../lib/users";
+import { createTokenRouter } from "./token-router";
 import type { ChowdeckClient } from "../lib/client";
 import type { ClientStore } from "../lib/oauth-clients";
 import { createServer, type ServerOptions } from "./server";
 import { bindSession, type SessionStore } from "../lib/session";
-import type { AuthorizationCodeStore } from "../lib/oauth-codes";
 import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
 import { AccessTokenVerifier, type AccessTokenStore } from "../lib/oauth";
+import {
+  createInProcessCodeExchange,
+  type AuthorizationCodeStore,
+  type AuthorizationCodeExchange,
+} from "../lib/oauth-codes";
 
+/*
+ * exchange defaults to an in-process composition of codes and tokens, which
+ * is only atomic within one process. The hosted server passes the
+ * PostgreSQL exchange from createPostgresStores, which is transactional.
+ */
 export type HttpAppOptions = {
   serverUrl: URL;
   issuerUrl: URL;
@@ -39,6 +49,7 @@ export type HttpAppOptions = {
   tokens: AccessTokenStore;
   chowdeck?: ChowdeckClient;
   codes: AuthorizationCodeStore;
+  exchange?: AuthorizationCodeExchange;
   authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
@@ -84,6 +95,7 @@ export const createHttpApp = ({
   codes,
   sessions,
   chowdeck,
+  exchange = createInProcessCodeExchange(codes, tokens),
   authorizeLimits,
   serverFactory = createServer,
 }: HttpAppOptions) => {
@@ -138,6 +150,7 @@ export const createHttpApp = ({
       limits: authorizeLimits,
     }),
   );
+  app.use(createTokenRouter({ clients, exchange, resourceUrl: serverUrl }));
 
   app.get(
     [new URL(resourceMetadataUrl).pathname, PROTECTED_RESOURCE_ROOT_PATH],
