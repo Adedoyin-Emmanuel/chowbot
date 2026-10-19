@@ -1,16 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
-  <circle cx="200" cy="200" r="200" fill="#0c513f"/>
-  <g fill="#ffc300">
-    <rect x="193" y="88" width="14" height="40" rx="7"/>
-    <circle cx="200" cy="84" r="16"/>
-    <rect x="84" y="172" width="26" height="56" rx="10"/>
-    <rect x="290" y="172" width="26" height="56" rx="10"/>
-    <rect x="104" y="122" width="192" height="156" rx="52"/>
-    <path d="M146 262 L110 314 L196 274 Z"/>
-  </g>
-  <g fill="#0c513f">
-    <circle cx="160" cy="190" r="19"/>
-    <circle cx="240" cy="190" r="19"/>
-  </g>
-  <rect x="170" y="228" width="60" height="14" rx="7" fill="#0c513f"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><circle cx="200" cy="200" r="200" fill="#0c513f"/><g fill="#ffc300"><rect width="14" height="40" x="193" y="88" rx="7"/><circle cx="200" cy="84" r="16"/><rect width="26" height="56" x="84" y="172" rx="10"/><rect width="26" height="56" x="290" y="172" rx="10"/><rect width="192" height="156" x="104" y="122" rx="52"/><path d="M146 262 L110 314 L196 274 Z"/></g><g fill="#0c513f"><circle cx="160" cy="190" r="19"/><circle cx="240" cy="190" r="19"/></g><rect width="60" height="14" x="170" y="228" fill="#0c513f" rx="7"/></svg>
