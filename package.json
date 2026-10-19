@@ -1,0 +1,21 @@
+{
+  "name": "node-mcp-boilerplate",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.1.1",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@types/express": "^5.0.6",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "i": "^0.3.7",
+    "zod": "^4.6.7"
+  }
+}
