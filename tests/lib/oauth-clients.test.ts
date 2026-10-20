@@ -73,7 +73,7 @@ describe("registerClient", () => {
   test("drops unsupported extras and unknown fields, and de-duplicates URIs", async () => {
     const client = await registerClient(new InMemoryClientStore(), {
       redirect_uris: ["http://localhost:3000/cb", "http://localhost:3000/cb"],
-      grant_types: ["authorization_code", "refresh_token"],
+      grant_types: ["authorization_code", "refresh_token", "client_credentials"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
       logo_uri: "https://example.com/logo.png",
@@ -81,7 +81,7 @@ describe("registerClient", () => {
     });
 
     expect(client.redirect_uris).toEqual(["http://localhost:3000/cb"]);
-    expect(client.grant_types).toEqual(["authorization_code"]);
+    expect(client.grant_types).toEqual(["authorization_code", "refresh_token"]);
     expect(client).not.toHaveProperty("logo_uri");
     expect(client).not.toHaveProperty("scope");
   });

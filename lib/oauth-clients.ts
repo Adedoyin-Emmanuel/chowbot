@@ -130,9 +130,10 @@ const validateRedirectUris = (value: unknown) => {
 
 /*
  * Only public clients using the authorization-code flow are registered.
- * RFC 7591 §3.2.1 lets the server replace requested values, so unsupported
- * extras such as refresh_token are dropped and the registered values are
- * returned; requests that cannot work with this server are rejected.
+ * refresh_token is kept when requested, and only such clients receive
+ * refresh tokens. RFC 7591 §3.2.1 lets the server replace requested values,
+ * so other unsupported grant types are dropped and the registered values
+ * are returned; requests that cannot work with this server are rejected.
  */
 export const registerClient = async (store: ClientStore, body: unknown) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -191,7 +192,10 @@ export const registerClient = async (store: ClientStore, body: unknown) => {
     client_id_issued_at: Math.floor(Date.now() / 1000),
     ...(client_name !== undefined && { client_name }),
     redirect_uris: redirectUris,
-    grant_types: ["authorization_code"],
+    grant_types: [
+      "authorization_code",
+      ...(grant_types?.includes("refresh_token") ? ["refresh_token"] : []),
+    ],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
   } satisfies OAuthClientInformationFull;

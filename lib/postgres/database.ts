@@ -111,7 +111,10 @@ export const fromEpochSeconds = (seconds: number) => new Date(seconds * 1000);
 
 export const deleteExpiredRecords = async (sql: SQL) => {
   const db = createDrizzle(sql);
-  const { oauthAccessTokens, oauthAuthorizationCodes } = schema;
+  const { oauthAccessTokens, oauthAuthorizationCodes, oauthRefreshTokenFamilies } = schema;
   await db.delete(oauthAuthorizationCodes).where(lte(oauthAuthorizationCodes.expiresAt, raw`now()`));
   await db.delete(oauthAccessTokens).where(lte(oauthAccessTokens.expiresAt, raw`now()`));
+  await db
+    .delete(oauthRefreshTokenFamilies)
+    .where(lte(oauthRefreshTokenFamilies.expiresAt, raw`now()`));
 };

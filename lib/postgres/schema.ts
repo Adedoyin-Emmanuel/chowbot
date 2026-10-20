@@ -8,6 +8,7 @@ import {
   pgTable,
   timestamp,
   customType,
+  uniqueIndex,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
@@ -110,6 +111,9 @@ export const oauthAccessTokens = pgTable(
       .references(() => oauthClients.clientId, { onDelete: "cascade" }),
     resource: text("resource").notNull(),
     scopes: stringArray("scopes"),
+    refreshFamilyId: uuid("refresh_family_id").references(() => oauthRefreshTokenFamilies.id, {
+      onDelete: "cascade",
+    }),
     expiresAt: expiresAt(),
     createdAt: createdAt(),
   },
@@ -117,5 +121,59 @@ export const oauthAccessTokens = pgTable(
     check("oauth_access_tokens_scopes_check", isArray(table.scopes)),
     index("oauth_access_tokens_expires_at_idx").on(table.expiresAt),
     index("oauth_access_tokens_user_id_idx").on(table.userId),
+    index("oauth_access_tokens_refresh_family_id_idx").on(table.refreshFamilyId),
+  ],
+);
+
+/*
+ * One family per browser sign-in. Its bindings never change across
+ * rotations; expires_at is the absolute limit for every token in it, and
+ * revoked_at is set when reuse of a rotated token is detected.
+ */
+export const oauthRefreshTokenFamilies = pgTable(
+  "oauth_refresh_token_families",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    scopes: stringArray("scopes"),
+    expiresAt: expiresAt(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedReason: text("revoked_reason"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("oauth_refresh_token_families_scopes_check", isArray(table.scopes)),
+    index("oauth_refresh_token_families_user_id_idx").on(table.userId),
+    index("oauth_refresh_token_families_expires_at_idx").on(table.expiresAt),
+  ],
+);
+
+/*
+ * Every refresh token ever issued in a family, by hash only. Rotated tokens
+ * are kept until the family expires so their reuse can be detected; the
+ * partial unique index allows at most one unrotated token per family.
+ */
+export const oauthRefreshTokens = pgTable(
+  "oauth_refresh_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    familyId: uuid("family_id")
+      .notNull()
+      .references(() => oauthRefreshTokenFamilies.id, { onDelete: "cascade" }),
+    expiresAt: expiresAt(),
+    rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("oauth_refresh_tokens_family_id_idx").on(table.familyId),
+    uniqueIndex("oauth_refresh_tokens_one_active_per_family_idx")
+      .on(table.familyId)
+      .where(sql`${table.rotatedAt} IS NULL`),
   ],
 );

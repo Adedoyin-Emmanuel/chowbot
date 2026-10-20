@@ -34,11 +34,12 @@ import {
   type AuthorizationCodeStore,
   type AuthorizationCodeExchange,
 } from "../lib/oauth-codes";
+import { InMemoryRefreshTokenStore, type RefreshTokenStore } from "../lib/oauth-refresh";
 
 /*
- * exchange defaults to an in-process composition of codes and tokens, which
- * is only atomic within one process. The hosted server passes the
- * PostgreSQL exchange from createPostgresStores, which is transactional.
+ * exchange and refreshTokens default to in-process implementations, which
+ * are only atomic within one process. The hosted server passes the
+ * PostgreSQL versions from createPostgresStores, which are transactional.
  */
 export type HttpAppOptions = {
   serverUrl: URL;
@@ -50,6 +51,7 @@ export type HttpAppOptions = {
   chowdeck?: ChowdeckClient;
   codes: AuthorizationCodeStore;
   exchange?: AuthorizationCodeExchange;
+  refreshTokens?: RefreshTokenStore;
   authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
@@ -95,7 +97,8 @@ export const createHttpApp = ({
   codes,
   sessions,
   chowdeck,
-  exchange = createInProcessCodeExchange(codes, tokens),
+  refreshTokens = new InMemoryRefreshTokenStore(tokens),
+  exchange = createInProcessCodeExchange(codes, tokens, refreshTokens),
   authorizeLimits,
   serverFactory = createServer,
 }: HttpAppOptions) => {
@@ -150,7 +153,7 @@ export const createHttpApp = ({
       limits: authorizeLimits,
     }),
   );
-  app.use(createTokenRouter({ clients, exchange, resourceUrl: serverUrl }));
+  app.use(createTokenRouter({ clients, exchange, refreshTokens, resourceUrl: serverUrl }));
 
   app.get(
     [new URL(resourceMetadataUrl).pathname, PROTECTED_RESOURCE_ROOT_PATH],

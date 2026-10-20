@@ -6,6 +6,7 @@ import { PostgresUserStore } from "./users";
 import { PostgresClientStore } from "./clients";
 import { PostgresSessionStore } from "./sessions";
 import { PostgresCodeExchange } from "./token-exchange";
+import { PostgresRefreshTokenStore } from "./refresh-tokens";
 import { PostgresAccessTokenStore } from "./access-tokens";
 import { PostgresAuthorizationCodeStore } from "./authorization-codes";
 
@@ -18,5 +19,6 @@ export const createPostgresStores = (sql: SQL, keyring: Keyring) => {
     codes: new PostgresAuthorizationCodeStore(db),
     tokens: new PostgresAccessTokenStore(db),
     exchange: new PostgresCodeExchange(db),
+    refreshTokens: new PostgresRefreshTokenStore(db),
   };
 };

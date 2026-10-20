@@ -2,18 +2,18 @@ import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
+import { InMemoryUserStore } from "../../lib/users";
 import { InMemorySessionStore } from "../../lib/session";
 import { InMemoryAccessTokenStore } from "../../lib/oauth";
-import { InMemoryUserStore } from "../../lib/users";
 import { InMemoryClientStore } from "../../lib/oauth-clients";
 import { InMemoryAuthorizationCodeStore } from "../../lib/oauth-codes";
 import { assertIssuerHostedBy, createHttpApp } from "../../mcp/http-app";
 
-const SERVER_URL = new URL("http://localhost:2800/mcp");
 const ISSUER_URL = new URL("http://localhost:2800");
+const SERVER_URL = new URL("http://localhost:2800/mcp");
 
-let server: HttpServer;
 let baseUrl: string;
+let server: HttpServer;
 let clients: InMemoryClientStore;
 
 beforeAll(async () => {
@@ -61,7 +61,7 @@ describe("authorization server metadata", () => {
       registration_endpoint: "http://localhost:2800/register",
       response_types_supported: ["code"],
       response_modes_supported: ["query"],
-      grant_types_supported: ["authorization_code"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
     });
@@ -112,7 +112,7 @@ describe("POST /register", () => {
     expect(body).toMatchObject({
       client_name: "Claude",
       redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
-      grant_types: ["authorization_code"],
+      grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
     });

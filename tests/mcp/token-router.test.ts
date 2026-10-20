@@ -213,7 +213,7 @@ describe("successful exchange", () => {
 describe("rejected requests", () => {
   test.each([
     ["a missing grant_type", { grant_type: undefined }, 400, "invalid_request"],
-    ["grant_type=refresh_token", { grant_type: "refresh_token" }, 400, "unsupported_grant_type"],
+    ["refresh_token for a client not registered for it", { grant_type: "refresh_token" }, 400, "unauthorized_client"],
     ["grant_type=client_credentials", { grant_type: "client_credentials" }, 400, "unsupported_grant_type"],
     ["a missing client_id", { client_id: undefined }, 400, "invalid_request"],
     ["an unknown client_id", { client_id: "not-registered" }, 401, "invalid_client"],
@@ -373,16 +373,15 @@ describe("secret handling", () => {
 });
 
 describe("metadata", () => {
-  test("advertises only the authorization_code grant and public clients", async () => {
+  test("advertises only the implemented grants and public clients", async () => {
     const metadata = (await (await fetch(`${baseUrl}/.well-known/oauth-authorization-server`)).json()) as Record<
       string,
       string[]
     >;
 
-    expect(metadata.grant_types_supported).toEqual(["authorization_code"]);
+    expect(metadata.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(metadata.token_endpoint_auth_methods_supported).toEqual(["none"]);
     expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
-    expect(JSON.stringify(metadata)).not.toContain("refresh_token");
   });
 
   test("answers CORS preflight for browser-based clients", async () => {

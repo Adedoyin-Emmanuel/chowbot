@@ -25,7 +25,7 @@ const REGISTRATION_BODY_LIMIT = "16kb";
  * grant_types, response_modes and token_endpoint_auth_methods are stated
  * explicitly because their RFC 8414 defaults would otherwise imply
  * implicit, fragment and client_secret_basic support, none of which ChowBot
- * offers. refresh_token is not listed until refresh tokens are issued.
+ * offers.
  */
 export const buildAuthorizationServerMetadata = (
   issuerUrl: URL,
@@ -38,7 +38,7 @@ export const buildAuthorizationServerMetadata = (
     registration_endpoint: `${issuer}${REGISTRATION_PATH}`,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
   };

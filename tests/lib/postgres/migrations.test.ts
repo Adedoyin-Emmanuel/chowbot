@@ -30,6 +30,8 @@ describePostgres("migrations (PostgreSQL)", () => {
       "oauth_access_tokens",
       "oauth_authorization_codes",
       "oauth_clients",
+      "oauth_refresh_token_families",
+      "oauth_refresh_tokens",
       "users",
     ]);
   });

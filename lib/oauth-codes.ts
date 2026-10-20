@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
+import type { RefreshTokenStore } from "./oauth-refresh";
 import { hashToken, type AccessTokenRecord, type AccessTokenStore } from "./oauth";
 
 export const AUTHORIZATION_CODE_TTL_SECONDS = 300;
@@ -62,12 +63,15 @@ export class InMemoryAuthorizationCodeStore implements AuthorizationCodeStore {
 
 export type TokenIssue = { tokenHash: string; record: AccessTokenRecord };
 
-export type ExchangeDecision<T> = { result: T; issue?: TokenIssue };
+export type CodeExchangeIssue = TokenIssue & { refreshTokenHash?: string };
+
+export type ExchangeDecision<T> = { result: T; issue?: CodeExchangeIssue };
 
 /*
- * Redeems a code and stores the resulting access token as one unit of work.
- * decide() inspects the consumed code: returning an issue stores that token,
- * returning none still leaves the code consumed. If storing the token fails
+ * Redeems a code and stores the resulting access token, and the first token
+ * of a new refresh family when refreshTokenHash is set, as one unit of work.
+ * decide() inspects the consumed code: returning an issue stores those
+ * tokens, returning none still leaves the code consumed. If storing fails
  * the code is restored, so a failed exchange can be retried. Resolves to
  * undefined when the code is unknown, expired or already redeemed.
  */
@@ -86,16 +90,35 @@ export interface AuthorizationCodeExchange {
 export const createInProcessCodeExchange = (
   codes: AuthorizationCodeStore,
   tokens: AccessTokenStore,
+  refreshTokens?: RefreshTokenStore,
 ): AuthorizationCodeExchange => ({
   async redeem(codeHash, decide) {
     const code = await codes.consume(codeHash);
     if (!code) return undefined;
 
     const { result, issue } = decide(code);
-    if (issue) {
+    if (!issue) return result;
+
+    try {
+      await tokens.save(issue.tokenHash, issue.record);
+    } catch (error) {
+      await codes.save(codeHash, code);
+      throw error;
+    }
+
+    if (issue.refreshTokenHash) {
       try {
-        await tokens.save(issue.tokenHash, issue.record);
+        if (!refreshTokens) throw new Error("No refresh-token store configured");
+        await refreshTokens.createFamily({
+          refreshTokenHash: issue.refreshTokenHash,
+          accessTokenHash: issue.tokenHash,
+          userId: issue.record.userId,
+          clientId: issue.record.clientId,
+          resource: issue.record.resource,
+          scopes: issue.record.scopes,
+        });
       } catch (error) {
+        await tokens.revoke(issue.tokenHash);
         await codes.save(codeHash, code);
         throw error;
       }

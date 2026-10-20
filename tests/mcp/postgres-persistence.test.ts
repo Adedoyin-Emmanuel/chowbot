@@ -227,4 +227,62 @@ describePostgres("hosted HTTP server on PostgreSQL", () => {
     expect(JSON.stringify(rows)).not.toContain(issued.access_token);
     expect(JSON.stringify(rows)).toContain(hashToken(issued.access_token));
   });
+
+  test("refresh tokens rotate across instances and reuse revokes the family", async () => {
+    const authorizing = await startInstance();
+    const registration = await fetch(`${authorizing.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [REDIRECT_URI], grant_types: ["authorization_code", "refresh_token"] }),
+    });
+    const { client_id: clientId } = (await registration.json()) as { client_id: string };
+    const code = await signIn(authorizing, clientId, "08077778888");
+
+    const tokenRequest = async (instance: Instance, fields: Record<string, string>) => {
+      const response = await fetch(`${instance.baseUrl}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: clientId, ...fields }).toString(),
+      });
+      return { status: response.status, body: (await response.json()) as Record<string, string> };
+    };
+
+    const initial = await tokenRequest(await startInstance(), {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: "v".repeat(64),
+    });
+    expect(initial.status).toBe(200);
+    expect(initial.body.refresh_token).toBeDefined();
+
+    const rotated = await tokenRequest(await startInstance(), {
+      grant_type: "refresh_token",
+      refresh_token: initial.body.refresh_token!,
+    });
+    expect(rotated.status).toBe(200);
+
+    const serving = await startInstance();
+    expect(await callWhoami(serving, rotated.body.access_token!)).toBe("chowdeck-token-08077778888");
+
+    const reused = await tokenRequest(await startInstance(), {
+      grant_type: "refresh_token",
+      refresh_token: initial.body.refresh_token!,
+    });
+    expect(reused.body.error).toBe("invalid_grant");
+
+    const afterReuse = await tokenRequest(serving, {
+      grant_type: "refresh_token",
+      refresh_token: rotated.body.refresh_token!,
+    });
+    expect(afterReuse.body.error).toBe("invalid_grant");
+
+    const rows = JSON.stringify([
+      ...(await database.connect()`SELECT * FROM oauth_refresh_tokens`),
+      ...(await database.connect()`SELECT * FROM oauth_refresh_token_families`),
+    ]);
+    expect(rows).not.toContain(initial.body.refresh_token!);
+    expect(rows).not.toContain(rotated.body.refresh_token!);
+    expect(rows).toContain("reuse_detected");
+  });
 });

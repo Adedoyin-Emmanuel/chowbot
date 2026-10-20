@@ -2,6 +2,7 @@ import { eq, getTableColumns, sql } from "drizzle-orm";
 
 import { fromEpochSeconds, toEpochSeconds, type Database } from "./database";
 import { oauthAccessTokens, oauthAuthorizationCodes } from "./schema";
+import { insertRefreshFamily } from "./refresh-tokens";
 import type { AuthorizationCodeExchange } from "../oauth-codes";
 
 /*
@@ -35,16 +36,27 @@ export class PostgresCodeExchange implements AuthorizationCodeExchange {
         expiresAt: toEpochSeconds(row.expiresAt),
       });
 
-      if (issue) {
-        await tx.insert(oauthAccessTokens).values({
-          tokenHash: issue.tokenHash,
-          userId: issue.record.userId,
-          clientId: issue.record.clientId,
-          resource: issue.record.resource,
-          scopes: issue.record.scopes,
-          expiresAt: fromEpochSeconds(issue.record.expiresAt),
-        });
-      }
+      if (!issue) return result;
+
+      const refreshFamilyId = issue.refreshTokenHash
+        ? await insertRefreshFamily(tx, {
+            refreshTokenHash: issue.refreshTokenHash,
+            userId: issue.record.userId,
+            clientId: issue.record.clientId,
+            resource: issue.record.resource,
+            scopes: issue.record.scopes,
+          })
+        : null;
+
+      await tx.insert(oauthAccessTokens).values({
+        tokenHash: issue.tokenHash,
+        userId: issue.record.userId,
+        clientId: issue.record.clientId,
+        resource: issue.record.resource,
+        scopes: issue.record.scopes,
+        refreshFamilyId,
+        expiresAt: fromEpochSeconds(issue.record.expiresAt),
+      });
       return result;
     });
 }
