@@ -428,29 +428,40 @@ class CartService {
     const path = existing.exists
       ? vendorCartPath(params.restaurantId)
       : CART_LIST_PATH;
-    const response = await this.client.request(path, {
-      method: "POST",
-      headers: await this.authHeaders(),
-      body: {
-        ...WEB_CLIENT_FIELDS,
-        vendor_id: params.restaurantId,
-        items: [
-          {
-            item_id: params.menuItemId,
-            quantity: params.quantity,
-            type: "menu",
-            modifiers,
-          },
-        ],
-        address_id: params.addressId,
-      },
-    });
+    /*
+     * Each add creates a new pack, so a repeated request after an unknown
+     * outcome could add the item twice. Only a 4xx is a definite rejection.
+     */
+    let response: unknown;
+    try {
+      response = await this.client.request(path, {
+        method: "POST",
+        headers: await this.authHeaders(),
+        body: {
+          ...WEB_CLIENT_FIELDS,
+          vendor_id: params.restaurantId,
+          items: [
+            {
+              item_id: params.menuItemId,
+              quantity: params.quantity,
+              type: "menu",
+              modifiers,
+            },
+          ],
+          address_id: params.addressId,
+        },
+      });
+    } catch (error) {
+      if (error instanceof ChowdeckApiError && !isDefiniteRejection(error)) {
+        throw uncertainOutcome(
+          `${error.message}; the item may or may not have been added`,
+        );
+      }
+      throw error;
+    }
 
     if (!isRecord(response) || response.status !== "success") {
-      throw new ChowdeckApiError(
-        "invalid_response",
-        `POST ${path} returned an unexpected response; check the cart with get_cart before retrying`,
-      );
+      throw uncertainOutcome(`POST ${path} returned an unexpected response`);
     }
 
     const after = await this.getVendorCart(params.restaurantId);

@@ -74,12 +74,13 @@ const sessionWith = async (fields: { token?: string; guestId?: string }) => {
 
 const signedIn = () => sessionWith({ token: "secret-token-alice" });
 
-const serverFor = (session?: UserSession, timeoutMs = 1000) => () => {
+const serverFor =
+  (session?: UserSession, timeoutMs = 1000, baseUrl?: string) => () => {
   const server = new McpServer({ name: "ChowBot", version: "test" });
   registerCartTools(
     server,
     session,
-    new ChowdeckClient({ baseUrl: upstream.url.origin, timeoutMs }),
+    new ChowdeckClient({ baseUrl: baseUrl ?? upstream.url.origin, timeoutMs }),
   );
   return server;
 };
@@ -1207,5 +1208,128 @@ describe("clear_cart", () => {
     for (const secret of ["secret-token-alice", "redacted-user", "redacted-address", "redacted note", "30725140"]) {
       expect(text).not.toContain(secret);
     }
+  });
+});
+
+describe("add_to_cart uncertain outcomes", () => {
+  const CHECK = "check the cart with get_cart before retrying";
+  const MAY_HAVE_ADDED = "the item may or may not have been added";
+  const afterAdd = cartWith(packRows(PACK_A, [1, 2, 3]), 220000);
+
+  /*
+   * Every failure must leave exactly one write and no re-read: address,
+   * menu item and cart are read, then the single POST.
+   */
+  const expectSingleWriteNoReread = () => {
+    expect(writes()).toHaveLength(1);
+    expect(received).toHaveLength(4);
+  };
+
+  test("treats a timeout as an uncertain outcome", async () => {
+    scriptAddFlow(
+      noCart,
+      ["POST /customer/cart", slow(() => Response.json({ status: "success" }))],
+      afterAdd,
+    );
+
+    const result = await callTool(serverFor(await signedIn(), 100), "add_to_cart", friedRiceRequest);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      `Failed to add to cart: POST /customer/cart timed out after 100ms; ${MAY_HAVE_ADDED}; ${CHECK}`,
+    );
+    expectSingleWriteNoReread();
+  });
+
+  test("treats a dropped connection as an uncertain outcome", async () => {
+    scriptAddFlow(noCart, ["POST /customer/cart", () => Response.json({ status: "success" })], afterAdd);
+    const dropping: Server<undefined> = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        if (req.method !== "POST") {
+          return fetch(new URL(path, upstream.url), { headers: req.headers });
+        }
+        received.push({
+          method: req.method,
+          path,
+          authorization: req.headers.get("authorization"),
+          contentType: req.headers.get("content-type"),
+          body: JSON.parse(await req.text()),
+        });
+        dropping.stop(true);
+        return new Promise<Response>(() => {});
+      },
+    });
+
+    const result = await callTool(
+      serverFor(await signedIn(), 1000, dropping.url.origin),
+      "add_to_cart",
+      friedRiceRequest,
+    );
+
+    expect(textOf(result)).toBe(
+      `Failed to add to cart: POST /customer/cart failed: network error; ${MAY_HAVE_ADDED}; ${CHECK}`,
+    );
+    expect(writes()[0]!.body).toEqual(expectedWriteBody);
+    expectSingleWriteNoReread();
+  });
+
+  test.each([
+    ["creating a cart", noCart, "POST /customer/cart", 503],
+    ["adding to an existing cart", afterAdd, "POST /customer/cart/vendor/102555", 500],
+  ])("treats a server error while %s as an uncertain outcome", async (_, before, write, status) => {
+    scriptAddFlow(before, [write, () => Response.json({ message: "Server Error" }, { status })], afterAdd);
+
+    const result = await callTool(serverFor(await signedIn()), "add_to_cart", friedRiceRequest);
+
+    expect(textOf(result)).toBe(
+      `Failed to add to cart: ${write} failed with status ${status}: Server Error; ${MAY_HAVE_ADDED}; ${CHECK}`,
+    );
+    expectSingleWriteNoReread();
+  });
+
+  test.each([
+    ["a non-success status", () => Response.json({ status: "pending" }), "returned an unexpected response"],
+    ["no status", () => Response.json({ message: "Cart created successfully" }), "returned an unexpected response"],
+    ["an empty body", () => new Response(null, { status: 200 }), "returned an unexpected response"],
+    ["a non-JSON body", () => new Response("<html>ok</html>", { status: 200 }), `returned a non-JSON response; ${MAY_HAVE_ADDED}`],
+  ])("does not claim success when the reply has %s", async (_, reply, detail) => {
+    scriptAddFlow(noCart, ["POST /customer/cart", reply], afterAdd);
+
+    const result = await callTool(serverFor(await signedIn()), "add_to_cart", friedRiceRequest);
+
+    expect(textOf(result)).toBe(`Failed to add to cart: POST /customer/cart ${detail}; ${CHECK}`);
+    expectSingleWriteNoReread();
+  });
+
+  test("keeps a 4xx as a definite rejection", async () => {
+    scriptAddFlow(
+      noCart,
+      ["POST /customer/cart", () => Response.json({ status: "failed", message: "Vendor is closed" }, { status: 422 })],
+      afterAdd,
+    );
+
+    const result = await callTool(serverFor(await signedIn()), "add_to_cart", friedRiceRequest);
+
+    expect(textOf(result)).toBe(
+      "Failed to add to cart: POST /customer/cart failed with status 422: Vendor is closed",
+    );
+    expect(textOf(result)).not.toContain("may or may not");
+    expectSingleWriteNoReread();
+  });
+
+  test("still adds, re-reads and returns the cart on success", async () => {
+    scriptAddFlow(noCart, ["POST /customer/cart", () => Response.json({ status: "success" })], afterAdd);
+
+    const result = await callTool(serverFor(await signedIn()), "add_to_cart", friedRiceRequest);
+
+    expect(result.isError).toBeUndefined();
+    expect(writes()[0]!.body).toEqual(expectedWriteBody);
+    expect(received).toHaveLength(5);
+    expect(JSON.parse(textOf(result))).toMatchObject({
+      created_cart: true,
+      cart: { id: 30725140, total_price: 220000 },
+    });
   });
 });
