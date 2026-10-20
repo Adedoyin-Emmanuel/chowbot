@@ -5,6 +5,7 @@ import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
 import type { UserSession } from "../lib/session";
 import { registerAuthTools } from "../features/auth/tools";
 import { registerMenuTools } from "../features/menus/tools";
+import { registerAddressTools } from "../features/addresses/tools";
 import { registerArithmeticTool } from "../features/arithmetic/tools";
 import { registerRestaurantTools } from "../features/restaurants/tools";
 
@@ -42,6 +43,7 @@ export const createServer = ({
   registerArithmeticTool(server);
   registerRestaurantTools(server);
   registerMenuTools(server);
+  registerAddressTools(server, session);
   if (enableChatLogin) registerAuthTools(server, session);
 
   return server;
