@@ -9,15 +9,16 @@ import {
 import type { Server } from "bun";
 import { McpServer } from "@modelcontextprotocol/server";
 
+import {
+  bindSession,
+  type UserSession,
+  InMemorySessionStore,
+} from "../../../lib/session";
 import { callTool, rpc } from "../../helpers/mcp";
 import { createServer } from "../../../mcp/server";
 import { ChowdeckClient } from "../../../lib/client";
 import { registerAddressTools } from "../../../features/addresses/tools";
-import {
-  InMemorySessionStore,
-  bindSession,
-  type UserSession,
-} from "../../../lib/session";
+import { registerRestaurantTools } from "../../../features/restaurants/tools";
 
 type ReceivedRequest = {
   path: string;
@@ -253,5 +254,43 @@ describe("list_addresses", () => {
         "Failed to list addresses: GET /customer/address returned an unexpected response shape",
       );
     }
+  });
+
+  test("returns ids that search_restaurants accepts and forwards unchanged", async () => {
+    let searchUrl: URL | undefined;
+    upstreamResponse = (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/customer/address") {
+        return Response.json({ data: [{ id: 42, pretty_name: "Home" }] });
+      }
+      searchUrl = url;
+      return Response.json({ data: [] });
+    };
+
+    const session = await signedInSession();
+    const createDiscoveryServer = () => {
+      const server = new McpServer({ name: "ChowBot", version: "test" });
+      const client = new ChowdeckClient({
+        baseUrl: upstream.url.origin,
+        timeoutMs: 1000,
+      });
+      registerAddressTools(server, session, client);
+      registerRestaurantTools(server, session, client);
+      return server;
+    };
+
+    const listed = await callTool(createDiscoveryServer, "list_addresses", {});
+    const [address] = JSON.parse(textOf(listed)).addresses;
+    const searched = await callTool(
+      createDiscoveryServer,
+      "search_restaurants",
+      {
+        address_id: address.id,
+      },
+    );
+
+    expect(searched.isError).toBeUndefined();
+    expect(searchUrl?.pathname).toBe("/customer/vendor/v2");
+    expect(searchUrl?.searchParams.get("address_id")).toBe("42");
   });
 });

@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 
 import RestaurantService from "./service";
 import { logger } from "../../utils/logger";
+import type { UserSession } from "../../lib/session";
 import { textResult } from "../../utils/tool-result";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
@@ -31,9 +32,10 @@ const searchRestaurantsSchema = {
 
 export const registerRestaurantTools = (
   server: McpServer,
+  session?: UserSession,
   client?: ChowdeckClient,
 ) => {
-  const service = new RestaurantService(client);
+  const service = new RestaurantService(session, client);
 
   server.registerTool(
     "search_restaurants",
@@ -57,7 +59,10 @@ export const registerRestaurantTools = (
         if (error instanceof ChowdeckApiError) {
           return textResult(`Failed to search restaurants: ${error.message}`, true);
         }
-        logger.error("Unexpected error in search_restaurants:", error);
+        logger.error(
+          "Unexpected error in search_restaurants:",
+          error instanceof Error ? error.name : typeof error,
+        );
         return textResult("Failed to search restaurants: unexpected error", true);
       }
     },

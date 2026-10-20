@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 
 import MenuService from "./service";
 import { logger } from "../../utils/logger";
+import type { UserSession } from "../../lib/session";
 import { textResult } from "../../utils/tool-result";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
@@ -28,8 +29,12 @@ const getRestaurantMenuSchema = {
     .describe("Maximum number of menu items to return"),
 };
 
-export const registerMenuTools = (server: McpServer, client?: ChowdeckClient) => {
-  const service = new MenuService(client);
+export const registerMenuTools = (
+  server: McpServer,
+  session?: UserSession,
+  client?: ChowdeckClient,
+) => {
+  const service = new MenuService(session, client);
 
   server.registerTool(
     "get_restaurant_menu",
@@ -52,7 +57,10 @@ export const registerMenuTools = (server: McpServer, client?: ChowdeckClient) =>
         if (error instanceof ChowdeckApiError) {
           return textResult(`Failed to get restaurant menu: ${error.message}`, true);
         }
-        logger.error("Unexpected error in get_restaurant_menu:", error);
+        logger.error(
+          "Unexpected error in get_restaurant_menu:",
+          error instanceof Error ? error.name : typeof error,
+        );
         return textResult("Failed to get restaurant menu: unexpected error", true);
       }
     },

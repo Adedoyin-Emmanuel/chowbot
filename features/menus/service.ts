@@ -1,4 +1,5 @@
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
+import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
 import { isRecord, pickScalarFields, type ScalarValue } from "../../utils/object";
 
 export type RestaurantMenuParams = {
@@ -43,7 +44,10 @@ const summarizeItem = (item: Record<string, unknown>) => {
 };
 
 class MenuService {
-  constructor(private readonly client = new ChowdeckClient()) {}
+  constructor(
+    private readonly session?: UserSession,
+    private readonly client = new ChowdeckClient(),
+  ) {}
 
   async getRestaurantMenu({
     restaurantId,
@@ -51,7 +55,9 @@ class MenuService {
     limit,
   }: RestaurantMenuParams): Promise<RestaurantMenuResult> {
     const path = `/customer/vendor/${restaurantId}/menu`;
-    const body = await this.client.request(path);
+    const body = await this.client.request(path, {
+      headers: await chowdeckAuthHeaders(this.session),
+    });
 
     const rawItems = isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
     const items = rawItems?.filter(isRecord);

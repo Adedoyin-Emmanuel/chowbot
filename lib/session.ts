@@ -5,9 +5,9 @@ export type ChowdeckSession = {
 };
 
 export interface SessionStore {
+  delete(principalId: string): Promise<void>;
   get(principalId: string): Promise<ChowdeckSession | undefined>;
   set(principalId: string, session: ChowdeckSession): Promise<void>;
-  delete(principalId: string): Promise<void>;
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -45,3 +45,14 @@ export const bindSession = (
   save: (session) => store.set(principalId, session),
   clear: () => store.delete(principalId),
 });
+
+/*
+ * Mirrors the reference client: the bound user's token is attached when they
+ * are signed in, and requests go out unauthenticated otherwise.
+ */
+export const chowdeckAuthHeaders = async (
+  session?: UserSession,
+): Promise<Record<string, string>> => {
+  const token = (await session?.get())?.token;
+  return token ? { authorization: `Bearer ${token}` } : {};
+};

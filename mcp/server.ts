@@ -41,8 +41,8 @@ export const createServer = ({
   });
 
   registerArithmeticTool(server);
-  registerRestaurantTools(server);
-  registerMenuTools(server);
+  registerRestaurantTools(server, session);
+  registerMenuTools(server, session);
   registerAddressTools(server, session);
   if (enableChatLogin) registerAuthTools(server, session);
 

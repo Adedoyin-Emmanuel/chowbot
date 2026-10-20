@@ -1,4 +1,5 @@
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
+import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
 import { isRecord, pickScalarFields, type ScalarValue } from "../../utils/object";
 
 export type RestaurantSearchParams = {
@@ -38,7 +39,10 @@ const summarizeVendor = (vendor: Record<string, unknown>): RestaurantSummary =>
   pickScalarFields(vendor, SUMMARY_FIELDS);
 
 class RestaurantService {
-  constructor(private readonly client = new ChowdeckClient()) {}
+  constructor(
+    private readonly session?: UserSession,
+    private readonly client = new ChowdeckClient(),
+  ) {}
 
   async search({
     addressId,
@@ -48,16 +52,18 @@ class RestaurantService {
   }: RestaurantSearchParams): Promise<RestaurantSearchResult> {
     const body = await this.client.request(VENDOR_LIST_PATH, {
       query: { address_id: addressId, q: query, page },
+      headers: await chowdeckAuthHeaders(this.session),
     });
 
-    if (!isRecord(body) || !Array.isArray(body.data)) {
+    const rawVendors = isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
+    const vendors = rawVendors?.filter(isRecord);
+
+    if (!rawVendors || !vendors || (rawVendors.length > 0 && vendors.length === 0)) {
       throw new ChowdeckApiError(
         "invalid_response",
         `GET ${VENDOR_LIST_PATH} returned an unexpected response shape`,
       );
     }
-
-    const vendors = body.data.filter(isRecord);
 
     return {
       address_id: addressId,
