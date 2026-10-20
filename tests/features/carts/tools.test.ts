@@ -23,6 +23,7 @@ type ReceivedRequest = {
   method: string;
   path: string;
   authorization: string | null;
+  contentType: string | null;
   body: unknown;
 };
 
@@ -48,6 +49,7 @@ beforeAll(() => {
         method: req.method,
         path,
         authorization: req.headers.get("authorization"),
+        contentType: req.headers.get("content-type"),
         body: text ? JSON.parse(text) : undefined,
       });
       const queue = routes.get(`${req.method} ${path}`);
@@ -226,6 +228,7 @@ describe("cart tools", () => {
     ["list_carts", {}],
     ["get_cart", { restaurant_id: 102555 }],
     ["add_to_cart", friedRiceRequest],
+    ["duplicate_cart_pack", { restaurant_id: 102555, pack_reference: "pack-x" }],
   ])("%s refuses to run without a per-user session", async (tool, args) => {
     const result = await callTool(serverFor(), tool, args);
 
@@ -238,6 +241,7 @@ describe("cart tools", () => {
     ["list_carts", {}],
     ["get_cart", { restaurant_id: 102555 }],
     ["add_to_cart", friedRiceRequest],
+    ["duplicate_cart_pack", { restaurant_id: 102555, pack_reference: "pack-x" }],
   ])("%s asks the user to sign in without contacting Chowdeck", async (tool, args) => {
     const result = await callTool(serverFor(await sessionWith({ guestId: "guest-1" })), tool, args);
 
@@ -581,5 +585,215 @@ describe("add_to_cart", () => {
     expect(tokensByRequest.slice(0, 5).every((t) => t === "Bearer secret-token-alice")).toBe(true);
     expect(tokensByRequest.slice(5).every((t) => t === "Bearer secret-token-bob")).toBe(true);
     expect(tokensByRequest).toHaveLength(10);
+  });
+});
+
+describe("duplicate_cart_pack", () => {
+  /*
+   * From the capture's duplicate step: pack B was copied into pack C with
+   * new row IDs, and total_price went from 220000 to 440000.
+   */
+  const PACK_C = "pack-47d71e72-3fac-5da6-a42f-e01cf5e3fd01";
+  const DUPLICATE_PATH = `/customer/cart/30725140/pack/${PACK_B}/duplicate`;
+  const packB = packRows(PACK_B, [130093222, 130093223, 130093221]);
+  const packC = packRows(PACK_C, [130109597, 130109598, 130109599]);
+  const duplicated = () =>
+    Response.json({ status: "success", message: "Pack duplicated successfully" });
+
+  const scriptDuplicate = (write: Handler, after: Handler) => {
+    route("GET /customer/cart/vendor/102555", cartWith(packB, 220000), after);
+    route(`POST ${DUPLICATE_PATH}`, write);
+  };
+
+  const duplicate = async (args: Record<string, unknown> = {}, session?: UserSession) =>
+    callTool(serverFor(session ?? (await signedIn())), "duplicate_cart_pack", {
+      restaurant_id: 102555,
+      pack_reference: PACK_B,
+      ...args,
+    });
+
+  test("duplicates a pack with a bodiless POST and returns the re-read cart", async () => {
+    scriptDuplicate(duplicated, cartWith([...packB, ...packC], 440000));
+
+    const result = await duplicate();
+
+    expect(result.isError).toBeUndefined();
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "GET /customer/cart/vendor/102555",
+      `POST ${DUPLICATE_PATH}`,
+      "GET /customer/cart/vendor/102555",
+    ]);
+    expect(writes()[0]!.body).toBeUndefined();
+    expect(writes()[0]!.contentType).toBeNull();
+    expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
+
+    const parsed = JSON.parse(textOf(result));
+    expect(parsed).toMatchObject({
+      duplicated_pack_reference: PACK_B,
+      new_pack_reference: PACK_C,
+      cart: { id: 30725140, total_price: 440000 },
+    });
+    expect(parsed.cart.packs.map((p: { pack_reference: string }) => p.pack_reference)).toEqual([
+      PACK_B,
+      PACK_C,
+    ]);
+  });
+
+  test("takes the cart ID from the user's cart, not from the caller", async () => {
+    scriptDuplicate(duplicated, cartWith([...packB, ...packC], 440000));
+
+    await duplicate({ cart_id: 999 });
+
+    expect(writes().map((r) => r.path)).toEqual([DUPLICATE_PATH]);
+  });
+
+  test("refuses when there is no cart for the restaurant", async () => {
+    route("GET /customer/cart/vendor/102555", noCart);
+
+    const result = await duplicate();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      "Failed to duplicate cart pack: there is no cart for this restaurant",
+    );
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("refuses a pack reference that is not in the current cart", async () => {
+    scriptDuplicate(duplicated, cartWith(packB, 220000));
+
+    const result = await duplicate({ pack_reference: PACK_A });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      "Failed to duplicate cart pack: pack_reference is not in your current cart for this restaurant; call get_cart to see its packs",
+    );
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("reports a rejected duplication without re-reading or retrying", async () => {
+    scriptDuplicate(
+      () => Response.json({ status: "failed", message: "Vendor is closed" }, { status: 422 }),
+      cartWith(packB, 220000),
+    );
+
+    const result = await duplicate();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      `Failed to duplicate cart pack: POST ${DUPLICATE_PATH} failed with status 422: Vendor is closed`,
+    );
+    expect(writes()).toHaveLength(1);
+    expect(received).toHaveLength(2);
+  });
+
+  test("treats a server error as an uncertain outcome", async () => {
+    scriptDuplicate(
+      () => Response.json({ message: "Server Error" }, { status: 503 }),
+      cartWith(packB, 220000),
+    );
+
+    const result = await duplicate();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      `Failed to duplicate cart pack: POST ${DUPLICATE_PATH} failed with status 503: Server Error; the pack may or may not have been duplicated; check the cart with get_cart before retrying`,
+    );
+    expect(writes()).toHaveLength(1);
+  });
+
+  test.each([
+    ["a non-success status", { status: "pending" }],
+    ["no status", { message: "Pack duplicated successfully" }],
+  ])("does not claim success when the reply has %s", async (_, body) => {
+    scriptDuplicate(() => Response.json(body), cartWith([...packB, ...packC], 440000));
+
+    const result = await duplicate();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      `Failed to duplicate cart pack: POST ${DUPLICATE_PATH} returned an unexpected response; check the cart with get_cart before retrying`,
+    );
+  });
+
+  test("reports a failed re-read after a successful duplication", async () => {
+    scriptDuplicate(duplicated, () =>
+      Response.json({ message: "Server Error" }, { status: 500 }),
+    );
+
+    const result = await duplicate();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      "Failed to duplicate cart pack: Chowdeck reported the pack duplicated, but re-reading the cart failed (GET /customer/cart/vendor/102555 failed with status 500: Server Error); check the cart with get_cart before retrying",
+    );
+    expect(writes()).toHaveLength(1);
+  });
+
+  test.each([
+    ["shows no new pack", () => cartWith(packB, 220000)],
+    ["shows two new copies", () =>
+      cartWith([...packB, ...packC, ...packRows("pack-other", [7, 8, 9])], 660000)],
+    ["no longer has the original pack", () => cartWith(packC, 220000)],
+    ["has a new pack with different contents", () =>
+      cartWith([...packB, ...packRows(PACK_C, [1, 2, 3]).slice(0, 2)], 400000)],
+    ["finds no cart", () => noCart],
+  ])("does not confirm the copy when the re-read cart %s", async (_, after) => {
+    scriptDuplicate(duplicated, after());
+
+    const result = await duplicate();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(
+      "Failed to duplicate cart pack: Chowdeck reported the pack duplicated, but the re-read cart does not show exactly one new copy of it; check the cart with get_cart before retrying",
+    );
+  });
+
+  test("reports a malformed cart before writing anything", async () => {
+    route("GET /customer/cart/vendor/102555", () => Response.json({ status: "success" }));
+
+    const result = await duplicate();
+
+    expect(textOf(result)).toBe(
+      "Failed to duplicate cart pack: GET /customer/cart/vendor/102555 returned an unexpected response shape",
+    );
+    expect(writes()).toHaveLength(0);
+  });
+
+  test.each([
+    [{ pack_reference: "" }, "pack_reference"],
+    [{ pack_reference: "../../order" }, "pack_reference"],
+    [{ pack_reference: "pack x" }, "pack_reference"],
+    [{ restaurant_id: 0 }, "restaurant_id"],
+  ])("rejects invalid input %p before contacting Chowdeck", async (args, field) => {
+    const result = await duplicate(args);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Input validation error");
+    expect(textOf(result)).toContain(field);
+    expect(received).toHaveLength(0);
+  });
+
+  test("never lets one user act on another user's pack", async () => {
+    route("GET /customer/cart/vendor/102555", noCart);
+
+    const bob = await sessionWith({ token: "secret-token-bob" });
+    const result = await duplicate({}, bob);
+
+    expect(textOf(result)).toBe(
+      "Failed to duplicate cart pack: there is no cart for this restaurant",
+    );
+    expect(received.map((r) => r.authorization)).toEqual(["Bearer secret-token-bob"]);
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("keeps the result free of tokens and private cart fields", async () => {
+    scriptDuplicate(duplicated, cartWith([...packB, ...packC], 440000));
+
+    const text = textOf(await duplicate());
+
+    for (const secret of ["secret-token-alice", "redacted-user", "redacted-address", "redacted note"]) {
+      expect(text).not.toContain(secret);
+    }
   });
 });

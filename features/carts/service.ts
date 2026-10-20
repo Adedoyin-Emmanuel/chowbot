@@ -44,6 +44,12 @@ export type AddToCartParams = {
   modifiers: ModifierChoice[];
 };
 
+export type DuplicatePackResult = {
+  duplicated_pack_reference: string;
+  new_pack_reference: string;
+  cart: CartDetail;
+};
+
 export type AddToCartResult = {
   created_cart: boolean;
   added: { menu_item_id: number; quantity: number; modifiers: number };
@@ -194,6 +200,34 @@ const summarizeCart = (cart: CartDetail): CartSummary => {
     row_count: packs.reduce((count, pack) => count + pack.rows.length, 0),
   };
 };
+
+const duplicatePackPath = (cartId: number, packReference: string) =>
+  `/customer/cart/${cartId}/pack/${encodeURIComponent(packReference)}/duplicate`;
+
+/*
+ * Rows are compared by what was ordered, not by their server-generated IDs,
+ * so a duplicated pack can be recognised in the re-read cart.
+ */
+const packContents = (pack: CartPack) =>
+  pack.rows
+    .map((row) =>
+      [row.type, row.item_id, row.menu_group_id ?? "", row.quantity].join(":"),
+    )
+    .sort()
+    .join("|");
+
+/*
+ * The write may or may not have happened, so the caller must look before
+ * repeating it.
+ */
+const uncertainOutcome = (detail: string) =>
+  new ChowdeckApiError(
+    "invalid_response",
+    `${detail}; check the cart with get_cart before retrying`,
+  );
+
+const isDefiniteRejection = (error: ChowdeckApiError) =>
+  error.kind === "http" && error.status !== undefined && error.status < 500;
 
 const numberField = (group: OptionGroup, field: string) =>
   typeof group[field] === "number" ? (group[field] as number) : undefined;
@@ -383,6 +417,88 @@ class CartService {
         quantity: params.quantity,
         modifiers: modifiers.length,
       },
+      cart: after.cart,
+    };
+  }
+
+  /*
+   * The cart ID comes from the user's own cart, never from the caller. The
+   * duplicate endpoint takes no body and returns no cart, so the cart is
+   * re-read and the copy is confirmed by its contents. A cart changed
+   * elsewhere between the read and the write is not detected.
+   */
+  async duplicatePack(
+    restaurantId: number,
+    packReference: string,
+  ): Promise<DuplicatePackResult> {
+    const before = await this.getVendorCart(restaurantId);
+    if (!before.exists) {
+      throw new CartRequestError("there is no cart for this restaurant");
+    }
+    const original = before.cart.packs.find(
+      (pack) => pack.pack_reference === packReference,
+    );
+    if (!original) {
+      throw new CartRequestError(
+        "pack_reference is not in your current cart for this restaurant; call get_cart to see its packs",
+      );
+    }
+
+    const path = duplicatePackPath(before.cart.id as number, packReference);
+    let response: unknown;
+    try {
+      response = await this.client.request(path, {
+        method: "POST",
+        headers: await this.authHeaders(),
+      });
+    } catch (error) {
+      if (error instanceof ChowdeckApiError && !isDefiniteRejection(error)) {
+        throw uncertainOutcome(
+          `${error.message}; the pack may or may not have been duplicated`,
+        );
+      }
+      throw error;
+    }
+
+    if (!isRecord(response) || response.status !== "success") {
+      throw uncertainOutcome(`POST ${path} returned an unexpected response`);
+    }
+
+    let after: VendorCartResult;
+    try {
+      after = await this.getVendorCart(restaurantId);
+    } catch (error) {
+      const reason =
+        error instanceof ChowdeckApiError ? error.message : "unexpected error";
+      throw uncertainOutcome(
+        `Chowdeck reported the pack duplicated, but re-reading the cart failed (${reason})`,
+      );
+    }
+
+    const knownReferences = new Set(
+      before.cart.packs.map((pack) => pack.pack_reference),
+    );
+    const copies = after.exists
+      ? after.cart.packs.filter(
+          (pack) =>
+            pack.pack_reference !== null &&
+            !knownReferences.has(pack.pack_reference) &&
+            packContents(pack) === packContents(original),
+        )
+      : [];
+    const originalKept =
+      after.exists &&
+      after.cart.packs.some((pack) => pack.pack_reference === packReference);
+
+    if (!after.exists || !originalKept || copies.length !== 1) {
+      throw uncertainOutcome(
+        "Chowdeck reported the pack duplicated, but the re-read cart does not show exactly one new copy of it",
+      );
+    }
+
+    return {
+      duplicated_pack_reference: packReference,
+      new_pack_reference: copies[0]!.pack_reference as string,
       cart: after.cart,
     };
   }

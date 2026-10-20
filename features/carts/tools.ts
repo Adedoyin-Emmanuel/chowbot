@@ -50,6 +50,14 @@ const addToCartSchema = {
     .describe("One entry per chosen option. Every group with minimum_selection > 0 must be satisfied."),
 };
 
+const duplicatePackSchema = {
+  restaurant_id: restaurantId,
+  pack_reference: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,100}$/, "Expected a pack_reference from get_cart")
+    .describe("Pack reference from get_cart, e.g. pack-6b8c66fb-..."),
+};
+
 const failure = (action: string, tool: string, error: unknown) => {
   if (error instanceof NotSignedInError) {
     return textResult(`Failed to ${action}: not signed in to Chowdeck. Sign in, then try again.`, true);
@@ -133,6 +141,33 @@ export const registerCartTools = (
         return textResult(JSON.stringify(result));
       } catch (error) {
         return failure("add to cart", "add_to_cart", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "duplicate_cart_pack",
+    {
+      title: "Duplicate cart pack",
+      description: `Add one more copy of an existing pack (a menu item with its options) to the signed-in user's cart for a restaurant. The copy gets its own pack_reference; the original is unchanged. Returns the cart as Chowdeck reports it afterwards. ${AMOUNTS_NOTE}`,
+      inputSchema: z.object(duplicatePackSchema),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ restaurant_id, pack_reference }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        const result = await service.duplicatePack(
+          restaurant_id,
+          pack_reference,
+        );
+        return textResult(JSON.stringify(result));
+      } catch (error) {
+        return failure("duplicate cart pack", "duplicate_cart_pack", error);
       }
     },
   );
