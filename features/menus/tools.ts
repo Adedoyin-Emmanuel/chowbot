@@ -29,6 +29,19 @@ const getRestaurantMenuSchema = {
     .describe("Maximum number of menu items to return"),
 };
 
+const getMenuItemSchema = {
+  restaurant_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Chowdeck restaurant ID, as returned by search_restaurants"),
+  menu_item_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Menu item id, as returned by get_restaurant_menu"),
+};
+
 export const registerMenuTools = (
   server: McpServer,
   session?: UserSession,
@@ -62,6 +75,35 @@ export const registerMenuTools = (
           error instanceof Error ? error.name : typeof error,
         );
         return textResult("Failed to get restaurant menu: unexpected error", true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_menu_item",
+    {
+      title: "Get menu item details",
+      description:
+        "Get one Chowdeck menu item with its option groups. minimum_selection > 0 marks a required group; minimum_selection and maximum_selection bound how many options may be chosen. Availability flags and prices are passed through as Chowdeck sends them, without unit conversion.",
+      inputSchema: z.object(getMenuItemSchema),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ restaurant_id, menu_item_id }) => {
+      try {
+        const result = await service.getMenuItem({
+          restaurantId: restaurant_id,
+          menuItemId: menu_item_id,
+        });
+        return textResult(JSON.stringify(result));
+      } catch (error) {
+        if (error instanceof ChowdeckApiError) {
+          return textResult(`Failed to get menu item: ${error.message}`, true);
+        }
+        logger.error(
+          "Unexpected error in get_menu_item:",
+          error instanceof Error ? error.name : typeof error,
+        );
+        return textResult("Failed to get menu item: unexpected error", true);
       }
     },
   );
