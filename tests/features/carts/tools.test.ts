@@ -27,7 +27,7 @@ type ReceivedRequest = {
   body: unknown;
 };
 
-type Handler = () => Response;
+type Handler = () => Response | Promise<Response>;
 
 let upstream: Server<undefined>;
 let received: ReceivedRequest[];
@@ -74,12 +74,12 @@ const sessionWith = async (fields: { token?: string; guestId?: string }) => {
 
 const signedIn = () => sessionWith({ token: "secret-token-alice" });
 
-const serverFor = (session?: UserSession) => () => {
+const serverFor = (session?: UserSession, timeoutMs = 1000) => () => {
   const server = new McpServer({ name: "ChowBot", version: "test" });
   registerCartTools(
     server,
     session,
-    new ChowdeckClient({ baseUrl: upstream.url.origin, timeoutMs: 1000 }),
+    new ChowdeckClient({ baseUrl: upstream.url.origin, timeoutMs }),
   );
   return server;
 };
@@ -229,6 +229,8 @@ describe("cart tools", () => {
     ["get_cart", { restaurant_id: 102555 }],
     ["add_to_cart", friedRiceRequest],
     ["duplicate_cart_pack", { restaurant_id: 102555, pack_reference: "pack-x" }],
+    ["remove_cart_pack", { restaurant_id: 102555, pack_reference: "pack-x" }],
+    ["clear_cart", { restaurant_id: 102555 }],
   ])("%s refuses to run without a per-user session", async (tool, args) => {
     const result = await callTool(serverFor(), tool, args);
 
@@ -242,6 +244,8 @@ describe("cart tools", () => {
     ["get_cart", { restaurant_id: 102555 }],
     ["add_to_cart", friedRiceRequest],
     ["duplicate_cart_pack", { restaurant_id: 102555, pack_reference: "pack-x" }],
+    ["remove_cart_pack", { restaurant_id: 102555, pack_reference: "pack-x" }],
+    ["clear_cart", { restaurant_id: 102555 }],
   ])("%s asks the user to sign in without contacting Chowdeck", async (tool, args) => {
     const result = await callTool(serverFor(await sessionWith({ guestId: "guest-1" })), tool, args);
 
@@ -793,6 +797,414 @@ describe("duplicate_cart_pack", () => {
     const text = textOf(await duplicate());
 
     for (const secret of ["secret-token-alice", "redacted-user", "redacted-address", "redacted note"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+});
+
+const deletes = () => received.filter((r) => r.method === "DELETE");
+const slow = (response: () => Response) => async () => {
+  await Bun.sleep(300);
+  return response();
+};
+
+describe("remove_cart_pack", () => {
+  /*
+   * From the capture's single-pack removal: cart 30742921 held Pack 1 and
+   * Pack 2; deleting Pack 2 left Pack 1 byte-identical and total_price at
+   * 220000.
+   */
+  const CART_ID = 30742921;
+  const PACK_1 = "pack-2a74396b-8d91-54d8-97ae-912b71e15ec5";
+  const PACK_2 = "pack-1d4df86b-bfd3-5c8b-b089-c7122f661625";
+  const REMOVE_PATH = `/customer/cart/${CART_ID}/pack/${PACK_2}`;
+  const pack1 = packRows(PACK_1, [130161037, 130161039, 130161038]);
+  const pack2 = packRows(PACK_2, [130162373, 130162375, 130162374]);
+  const cartOf = (rows: unknown[], totalPrice: number) => () =>
+    Response.json({
+      status: "success",
+      message: "Active cart fetched successfully",
+      data: { ...cartData(rows, totalPrice), id: CART_ID },
+    });
+  const deleted = () =>
+    Response.json({ status: "success", message: "Pack deleted successfully", data: {} });
+
+  const scriptRemove = (write: Handler, after: Handler) => {
+    route("GET /customer/cart/vendor/102555", cartOf([...pack1, ...pack2], 440000), after);
+    route(`DELETE ${REMOVE_PATH}`, write);
+  };
+
+  const remove = async (
+    args: Record<string, unknown> = {},
+    session?: UserSession,
+    timeoutMs?: number,
+  ) =>
+    callTool(serverFor(session ?? (await signedIn()), timeoutMs), "remove_cart_pack", {
+      restaurant_id: 102555,
+      pack_reference: PACK_2,
+      ...args,
+    });
+
+  const UNVERIFIED =
+    "Failed to remove cart pack: Chowdeck reported the pack removed, but the re-read cart does not show only that pack gone; check the cart with get_cart before retrying";
+
+  test("removes one pack with a bodiless DELETE and returns the re-read cart", async () => {
+    scriptRemove(deleted, cartOf(pack1, 220000));
+
+    const result = await remove();
+
+    expect(result.isError).toBeUndefined();
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "GET /customer/cart/vendor/102555",
+      `DELETE ${REMOVE_PATH}`,
+      "GET /customer/cart/vendor/102555",
+    ]);
+    expect(deletes()[0]!.body).toBeUndefined();
+    expect(deletes()[0]!.contentType).toBeNull();
+    expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
+
+    const parsed = JSON.parse(textOf(result));
+    expect(parsed).toMatchObject({
+      restaurant_id: 102555,
+      removed_pack_reference: PACK_2,
+      cart_exists: true,
+      cart: { id: CART_ID, total_price: 220000 },
+    });
+    expect(parsed.cart.packs).toHaveLength(1);
+    expect(parsed.cart.packs[0].pack_reference).toBe(PACK_1);
+    expect(parsed.cart.packs[0].rows.map((r: { cart_item_id: number }) => r.cart_item_id)).toEqual([
+      130161037, 130161039, 130161038,
+    ]);
+  });
+
+  test("takes the cart ID from the user's cart, not from the caller", async () => {
+    scriptRemove(deleted, cartOf(pack1, 220000));
+
+    await remove({ cart_id: 999 });
+
+    expect(deletes().map((r) => r.path)).toEqual([REMOVE_PATH]);
+  });
+
+  test("refuses when there is no cart for the restaurant", async () => {
+    route("GET /customer/cart/vendor/102555", noCart);
+
+    const result = await remove();
+
+    expect(textOf(result)).toBe("Failed to remove cart pack: there is no cart for this restaurant");
+    expect(deletes()).toHaveLength(0);
+  });
+
+  test("refuses a pack reference that is not in the current cart", async () => {
+    scriptRemove(deleted, cartOf(pack1, 220000));
+
+    const result = await remove({ pack_reference: PACK_A });
+
+    expect(textOf(result)).toBe(
+      "Failed to remove cart pack: pack_reference is not in your current cart for this restaurant; call get_cart to see its packs",
+    );
+    expect(deletes()).toHaveLength(0);
+  });
+
+  test.each([
+    ["no cart remains", noCart, false],
+    ["an empty cart remains", cartOf([], 0), true],
+  ])("accepts removing the last pack when %s", async (_, after, cartExists) => {
+    route("GET /customer/cart/vendor/102555", cartOf(pack2, 220000), after);
+    route(`DELETE ${REMOVE_PATH}`, deleted);
+
+    const result = await remove();
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(textOf(result))).toMatchObject({
+      removed_pack_reference: PACK_2,
+      cart_exists: cartExists,
+    });
+  });
+
+  test.each([
+    ["still has the removed pack", () => cartOf([...pack1, ...pack2], 440000)],
+    ["shows a remaining pack with changed contents", () =>
+      cartOf(pack1.map((row) => (row.type === "menu" ? { ...row, quantity: 2 } : row)), 400000)],
+    ["shows a remaining pack with new row IDs", () =>
+      cartOf(packRows(PACK_1, [1, 2, 3]), 220000)],
+    ["no longer has the remaining pack", () => cartOf([], 0)],
+    ["finds no cart although a pack should remain", () => noCart],
+    ["has an extra pack", () => cartOf([...pack1, ...packRows(PACK_B, [4, 5, 6])], 440000)],
+  ])("does not confirm the removal when the re-read cart %s", async (_, after) => {
+    scriptRemove(deleted, after());
+
+    const result = await remove();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(UNVERIFIED);
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("reports a rejected removal without re-reading or retrying", async () => {
+    scriptRemove(
+      () => Response.json({ status: "failed", message: "Pack not found" }, { status: 404 }),
+      cartOf(pack1, 220000),
+    );
+
+    const result = await remove();
+
+    expect(textOf(result)).toBe(
+      `Failed to remove cart pack: DELETE ${REMOVE_PATH} failed with status 404: Pack not found`,
+    );
+    expect(deletes()).toHaveLength(1);
+    expect(received).toHaveLength(2);
+  });
+
+  test("treats a server error as an uncertain outcome", async () => {
+    scriptRemove(() => Response.json({ message: "Server Error" }, { status: 502 }), cartOf(pack1, 220000));
+
+    const result = await remove();
+
+    expect(textOf(result)).toBe(
+      `Failed to remove cart pack: DELETE ${REMOVE_PATH} failed with status 502: Server Error; the pack may or may not have been removed; check the cart with get_cart before retrying`,
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("treats a timeout as an uncertain outcome and does not retry", async () => {
+    scriptRemove(slow(deleted), cartOf(pack1, 220000));
+
+    const result = await remove({}, undefined, 100);
+
+    expect(textOf(result)).toBe(
+      `Failed to remove cart pack: DELETE ${REMOVE_PATH} timed out after 100ms; the pack may or may not have been removed; check the cart with get_cart before retrying`,
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test.each([
+    ["a non-success status", { status: "failed" }],
+    ["no status", { message: "Pack deleted successfully" }],
+  ])("does not claim success when the reply has %s", async (_, body) => {
+    scriptRemove(() => Response.json(body), cartOf(pack1, 220000));
+
+    const result = await remove();
+
+    expect(textOf(result)).toBe(
+      `Failed to remove cart pack: DELETE ${REMOVE_PATH} returned an unexpected response; check the cart with get_cart before retrying`,
+    );
+  });
+
+  test("reports a failed re-read after a successful removal", async () => {
+    scriptRemove(deleted, () => Response.json({ status: "success" }));
+
+    const result = await remove();
+
+    expect(textOf(result)).toBe(
+      "Failed to remove cart pack: Chowdeck reported the pack removed, but re-reading the cart failed (GET /customer/cart/vendor/102555 returned an unexpected response shape); check the cart with get_cart before retrying",
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("rejects an unsafe pack reference before contacting Chowdeck", async () => {
+    const result = await remove({ pack_reference: "../../order" });
+
+    expect(textOf(result)).toContain("Input validation error");
+    expect(received).toHaveLength(0);
+  });
+
+  test("never lets one user remove another user's pack", async () => {
+    route("GET /customer/cart/vendor/102555", cartOf(pack1, 220000));
+
+    const result = await remove({}, await sessionWith({ token: "secret-token-bob" }));
+
+    expect(textOf(result)).toContain("pack_reference is not in your current cart");
+    expect(received.map((r) => r.authorization)).toEqual(["Bearer secret-token-bob"]);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  test("keeps the result free of tokens and private cart fields", async () => {
+    scriptRemove(deleted, cartOf(pack1, 220000));
+
+    const text = textOf(await remove());
+
+    for (const secret of ["secret-token-alice", "redacted-user", "redacted-address", "redacted note"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+});
+
+describe("clear_cart", () => {
+  /*
+   * From the capture's Clear Cart step: DELETE /customer/cart/30725140, after
+   * which vendor 102555 had no cart and vendor 102556's cart 26876618 was
+   * untouched.
+   */
+  const CLEAR_PATH = "/customer/cart/30725140";
+  const OTHER_CART_PATH = "/customer/cart/26876618";
+  const cleared = () =>
+    Response.json({ status: "success", message: "Cart deleted successfully", data: {} });
+  const twoPacks = cartWith(
+    [...packRows(PACK_A, [1, 2, 3]), ...packRows(PACK_B, [4, 5, 6])],
+    440000,
+  );
+
+  const scriptClear = (write: Handler, after: Handler) => {
+    route("GET /customer/cart/vendor/102555", twoPacks, after);
+    route(`DELETE ${CLEAR_PATH}`, write);
+  };
+
+  const clear = async (
+    args: Record<string, unknown> = {},
+    session?: UserSession,
+    timeoutMs?: number,
+  ) =>
+    callTool(serverFor(session ?? (await signedIn()), timeoutMs), "clear_cart", {
+      restaurant_id: 102555,
+      ...args,
+    });
+
+  test("deletes the restaurant's cart with a bodiless DELETE and confirms it is gone", async () => {
+    scriptClear(cleared, noCart);
+
+    const result = await clear();
+
+    expect(result.isError).toBeUndefined();
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "GET /customer/cart/vendor/102555",
+      `DELETE ${CLEAR_PATH}`,
+      "GET /customer/cart/vendor/102555",
+    ]);
+    expect(deletes()[0]!.body).toBeUndefined();
+    expect(deletes()[0]!.contentType).toBeNull();
+    expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
+    expect(JSON.parse(textOf(result))).toEqual({
+      restaurant_id: 102555,
+      cart_existed: true,
+      cleared: true,
+      removed_packs: 2,
+    });
+  });
+
+  test("takes the cart ID from the user's cart, not from the caller", async () => {
+    scriptClear(cleared, noCart);
+
+    await clear({ cart_id: 26876618 });
+
+    expect(deletes().map((r) => r.path)).toEqual([CLEAR_PATH]);
+  });
+
+  test("does nothing when there is no cart for the restaurant", async () => {
+    route("GET /customer/cart/vendor/102555", noCart);
+
+    const result = await clear();
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(textOf(result))).toEqual({
+      restaurant_id: 102555,
+      cart_existed: false,
+      cleared: false,
+      removed_packs: 0,
+    });
+    expect(deletes()).toHaveLength(0);
+  });
+
+  test("only ever targets the requested restaurant's cart", async () => {
+    route(
+      "GET /customer/cart/vendor/102556",
+      () =>
+        Response.json({
+          status: "success",
+          data: { ...cartData(packRows(PACK_B, [7, 8, 9]), 825000), id: 26876618, vendor_id: 102556 },
+        }),
+      noCart,
+    );
+    route(`DELETE ${OTHER_CART_PATH}`, cleared);
+
+    await clear({ restaurant_id: 102556 });
+
+    expect(deletes().map((r) => r.path)).toEqual([OTHER_CART_PATH]);
+    expect(received.some((r) => r.path === CLEAR_PATH)).toBe(false);
+  });
+
+  test("does not confirm the deletion when a cart is still there", async () => {
+    scriptClear(cleared, twoPacks);
+
+    const result = await clear();
+
+    expect(textOf(result)).toBe(
+      "Failed to clear cart: Chowdeck reported the cart deleted, but the re-read still shows a cart for this restaurant; check the cart with get_cart before retrying",
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("reports a rejected deletion without re-reading or retrying", async () => {
+    scriptClear(
+      () => Response.json({ status: "failed", message: "Cart not found" }, { status: 404 }),
+      noCart,
+    );
+
+    const result = await clear();
+
+    expect(textOf(result)).toBe(
+      `Failed to clear cart: DELETE ${CLEAR_PATH} failed with status 404: Cart not found`,
+    );
+    expect(received).toHaveLength(2);
+  });
+
+  test("treats a server error as an uncertain outcome", async () => {
+    scriptClear(() => Response.json({ message: "Server Error" }, { status: 500 }), noCart);
+
+    const result = await clear();
+
+    expect(textOf(result)).toBe(
+      `Failed to clear cart: DELETE ${CLEAR_PATH} failed with status 500: Server Error; the cart may or may not have been deleted; check the cart with get_cart before retrying`,
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("treats a timeout as an uncertain outcome and does not retry", async () => {
+    scriptClear(slow(cleared), noCart);
+
+    const result = await clear({}, undefined, 100);
+
+    expect(textOf(result)).toBe(
+      `Failed to clear cart: DELETE ${CLEAR_PATH} timed out after 100ms; the cart may or may not have been deleted; check the cart with get_cart before retrying`,
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("does not claim success when the reply is not a success envelope", async () => {
+    scriptClear(() => Response.json({ status: "pending" }), noCart);
+
+    const result = await clear();
+
+    expect(textOf(result)).toBe(
+      `Failed to clear cart: DELETE ${CLEAR_PATH} returned an unexpected response; check the cart with get_cart before retrying`,
+    );
+  });
+
+  test("reports a failed re-read after a successful deletion", async () => {
+    scriptClear(cleared, () => Response.json({ message: "Server Error" }, { status: 500 }));
+
+    const result = await clear();
+
+    expect(textOf(result)).toBe(
+      "Failed to clear cart: Chowdeck reported the cart deleted, but re-reading the cart failed (GET /customer/cart/vendor/102555 failed with status 500: Server Error); check the cart with get_cart before retrying",
+    );
+    expect(deletes()).toHaveLength(1);
+  });
+
+  test("uses each user's own token", async () => {
+    route("GET /customer/cart/vendor/102555", noCart);
+
+    await clear({}, await sessionWith({ token: "secret-token-bob" }));
+
+    expect(received.map((r) => r.authorization)).toEqual(["Bearer secret-token-bob"]);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  test("keeps the result free of tokens and private cart fields", async () => {
+    scriptClear(cleared, noCart);
+
+    const text = textOf(await clear());
+
+    for (const secret of ["secret-token-alice", "redacted-user", "redacted-address", "redacted note", "30725140"]) {
       expect(text).not.toContain(secret);
     }
   });

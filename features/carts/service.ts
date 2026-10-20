@@ -37,23 +37,43 @@ export type CartListResult = {
 export type ModifierChoice = { groupId: number; optionId: number };
 
 export type AddToCartParams = {
-  restaurantId: number;
+  quantity: number;
   addressId: number;
   menuItemId: number;
-  quantity: number;
+  restaurantId: number;
   modifiers: ModifierChoice[];
 };
 
 export type DuplicatePackResult = {
-  duplicated_pack_reference: string;
-  new_pack_reference: string;
   cart: CartDetail;
+  new_pack_reference: string;
+  duplicated_pack_reference: string;
+};
+
+export type RemovePackResult =
+  | {
+      cart: CartDetail;
+      cart_exists: true;
+      restaurant_id: number;
+      removed_pack_reference: string;
+    }
+  | {
+      cart_exists: false;
+      restaurant_id: number;
+      removed_pack_reference: string;
+    };
+
+export type ClearCartResult = {
+  cleared: boolean;
+  removed_packs: number;
+  restaurant_id: number;
+  cart_existed: boolean;
 };
 
 export type AddToCartResult = {
+  cart: CartDetail;
   created_cart: boolean;
   added: { menu_item_id: number; quantity: number; modifiers: number };
-  cart: CartDetail;
 };
 
 /*
@@ -228,6 +248,33 @@ const uncertainOutcome = (detail: string) =>
 
 const isDefiniteRejection = (error: ChowdeckApiError) =>
   error.kind === "http" && error.status !== undefined && error.status < 500;
+
+const cartPath = (cartId: number) => `/customer/cart/${cartId}`;
+
+const packPath = (cartId: number, packReference: string) =>
+  `/customer/cart/${cartId}/pack/${encodeURIComponent(packReference)}`;
+
+/*
+ * A pack's identity (reference and row IDs) plus what it contains, so an
+ * untouched pack can be told apart from one that changed or was replaced.
+ */
+const packFingerprint = (pack: CartPack) =>
+  [
+    pack.pack_reference,
+    pack.rows
+      .map((row) => row.cart_item_id)
+      .sort()
+      .join(","),
+    packContents(pack),
+  ].join("#");
+
+const samePacks = (left: CartPack[], right: CartPack[]) => {
+  const fingerprints = (packs: CartPack[]) =>
+    packs.map(packFingerprint).sort().join("\n");
+  return (
+    left.length === right.length && fingerprints(left) === fingerprints(right)
+  );
+};
 
 const numberField = (group: OptionGroup, field: string) =>
   typeof group[field] === "number" ? (group[field] as number) : undefined;
@@ -500,6 +547,129 @@ class CartService {
       duplicated_pack_reference: packReference,
       new_pack_reference: copies[0]!.pack_reference as string,
       cart: after.cart,
+    };
+  }
+
+  /*
+   * Sends a bodiless DELETE once. A 4xx is a definite rejection; anything
+   * else that is not a success envelope leaves the outcome unknown. Never
+   * retried.
+   */
+  private async sendCartDeletion(path: string, outcome: string) {
+    let response: unknown;
+    try {
+      response = await this.client.request(path, {
+        method: "DELETE",
+        headers: await this.authHeaders(),
+      });
+    } catch (error) {
+      if (error instanceof ChowdeckApiError && !isDefiniteRejection(error)) {
+        throw uncertainOutcome(`${error.message}; ${outcome}`);
+      }
+      throw error;
+    }
+    if (!isRecord(response) || response.status !== "success") {
+      throw uncertainOutcome(`DELETE ${path} returned an unexpected response`);
+    }
+  }
+
+  private async rereadAfter(restaurantId: number, accepted: string) {
+    try {
+      return await this.getVendorCart(restaurantId);
+    } catch (error) {
+      const reason =
+        error instanceof ChowdeckApiError ? error.message : "unexpected error";
+      throw uncertainOutcome(
+        `Chowdeck reported ${accepted}, but re-reading the cart failed (${reason})`,
+      );
+    }
+  }
+
+  /*
+   * Removes one pack with the endpoint behind the website's trash icon. The
+   * cart ID comes from the user's own cart. Every other pack must survive
+   * unchanged. Removing the last pack was never observed, so either an
+   * empty cart or no cart afterwards is accepted.
+   */
+  async removePack(
+    restaurantId: number,
+    packReference: string,
+  ): Promise<RemovePackResult> {
+    const before = await this.getVendorCart(restaurantId);
+    if (!before.exists) {
+      throw new CartRequestError("there is no cart for this restaurant");
+    }
+    if (
+      !before.cart.packs.some((pack) => pack.pack_reference === packReference)
+    ) {
+      throw new CartRequestError(
+        "pack_reference is not in your current cart for this restaurant; call get_cart to see its packs",
+      );
+    }
+    const others = before.cart.packs.filter(
+      (pack) => pack.pack_reference !== packReference,
+    );
+
+    await this.sendCartDeletion(
+      packPath(before.cart.id as number, packReference),
+      "the pack may or may not have been removed",
+    );
+    const after = await this.rereadAfter(restaurantId, "the pack removed");
+
+    const verified = after.exists
+      ? samePacks(after.cart.packs, others)
+      : others.length === 0;
+    if (!verified) {
+      throw uncertainOutcome(
+        "Chowdeck reported the pack removed, but the re-read cart does not show only that pack gone",
+      );
+    }
+
+    return after.exists
+      ? {
+          restaurant_id: restaurantId,
+          removed_pack_reference: packReference,
+          cart_exists: true,
+          cart: after.cart,
+        }
+      : {
+          restaurant_id: restaurantId,
+          removed_pack_reference: packReference,
+          cart_exists: false,
+        };
+  }
+
+  /*
+   * Deletes this restaurant's cart, resolved from the user's own cart
+   * response, so no other restaurant's cart can be targeted.
+   */
+  async clearCart(restaurantId: number): Promise<ClearCartResult> {
+    const before = await this.getVendorCart(restaurantId);
+    if (!before.exists) {
+      return {
+        restaurant_id: restaurantId,
+        cart_existed: false,
+        cleared: false,
+        removed_packs: 0,
+      };
+    }
+
+    await this.sendCartDeletion(
+      cartPath(before.cart.id as number),
+      "the cart may or may not have been deleted",
+    );
+    const after = await this.rereadAfter(restaurantId, "the cart deleted");
+    if (after.exists) {
+      throw uncertainOutcome(
+        "Chowdeck reported the cart deleted, but the re-read still shows a cart for this restaurant",
+      );
+    }
+
+    return {
+      restaurant_id: restaurantId,
+      cart_existed: true,
+      cleared: true,
+      removed_packs: before.cart.packs.length,
     };
   }
 }

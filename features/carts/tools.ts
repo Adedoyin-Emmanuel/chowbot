@@ -50,7 +50,7 @@ const addToCartSchema = {
     .describe("One entry per chosen option. Every group with minimum_selection > 0 must be satisfied."),
 };
 
-const duplicatePackSchema = {
+const packTargetSchema = {
   restaurant_id: restaurantId,
   pack_reference: z
     .string()
@@ -150,7 +150,7 @@ export const registerCartTools = (
     {
       title: "Duplicate cart pack",
       description: `Add one more copy of an existing pack (a menu item with its options) to the signed-in user's cart for a restaurant. The copy gets its own pack_reference; the original is unchanged. Returns the cart as Chowdeck reports it afterwards. ${AMOUNTS_NOTE}`,
-      inputSchema: z.object(duplicatePackSchema),
+      inputSchema: z.object(packTargetSchema),
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -168,6 +168,54 @@ export const registerCartTools = (
         return textResult(JSON.stringify(result));
       } catch (error) {
         return failure("duplicate cart pack", "duplicate_cart_pack", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "remove_cart_pack",
+    {
+      title: "Remove cart pack",
+      description: `Remove one pack (a menu item with its options) from the signed-in user's cart for a restaurant. Other packs are left unchanged. Returns the cart as Chowdeck reports it afterwards, or cart_exists: false if no cart remains. ${AMOUNTS_NOTE}`,
+      inputSchema: z.object(packTargetSchema),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ restaurant_id, pack_reference }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        const result = await service.removePack(restaurant_id, pack_reference);
+        return textResult(JSON.stringify(result));
+      } catch (error) {
+        return failure("remove cart pack", "remove_cart_pack", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "clear_cart",
+    {
+      title: "Clear cart",
+      description:
+        "Delete the signed-in user's whole cart for one restaurant. Carts at other restaurants are not affected. Does nothing if there is no cart.",
+      inputSchema: z.object({ restaurant_id: restaurantId }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ restaurant_id }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        return textResult(JSON.stringify(await service.clearCart(restaurant_id)));
+      } catch (error) {
+        return failure("clear cart", "clear_cart", error);
       }
     },
   );
