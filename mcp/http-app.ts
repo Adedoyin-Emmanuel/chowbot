@@ -34,7 +34,10 @@ import {
   type AuthorizationCodeStore,
   type AuthorizationCodeExchange,
 } from "../lib/oauth-codes";
-import { InMemoryRefreshTokenStore, type RefreshTokenStore } from "../lib/oauth-refresh";
+import {
+  InMemoryRefreshTokenStore,
+  type RefreshTokenStore,
+} from "../lib/oauth-refresh";
 
 /*
  * exchange and refreshTokens default to in-process implementations, which
@@ -50,8 +53,8 @@ export type HttpAppOptions = {
   tokens: AccessTokenStore;
   chowdeck?: ChowdeckClient;
   codes: AuthorizationCodeStore;
-  exchange?: AuthorizationCodeExchange;
   refreshTokens?: RefreshTokenStore;
+  exchange?: AuthorizationCodeExchange;
   authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
@@ -153,7 +156,14 @@ export const createHttpApp = ({
       limits: authorizeLimits,
     }),
   );
-  app.use(createTokenRouter({ clients, exchange, refreshTokens, resourceUrl: serverUrl }));
+  app.use(
+    createTokenRouter({
+      clients,
+      exchange,
+      refreshTokens,
+      resourceUrl: serverUrl,
+    }),
+  );
 
   app.get(
     [new URL(resourceMetadataUrl).pathname, PROTECTED_RESOURCE_ROOT_PATH],
