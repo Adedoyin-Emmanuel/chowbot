@@ -301,19 +301,33 @@ class CartService {
   }
 
   async getVendorCart(restaurantId: number): Promise<VendorCartResult> {
+    return (await this.getVendorCartSnapshot(restaurantId)).result;
+  }
+
+  /*
+   * Also hands back the raw cart for server-side use (an order payload
+   * copies fields that the sanitized cart leaves out). The raw object must
+   * never be returned to a caller.
+   */
+  async getVendorCartSnapshot(
+    restaurantId: number,
+  ): Promise<{ result: VendorCartResult; raw?: Record<string, unknown> }> {
     const headers = await this.authHeaders();
     const path = vendorCartPath(restaurantId);
     const body = await this.client.request(path, { headers });
 
     const data = isRecord(body) ? body.data : undefined;
     if (isRecord(data) && Object.keys(data).length === 0) {
-      return { restaurant_id: restaurantId, exists: false };
+      return { result: { restaurant_id: restaurantId, exists: false } };
     }
 
     const cart = parseCart(data);
     if (!cart || cart.vendor_id !== restaurantId)
       throw unexpectedShape("GET", path);
-    return { restaurant_id: restaurantId, exists: true, cart };
+    return {
+      result: { restaurant_id: restaurantId, exists: true, cart },
+      raw: data as Record<string, unknown>,
+    };
   }
 
   async listCarts(): Promise<CartListResult> {

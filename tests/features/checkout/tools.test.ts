@@ -652,3 +652,222 @@ describe("get_checkout_quote", () => {
     });
   });
 });
+
+describe("preview_order (dry run)", () => {
+  const preview = async (
+    args: Record<string, unknown> = {},
+    session?: UserSession,
+    timeoutMs?: number,
+  ) =>
+    callTool(serverFor(session ?? (await signedIn()), timeoutMs), "preview_order", {
+      restaurant_id: 102555,
+      address_id: ADDRESS_ID,
+      payment_method: "wallet",
+      ...args,
+    });
+
+  /*
+   * bag_quantity and the notes are cart fields the payload copies; the
+   * cart capture showed bag_quantity 0, and the note values are invented.
+   */
+  const previewCart = (overrides: Record<string, unknown> = {}) =>
+    cartResponse({ bag_quantity: 0, customer_vendor_note: null, ...overrides });
+
+  const expectOnlyReads = () => {
+    expect(received.every((r) => r.method === "GET")).toBe(true);
+    expect(
+      received.some((r) => /delivery\/amount|\/customer\/order|payment|discount|wallet|promo/.test(r.path)),
+    ).toBe(false);
+  };
+
+  test("is registered as a read-only tool with only the supported payment choices", async () => {
+    const { tools } = await rpc(() => createServer(), "tools/list", {});
+    const tool = tools.find((t: { name: string }) => t.name === "preview_order");
+
+    expect(tool.annotations.readOnlyHint).toBe(true);
+    expect(tool.inputSchema.required).toEqual(["restaurant_id", "address_id", "payment_method"]);
+    expect(tool.inputSchema.properties.payment_method.enum).toEqual(["wallet", "pay_for_me"]);
+  });
+
+  test("builds the wallet delivery payload using only GET requests", async () => {
+    scriptCheckout({ cart: previewCart() });
+
+    const result = await preview();
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(requestKeys()).toEqual([
+      "GET /customer/cart/vendor/102555",
+      "GET /customer/address",
+      "GET /customer/vendor/102555",
+    ]);
+    expectOnlyReads();
+    expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
+
+    expect(parsed.dry_run).toBe(true);
+    expect(parsed.submitted).toBe(false);
+    expect(parsed.cart).toEqual({ id: 30742921, total_price: 440000, currency: "NGN", pack_count: 2 });
+    expect(parsed.payload_preview).toEqual({
+      source: "web",
+      vendor_id: 102555,
+      cart_id: 30742921,
+      checkout_from_cart: true,
+      class: "delivery",
+      payment_method: "wallet",
+      promo_codes: [],
+      customer_vendor_note: null,
+      customer_delivery_note: "<withheld: copied from your cart>",
+      bag_quantity: 0,
+      requires_delivery_pin: true,
+      fee_id: "<withheld: a submission would first request a fresh delivery-fee quote, which creates a fee record, so a dry run requests none>",
+      address_id: "<withheld: your selected saved address>",
+      split_payment_with_wallet: false,
+      gift_recipient: null,
+      country_code: "NG",
+      currency: "NGN",
+    });
+    expect(parsed.omitted_fields).toEqual({
+      payment_method_id: "not sent for wallet: the payment methods Chowdeck lists carry no id",
+      tip: "no tip is added in a preview",
+    });
+    expect(parsed.not_performed).toContain("no order was created");
+    expect(parsed.assumptions.length).toBeGreaterThan(0);
+  });
+
+  test("sends has_external_payment instead of payment_method_id for pay_for_me", async () => {
+    scriptCheckout({ cart: previewCart() });
+
+    const parsed = JSON.parse(textOf(await preview({ payment_method: "pay_for_me" })));
+
+    expect(parsed.payload_preview.payment_method).toBe("pay_for_me");
+    expect(parsed.payload_preview.has_external_payment).toBe(true);
+    expect(parsed.payload_preview).not.toHaveProperty("payment_method_id");
+    expect(parsed.omitted_fields.payment_method_id).toBe("replaced by has_external_payment for pay_for_me");
+  });
+
+  test("uses vendor_delivery for a restaurant that delivers itself", async () => {
+    scriptCheckout({ cart: previewCart(), vendor: vendorResponse({ self_delivery: true }) });
+
+    const parsed = JSON.parse(textOf(await preview()));
+
+    expect(parsed.payload_preview.class).toBe("vendor_delivery");
+  });
+
+  test("leaves bag_quantity out when the cart has none", async () => {
+    scriptCheckout({ cart: previewCart({ bag_quantity: undefined }) });
+
+    const parsed = JSON.parse(textOf(await preview()));
+
+    expect(parsed.payload_preview).not.toHaveProperty("bag_quantity");
+    expect(parsed.omitted_fields.bag_quantity).toBe("the cart has no numeric bag_quantity");
+  });
+
+  test("withholds every private value", async () => {
+    scriptCheckout({ cart: previewCart({ customer_vendor_note: "PRIVATE-vendor-note" }) });
+
+    const text = textOf(await preview());
+
+    for (const secret of [
+      String(ADDRESS_ID),
+      String(VENDOR_ADDRESS_ID),
+      String(FEE_ID),
+      "PRIVATE-",
+      "redacted-",
+      "redacted note",
+      "secret-token-alice",
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  test.each([["online_payment"], ["card"], [""], [undefined]])(
+    "rejects the payment choice %p before contacting Chowdeck",
+    async (paymentMethod) => {
+      const result = await preview({ payment_method: paymentMethod });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("Input validation error");
+      expect(received).toHaveLength(0);
+    },
+  );
+
+  test("refuses without a per-user session", async () => {
+    const result = await callTool(serverFor(), "preview_order", {
+      restaurant_id: 102555,
+      address_id: ADDRESS_ID,
+      payment_method: "wallet",
+    });
+
+    expect(textOf(result)).toContain("cannot identify individual users");
+    expect(received).toHaveLength(0);
+  });
+
+  test("asks the user to sign in without contacting Chowdeck", async () => {
+    scriptCheckout({ cart: previewCart() });
+
+    const result = await preview({}, await sessionWith({ guestId: "guest-1" }));
+
+    expect(textOf(result)).toBe("Failed to preview order: not signed in to Chowdeck. Sign in, then try again.");
+    expect(received).toHaveLength(0);
+  });
+
+  test.each([
+    ["there is no cart", { cart: noCart }, "there is no cart for this restaurant"],
+    ["the cart is invalid", { cart: previewCart({ is_valid: false }) }, "the cart is not valid for checkout; validation issues: []"],
+    ["the cart is empty", { cart: previewCart({ cart_items: [] }) }, "the cart has no items"],
+    ["the cart belongs to another restaurant", { cart: previewCart({ vendor_id: 102556 }) }, "GET /customer/cart/vendor/102555 returned an unexpected response shape"],
+    ["the address is not the user's", { cart: previewCart(), addresses: addressList([111]) }, "address_id is not one of your saved delivery addresses; call list_addresses to choose one"],
+    ["the restaurant is closed", { cart: previewCart(), vendor: vendorResponse({ current_is_open_state: false }) }, "this restaurant is currently closed"],
+    ["the cart is below the minimum", { cart: previewCart({ total_price: 220000 }) }, "the cart total_price (220000) is below this restaurant's minimum_order_amount (250000); both are raw Chowdeck amounts"],
+    ["the restaurant uses another currency", { cart: previewCart(), vendor: vendorResponse({ currency: "GHS" }) }, "only NGN orders can be previewed; this restaurant uses a different currency"],
+  ])("refuses when %s, using only reads", async (_, handlers, message) => {
+    scriptCheckout(handlers);
+
+    const result = await preview();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(`Failed to preview order: ${message}`);
+    expectOnlyReads();
+  });
+
+  test("reports an upstream error without retrying", async () => {
+    scriptCheckout({ cart: previewCart(), vendor: () => Response.json({ message: "Server Error" }, { status: 500 }) });
+
+    const result = await preview();
+
+    expect(textOf(result)).toBe(
+      "Failed to preview order: GET /customer/vendor/102555 failed with status 500: Server Error",
+    );
+    expect(received.filter((r) => r.path === "/customer/vendor/102555")).toHaveLength(1);
+    expectOnlyReads();
+  });
+
+  test("reports a timeout without retrying", async () => {
+    scriptCheckout({
+      cart: async () => {
+        await Bun.sleep(300);
+        return previewCart()();
+      },
+    });
+
+    const result = await preview({}, undefined, 100);
+
+    expect(textOf(result)).toBe(
+      "Failed to preview order: GET /customer/cart/vendor/102555 timed out after 100ms",
+    );
+    expect(received).toHaveLength(1);
+  });
+
+  test("never creates an order, quote or payment, and never changes the cart", async () => {
+    scriptCheckout({ cart: previewCart() });
+
+    for (const payment_method of ["wallet", "pay_for_me"]) {
+      await preview({ payment_method });
+    }
+
+    expect(received.map((r) => r.method)).not.toContain("POST");
+    expect(received.map((r) => r.method)).not.toContain("DELETE");
+    expect(quotePosts()).toHaveLength(0);
+    expectOnlyReads();
+  });
+});

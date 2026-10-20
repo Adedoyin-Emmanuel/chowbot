@@ -78,6 +78,32 @@ export type CheckoutQuoteResult = {
 };
 
 /*
+ * Payment choices whose order fields are known from the storefront code:
+ * wallet sends no payment_method_id (observed methods carry no id), and
+ * pay_for_me sends has_external_payment instead. "Pay online" opens a
+ * sub-method picker whose shape was never observed, so it is not offered.
+ */
+export const PREVIEW_PAYMENT_METHODS = ["wallet", "pay_for_me"] as const;
+export type PreviewPaymentMethod = (typeof PREVIEW_PAYMENT_METHODS)[number];
+
+const WITHHELD_FEE_ID =
+  "<withheld: a submission would first request a fresh delivery-fee quote, which creates a fee record, so a dry run requests none>";
+const WITHHELD_ADDRESS_ID = "<withheld: your selected saved address>";
+const WITHHELD_NOTE = "<withheld: copied from your cart>";
+
+export type OrderPreviewResult = {
+  dry_run: true;
+  submitted: false;
+  restaurant: Record<string, ScalarValue>;
+  cart: Record<string, ScalarValue>;
+  validations: string[];
+  payload_preview: Record<string, unknown>;
+  omitted_fields: Record<string, string>;
+  not_performed: string[];
+  assumptions: string[];
+};
+
+/*
  * A quote ChowBot refuses to request. Messages never include address IDs,
  * source/destination IDs or fee IDs.
  */
@@ -230,7 +256,34 @@ class CheckoutService {
     restaurantId: number,
     addressId: number,
   ): Promise<CheckoutQuoteResult> {
-    const cartResult = await this.carts.getVendorCart(restaurantId);
+    const { cart, vendor, restaurant } = await this.validateCheckout(
+      restaurantId,
+      addressId,
+    );
+    const total = cart.total_price;
+
+    const quoteData = await this.requestQuote({
+      destination_id: addressId,
+      order_class: ORDER_CLASS,
+      source_id: vendor.sourceId,
+      vendor_id: restaurantId,
+      currency: CHECKOUT_CURRENCY,
+      country_code: CHECKOUT_COUNTRY_CODE,
+      cart_id: cart.id,
+    });
+
+    return this.buildQuoteResult(cart, restaurant, quoteData, total);
+  }
+
+  /*
+   * Checks shared by the quote and the order preview, in the order the
+   * website applies them: the user's own valid cart, one of their saved
+   * addresses, an open restaurant, and the restaurant's minimum order.
+   * Only GET requests are made.
+   */
+  private async validateCheckout(restaurantId: number, addressId: number) {
+    const snapshot = await this.carts.getVendorCartSnapshot(restaurantId);
+    const cartResult = snapshot.result;
     if (!cartResult.exists) {
       throw new CheckoutRefusedError("there is no cart for this restaurant");
     }
@@ -265,16 +318,15 @@ class CheckoutService {
       );
     }
 
-    const quoteData = await this.requestQuote({
-      destination_id: addressId,
-      order_class: ORDER_CLASS,
-      source_id: vendor.sourceId,
-      vendor_id: restaurantId,
-      currency: CHECKOUT_CURRENCY,
-      country_code: CHECKOUT_COUNTRY_CODE,
-      cart_id: cart.id,
-    });
+    return { cart, raw: snapshot.raw ?? {}, vendor, restaurant };
+  }
 
+  private async buildQuoteResult(
+    cart: CartDetail,
+    restaurant: Record<string, ScalarValue>,
+    quoteData: Record<string, unknown>,
+    total: unknown,
+  ): Promise<CheckoutQuoteResult> {
     const quote: CheckoutQuoteResult["quote"] = pickScalarFields(
       quoteData,
       QUOTE_FIELDS,
@@ -332,6 +384,106 @@ class CheckoutService {
       result.payment_methods_error = `payment methods could not be retrieved (${lookup.error}); the quote above is still valid`;
     }
     return result;
+  }
+
+  /*
+   * Builds the normal cart-based delivery order the storefront would send,
+   * without sending it. Only GET requests are made: no delivery-fee quote,
+   * no order, no payment and no cart change. Private values in the payload
+   * are replaced by placeholders.
+   */
+  async previewOrder(
+    restaurantId: number,
+    addressId: number,
+    paymentMethod: PreviewPaymentMethod,
+  ): Promise<OrderPreviewResult> {
+    const { cart, raw, vendor, restaurant } = await this.validateCheckout(
+      restaurantId,
+      addressId,
+    );
+    if (cart.packs.length === 0) {
+      throw new CheckoutRefusedError("the cart has no items");
+    }
+
+    const vendorCurrency = vendor.fields.currency;
+    if (vendorCurrency !== undefined && vendorCurrency !== CHECKOUT_CURRENCY) {
+      throw new CheckoutRefusedError(
+        `only ${CHECKOUT_CURRENCY} orders can be previewed; this restaurant uses a different currency`,
+      );
+    }
+
+    const orderClass =
+      vendor.fields.self_delivery === true ? "vendor_delivery" : ORDER_CLASS;
+    const note = (value: unknown) =>
+      typeof value === "string" && value.length > 0 ? WITHHELD_NOTE : null;
+
+    const payload: Record<string, unknown> = {
+      source: "web",
+      vendor_id: restaurantId,
+      cart_id: cart.id,
+      checkout_from_cart: true,
+      class: orderClass,
+      payment_method: paymentMethod,
+      ...(paymentMethod === "pay_for_me" && { has_external_payment: true }),
+      promo_codes: [],
+      customer_vendor_note: note(raw.customer_vendor_note),
+      customer_delivery_note: note(raw.customer_delivery_note),
+      ...(isAmount(raw.bag_quantity) && { bag_quantity: raw.bag_quantity }),
+      requires_delivery_pin: true,
+      fee_id: WITHHELD_FEE_ID,
+      address_id: WITHHELD_ADDRESS_ID,
+      split_payment_with_wallet: false,
+      gift_recipient: null,
+      country_code: CHECKOUT_COUNTRY_CODE,
+      currency: CHECKOUT_CURRENCY,
+    };
+
+    const omitted: Record<string, string> = {
+      payment_method_id:
+        paymentMethod === "pay_for_me"
+          ? "replaced by has_external_payment for pay_for_me"
+          : "not sent for wallet: the payment methods Chowdeck lists carry no id",
+      tip: "no tip is added in a preview",
+    };
+    if (!isAmount(raw.bag_quantity)) {
+      omitted.bag_quantity = "the cart has no numeric bag_quantity";
+    }
+
+    return {
+      dry_run: true,
+      submitted: false,
+      restaurant,
+      cart: {
+        id: cart.id as ScalarValue,
+        total_price: (cart.total_price ?? null) as ScalarValue,
+        currency: (cart.currency ?? null) as ScalarValue,
+        pack_count: cart.packs.length,
+      },
+      validations: [
+        "you are signed in to Chowdeck",
+        "a cart exists for this restaurant and belongs to it",
+        "the cart is valid and has items",
+        "address_id is one of your saved delivery addresses",
+        "the restaurant is not marked closed",
+        "the cart total meets the restaurant's minimum order",
+        `the restaurant's currency is ${CHECKOUT_CURRENCY}`,
+        `${paymentMethod} is a supported payment choice`,
+      ],
+      payload_preview: payload,
+      omitted_fields: omitted,
+      not_performed: [
+        "no delivery-fee quote was requested (it would create a fee record on Chowdeck)",
+        "no order was created",
+        "no payment was started",
+        "the cart was not changed",
+      ],
+      assumptions: [
+        "the payload copies the Chowdeck website's code; the server's required fields have never been observed",
+        "the server is assumed to build the order from the stored cart (checkout_from_cart), so no items or prices are sent",
+        "a submission would need a fresh delivery-fee quote first; whether Chowdeck accepts an older fee_id is unknown",
+        "promo codes, tips, gifting and splitting with the wallet are left off",
+      ],
+    };
   }
 }
 
