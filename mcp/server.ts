@@ -7,6 +7,7 @@ import { registerAuthTools } from "../features/auth/tools";
 import { registerMenuTools } from "../features/menus/tools";
 import { registerCartTools } from "../features/carts/tools";
 import { registerCheckoutTools } from "../features/checkout/tools";
+import { registerOrderTools } from "../features/orders/tools";
 import { registerAddressTools } from "../features/addresses/tools";
 import { registerArithmeticTool } from "../features/arithmetic/tools";
 import { registerRestaurantTools } from "../features/restaurants/tools";
@@ -50,6 +51,7 @@ export const createServer = ({
   registerAddressTools(server, session);
   registerCartTools(server, session);
   registerCheckoutTools(server, session);
+  registerOrderTools(server, session);
 
   if (enableChatLogin) registerAuthTools(server, session);
 
