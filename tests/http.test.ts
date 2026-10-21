@@ -25,9 +25,12 @@ import { createTestDatabase, describePostgres } from "./helpers/postgres";
  */
 
 const ROOT = join(import.meta.dir, "..");
+/*
+ * The captured website values: methods set but empty, country NG.
+ */
 const CHANNEL = {
-  CHOWBOT_PAYMENT_CHANNEL_METHODS: "TEST-PLACEHOLDER-METHODS",
-  CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "TEST-PLACEHOLDER-COUNTRY",
+  CHOWBOT_PAYMENT_CHANNEL_METHODS: "",
+  CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG",
 };
 
 type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
@@ -70,22 +73,25 @@ const freePort = () => {
   return port;
 };
 
+let childLog = "";
+
+/*
+ * Copies the child's stderr into childLog in the background, and resolves
+ * once the server reports it is listening.
+ */
 const waitForStart = async (process: Bun.Subprocess<"ignore", "pipe", "pipe">) => {
+  childLog = "";
   const decoder = new TextDecoder();
-  let output = "";
-  const reader = process.stderr.getReader();
+  void (async () => {
+    for await (const chunk of process.stderr) childLog += decoder.decode(chunk);
+  })();
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    const chunk = await Promise.race([reader.read(), Bun.sleep(500).then(() => undefined)]);
-    if (chunk?.value) output += decoder.decode(chunk.value);
-    if (output.includes("up and running")) {
-      reader.releaseLock();
-      return output;
-    }
-    if (chunk?.done || process.exitCode !== null) break;
+    if (childLog.includes("up and running")) return childLog;
+    if (process.exitCode !== null) break;
+    await Bun.sleep(50);
   }
-  reader.releaseLock();
-  throw new Error(`http.ts did not start:\n${output}`);
+  throw new Error(`http.ts did not start:\n${childLog}`);
 };
 
 /*
@@ -135,7 +141,7 @@ const toolsWith = async (entry: string, placeOrderEnv: Record<string, string>) =
   const text = await response.text();
   const data = text.split("\n").find((line) => line.startsWith("data: "));
   const body = JSON.parse(data ? data.slice("data: ".length) : text);
-  return { names: (body.result.tools as { name: string }[]).map((tool) => tool.name), log };
+  return { names: (body.result.tools as { name: string }[]).map((tool) => tool.name), log, origin: new URL(serverUrl).origin };
 };
 
 const mtime = async (path: string) => (await stat(path).catch(() => undefined))?.mtimeMs;
@@ -181,7 +187,9 @@ describePostgres.each(ENTRIES)("the production HTTP server: %s", (_, resolveEntr
     ["channel values with the flag false", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "false" }],
     ["channel values with a non-exact flag", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "1" }],
     ["the flag without channel values", { CHOWBOT_PLACE_ORDER_ENABLED: "true" }],
-    ["the flag with only one channel value", { CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_METHODS: "TEST-PLACEHOLDER-METHODS" }],
+    ["the flag with methods unset", { CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG" }],
+    ["the flag with the country unset", { CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_METHODS: "" }],
+    ["the flag with a guessed methods value", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_METHODS: "card" }],
   ])("keeps place_order unregistered with %s", async (_, env) => {
     const { names } = await toolsWith(entry, env);
 
@@ -195,11 +203,35 @@ describePostgres.each(ENTRIES)("the production HTTP server: %s", (_, resolveEntr
     expect(log).toContain("place_order stays disabled");
   }, 30_000);
 
-  test("registers place_order only with the flag and both channel values, and never start_payment", async () => {
+  test("refuses channel values that differ from the capture, with a startup warning", async () => {
+    const { names, log } = await toolsWith(entry, { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "ng" });
+
+    expect(names).not.toContain("place_order");
+    expect(log).toContain("differ from the captured website request");
+  }, 30_000);
+
+  test("registers place_order only with the flag and both captured channel values, and never start_payment", async () => {
     const { names } = await toolsWith(entry, { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
 
     expect(names).toContain("place_order");
     expect(names).not.toContain("start_payment");
+  }, 30_000);
+
+  test("answers liveness and readiness probes, then drains and exits 0 on SIGTERM", async () => {
+    const { origin } = await toolsWith(entry, {});
+
+    for (const [path, status, label] of [["/healthz", 200, "ok"], ["/readyz", 200, "ready"]] as const) {
+      const response = await fetch(`${origin}${path}`);
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ status: label });
+    }
+
+    child!.kill("SIGTERM");
+    expect(await child!.exited).toBe(0);
+    await Bun.sleep(50);
+    expect(childLog).toContain("Shutting down (SIGTERM)");
+    expect(childLog).toContain("Shutdown complete.");
+    expect(await fetch(`${origin}/healthz`).then(() => "served", () => "refused")).toBe("refused");
   }, 30_000);
 
   test("leaves dist/ and package.json untouched", async () => {

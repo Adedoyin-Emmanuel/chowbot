@@ -69,7 +69,20 @@ export type HttpAppOptions = {
   paymentChannelQuery?: PaymentChannelQuery;
   paymentStartConfig?: PaymentStartConfig;
   placeOrderEnabled?: boolean;
+  lifecycle?: AppLifecycle;
 };
+
+/*
+ * Process health for probes. isShuttingDown turns readiness off and refuses
+ * new requests; checkDatabase is a cheap readiness ping.
+ */
+export type AppLifecycle = {
+  isShuttingDown: () => boolean;
+  checkDatabase: () => Promise<boolean>;
+};
+
+export const LIVENESS_PATH = "/healthz";
+export const READINESS_PATH = "/readyz";
 
 type AuthenticatedRequest = { auth?: AuthInfo };
 
@@ -121,6 +134,7 @@ export const createHttpApp = ({
   paymentChannelQuery,
   paymentStartConfig,
   placeOrderEnabled,
+  lifecycle,
 }: HttpAppOptions) => {
   assertIssuerHostedBy(issuerUrl, serverUrl);
 
@@ -168,6 +182,40 @@ export const createHttpApp = ({
   );
 
   const app = express();
+
+  /*
+   * Liveness never touches the database, so a database outage does not get
+   * the process restarted; readiness does, and fails while shutting down.
+   * Neither reveals anything beyond ok / not ready.
+   */
+  app.get(LIVENESS_PATH, (_req, res) => {
+    res.set("cache-control", "no-store").json({ status: "ok" });
+  });
+  app.get(READINESS_PATH, async (_req, res) => {
+    const ready =
+      !lifecycle ||
+      (!lifecycle.isShuttingDown() &&
+        (await lifecycle.checkDatabase().catch(() => false)));
+    res
+      .status(ready ? 200 : 503)
+      .set("cache-control", "no-store")
+      .json({ status: ready ? "ready" : "not_ready" });
+  });
+
+  /*
+   * Once shutdown has begun, a new request arriving on a kept-alive
+   * connection is refused before it can start anything (an order request
+   * included); requests already running are left to finish.
+   */
+  if (lifecycle) {
+    app.use((_req, res, next) => {
+      if (!lifecycle.isShuttingDown()) return next();
+      res
+        .status(503)
+        .set({ connection: "close", "retry-after": "5" })
+        .json({ error: "server_shutting_down" });
+    });
+  }
 
   app.use(createOAuthRouter({ metadata: authorizationServer, clients }));
   app.use(

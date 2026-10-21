@@ -237,3 +237,94 @@ describe("/mcp bearer authentication", () => {
     expect(await callTool(second, "read_phone")).toBe("08033333333");
   });
 });
+
+describe("health and shutdown", () => {
+  const appWith = (lifecycle?: { isShuttingDown: () => boolean; checkDatabase: () => Promise<boolean> }) =>
+    listen(
+      createHttpApp({
+        serverUrl: SERVER_URL,
+        issuerUrl: ISSUER_URL,
+        users: new InMemoryUserStore(),
+        clients: new InMemoryClientStore(),
+        codes: new InMemoryAuthorizationCodeStore(),
+        tokens,
+        sessions,
+        serverFactory: probeServer,
+        ...(lifecycle && { lifecycle }),
+      }),
+    );
+
+  const state = { shuttingDown: false, database: true as boolean | "throws" };
+  const lifecycle = {
+    isShuttingDown: () => state.shuttingDown,
+    checkDatabase: async () => {
+      if (state.database === "throws") throw new Error("connection refused");
+      return state.database;
+    },
+  };
+  let app: Listening;
+
+  beforeAll(async () => {
+    app = await appWith(lifecycle);
+  });
+
+  afterAll(() => app.server.close());
+
+  beforeEach(() => {
+    state.shuttingDown = false;
+    state.database = true;
+  });
+
+  const get = async (path: string) => {
+    const response = await fetch(`${app.baseUrl}${path}`);
+    return { status: response.status, body: await response.json(), cache: response.headers.get("cache-control") };
+  };
+
+  test("liveness answers without consulting the database or a token", async () => {
+    state.database = "throws";
+
+    expect(await get("/healthz")).toEqual({ status: 200, body: { status: "ok" }, cache: "no-store" });
+  });
+
+  test.each([
+    ["the database answers", true, false, 200, "ready"],
+    ["the database ping fails", false, false, 503, "not_ready"],
+    ["the database ping throws", "throws", false, 503, "not_ready"],
+    ["the server is shutting down", true, true, 503, "not_ready"],
+  ] as const)("readiness when %s", async (_, database, shuttingDown, status, label) => {
+    state.database = database;
+    state.shuttingDown = shuttingDown;
+
+    const result = await get("/readyz");
+
+    expect(result.status).toBe(status);
+    expect(result.body).toEqual({ status: label });
+    expect(JSON.stringify(result.body)).not.toContain("connection refused");
+  });
+
+  test("refuses new MCP and OAuth requests once shutting down, before authentication or tools run", async () => {
+    const token = await issue();
+    state.shuttingDown = true;
+    factoryCalls = 0;
+
+    const mcp = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }, `Bearer ${token}`);
+    const metadata = await fetch(`${app.baseUrl}/.well-known/oauth-protected-resource/mcp`);
+
+    for (const response of [mcp, metadata]) {
+      expect(response.status).toBe(503);
+      expect(response.headers.get("connection")).toBe("close");
+    }
+    expect(factoryCalls).toBe(0);
+    expect((await get("/healthz")).status).toBe(200);
+  });
+
+  test("without a lifecycle the app reports ready and never refuses", async () => {
+    const plain = await appWith();
+    try {
+      expect((await fetch(`${plain.baseUrl}/readyz`)).status).toBe(200);
+      expect((await fetch(`${plain.baseUrl}/.well-known/oauth-protected-resource/mcp`)).status).toBe(200);
+    } finally {
+      plain.server.close();
+    }
+  });
+});

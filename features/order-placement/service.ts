@@ -287,6 +287,7 @@ class OrderPlacementService {
       `Deliver to: ${addressLabel}.`,
       `Total: ${submission.computedTotal} (raw Chowdeck amount: cart total plus delivery and service fees, computed by ChowBot).`,
       `Payment: ${channel.name}. The order is created unpaid; payment is completed separately.`,
+      "Tip: none (ChowBot does not add a tip).",
       ...(unresolved.open.length > 0
         ? [
             `Warning: you have ${unresolved.open.length} earlier order attempt(s) at this restaurant that are unpaid or have an unknown outcome. Placing this order may result in more than one order. Confirm acknowledge_unresolved_attempts to continue.`,

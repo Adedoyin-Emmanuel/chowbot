@@ -113,7 +113,7 @@ export const registerOrderPlacementTools = (
     {
       title: "Place order",
       description:
-        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). Asks the user to confirm the items, address, total and payment channel through the client before anything is sent. The order is created unpaid; payment is not started by ChowBot. Never call it again after an unknown outcome.",
+        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). Asks the user to confirm the items, address, total and payment channel through the client before anything is sent. The order is created unpaid; payment is not started by ChowBot. No tip is added. Never call it again after an unknown outcome.",
       inputSchema: z.object(placeOrderSchema),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },

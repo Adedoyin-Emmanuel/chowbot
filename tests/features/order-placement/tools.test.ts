@@ -19,15 +19,17 @@ import { registerCheckoutTools } from "../../../features/checkout/tools";
 import { createTestDatabase, describePostgres } from "../../helpers/postgres";
 import type { OrderSubmissionStore } from "../../../lib/order-submissions";
 import { registerOrderPlacementTools } from "../../../features/order-placement/tools";
+import { CAPTURED_PAYMENT_CHANNEL_QUERY } from "../../../features/order-placement/channels";
 import { createDrizzle } from "../../../lib/postgres/database";
 import { PostgresRecoveryStore } from "../../../lib/postgres/recovery";
+import { createGracefulShutdown } from "../../../lib/lifecycle";
 
 /*
  * End-to-end placement over the real hosted stack: createHttpApp, the
  * PostgreSQL stores (sessions, tokens, order submissions), the production
  * requestState codec, and modern 2026-07-28 rounds shaped like the official
- * client's. Only Chowdeck is mocked. The payment-channel query values below
- * are placeholders: the real values have not been observed.
+ * client's. Only Chowdeck is mocked. The payment-channel query is the one
+ * captured from the website on 2026-10-21 (methods empty, country NG).
  */
 
 type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
@@ -37,7 +39,7 @@ type Handler = () => Response | Promise<Response>;
 const SERVER_URL = new URL("http://localhost:2800/mcp");
 const keyring = createKeyring(randomBytes(32));
 const codec = createChowbotRequestStateCodec(keyring.requestStateKey);
-const TEST_CHANNEL_QUERY = { methods: "TEST-PLACEHOLDER-METHODS", countryIdentifier: "TEST-PLACEHOLDER-COUNTRY" };
+const CHANNEL_QUERY = CAPTURED_PAYMENT_CHANNEL_QUERY;
 
 const ADDRESS_ID = 918273;
 const VENDOR_ADDRESS_ID = 645372;
@@ -157,9 +159,18 @@ const storeWith = (overrides: Partial<OrderSubmissionStore>): OrderSubmissionSto
   return { ...delegate, ...overrides } as OrderSubmissionStore;
 };
 
-const startApp = async (options: { store?: OrderSubmissionStore; timeoutMs?: number; channelQuery?: boolean } = {}) => {
+type Shutdown = ReturnType<typeof createGracefulShutdown>;
+let lastShutdown: { controller: Shutdown; exits: number[] } | undefined;
+
+const startApp = async (
+  options: { store?: OrderSubmissionStore; timeoutMs?: number; channelQuery?: boolean; shutdownGraceMs?: number } = {},
+) => {
   const client = new ChowdeckClient({ baseUrl: chowdeck.url.origin, timeoutMs: options.timeoutMs ?? 1000 });
+  let controller: Shutdown | undefined;
   const app = createHttpApp({
+    ...(options.shutdownGraceMs !== undefined && {
+      lifecycle: { isShuttingDown: () => controller?.isShuttingDown() ?? false, checkDatabase: async () => true },
+    }),
     serverUrl: SERVER_URL,
     issuerUrl: new URL(SERVER_URL.origin),
     ...stores,
@@ -171,7 +182,7 @@ const startApp = async (options: { store?: OrderSubmissionStore; timeoutMs?: num
       registerOrderPlacementTools(server, {
         ...opts,
         client,
-        ...(options.channelQuery !== false && { paymentChannelQuery: TEST_CHANNEL_QUERY }),
+        ...(options.channelQuery !== false && { paymentChannelQuery: CHANNEL_QUERY }),
         placeOrderEnabled: true,
       });
       return server;
@@ -180,7 +191,18 @@ const startApp = async (options: { store?: OrderSubmissionStore; timeoutMs?: num
   const server = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
-  servers.push(server);
+  if (options.shutdownGraceMs !== undefined) {
+    const exits: number[] = [];
+    controller = createGracefulShutdown({
+      server,
+      graceMs: options.shutdownGraceMs,
+      exit: (code) => void exits.push(code),
+      log: { info: () => {}, error: () => {} },
+    });
+    lastShutdown = { controller, exits };
+  } else {
+    servers.push(server);
+  }
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 };
 
@@ -336,11 +358,11 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       const hosted = await names({ session, submissions, requestStateCodec: codec });
       expect(hosted).toEqual(expect.arrayContaining(["get_order_submission", "resolve_order_submission"]));
       expect(hosted).not.toContain("place_order");
-      const configured = { session, submissions, requestStateCodec: codec, paymentChannelQuery: TEST_CHANNEL_QUERY };
+      const configured = { session, submissions, requestStateCodec: codec, paymentChannelQuery: CHANNEL_QUERY };
       expect(await names(configured)).not.toContain("place_order");
       expect(await names({ ...configured, placeOrderEnabled: false })).not.toContain("place_order");
       expect(await names({ ...configured, placeOrderEnabled: true })).toContain("place_order");
-      expect(await names({ session, submissions, paymentChannelQuery: TEST_CHANNEL_QUERY, placeOrderEnabled: true })).not.toContain("place_order");
+      expect(await names({ session, submissions, paymentChannelQuery: CHANNEL_QUERY, placeOrderEnabled: true })).not.toContain("place_order");
       expect(await names({ session, submissions, requestStateCodec: codec, placeOrderEnabled: true })).not.toContain("place_order");
     });
   });
@@ -364,7 +386,8 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(posts("/customer/order")).toHaveLength(0);
       expect(posts("/customer/delivery/amount")).toHaveLength(0);
       const channelLookup = received.find((r) => r.path === "/customer/payment/channel")!;
-      expect(Object.fromEntries(channelLookup.query)).toEqual({ methods: "TEST-PLACEHOLDER-METHODS", country_identifier: "TEST-PLACEHOLDER-COUNTRY" });
+      expect(channelLookup.query.toString()).toBe("methods=&country_identifier=NG");
+      expect(channelLookup.authorization).toBe("Bearer secret-token-alice");
       const pending = await row(quoteRef);
       expect(pending.state).toBe("confirmation_pending");
       expect(Number(pending.payment_method_id)).toBe(OPAY_CHANNEL_ID);
@@ -497,6 +520,28 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(created.state).toBe("created");
       expect(Number(created.chowdeck_order_id)).toBe(ORDER_ID);
       expect(created.order_request_started_at).toBeInstanceOf(Date);
+    });
+
+    /*
+     * The website omits tip unless the user picks one, and never sends 0.
+     * ChowBot offers no tip choice: a tip argument is dropped by the schema,
+     * the confirmation says no tip is added, and the order carries no tip.
+     */
+    test("never sends a tip, even when the caller passes one, and says so in the confirmation", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const args = { ...placeArgs(quoteRef), tip: 50000 };
+
+      const first = await call({ baseUrl, name: "place_order", args });
+      expect(first.result.inputRequests.confirm.params.message).toContain("Tip: none (ChowBot does not add a tip).");
+      expect(first.result.inputRequests.confirm.params.message).toContain("Total: 554000");
+      const second = await call({ baseUrl, name: "place_order", args, inputResponses: ACCEPT, requestState: first.result.requestState });
+
+      expect(JSON.parse(textOf(second)).order_id).toBe(ORDER_ID);
+      const [order] = posts("/customer/order");
+      expect(order!.body).not.toHaveProperty("tip");
+      expect(JSON.stringify(order!.body)).not.toContain("50000");
     });
 
     test("sends the gate quote before the order, and the order last", async () => {
@@ -1149,6 +1194,63 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(first.inputRequests.confirm.params.message).not.toContain("marked abandoned");
       expect(Object.keys(first.inputRequests.confirm.params.requestedSchema.properties)).toEqual(["confirm"]);
       expect(JSON.parse(textOf(second)).order_id).toBe(ORDER_ID);
+    });
+  });
+
+
+  /*
+   * A stop signal while an order request is out. Nothing may re-send the
+   * order: a drained request records its outcome; one cut off by the grace
+   * deadline keeps its marker and is reported as an unknown outcome.
+   */
+  describe("shutdown during an order request", () => {
+    const sendOrderDuringShutdown = async (upstreamDelayMs: number, graceMs: number) => {
+      scriptHappyPath();
+      route("POST /customer/order", async () => {
+        await Bun.sleep(upstreamDelayMs);
+        return orderCreated()();
+      });
+      const baseUrl = await startApp({ shutdownGraceMs: graceMs, timeoutMs: 5000 });
+      const { controller, exits } = lastShutdown!;
+      const quoteRef = await getQuoteRef(baseUrl);
+      const first = await firstRound(baseUrl, quoteRef);
+
+      const second = call({ baseUrl, name: "place_order", args: placeArgs(quoteRef), inputResponses: ACCEPT, requestState: first.requestState });
+      while (posts("/customer/order").length === 0) await Bun.sleep(5);
+      controller.shutdown("SIGTERM");
+      return { quoteRef, second, exits, baseUrl };
+    };
+
+    test("drains: the order in flight completes and is recorded, sent exactly once, and new requests are refused", async () => {
+      const { quoteRef, second, exits, baseUrl } = await sendOrderDuringShutdown(300, 5_000);
+
+      const refused = await call({ baseUrl, name: "get_order_submission", args: { restaurant_id: 102555 } }).then(
+        (body) => body,
+        () => "connection refused",
+      );
+      expect(refused === "connection refused" || refused?.error === "server_shutting_down").toBe(true);
+
+      const result = JSON.parse(textOf(await second));
+      expect(result.order_id).toBe(ORDER_ID);
+      expect((await row(quoteRef)).state).toBe("created");
+      while (exits.length === 0) await Bun.sleep(5);
+      expect(exits).toEqual([0]);
+      await Bun.sleep(100);
+      expect(posts("/customer/order")).toHaveLength(1);
+    });
+
+    test("grace expiry leaves the attempt sent with an unknown outcome and never re-sends the order", async () => {
+      const { quoteRef, second, exits } = await sendOrderDuringShutdown(600, 100);
+
+      while (exits.length === 0) await Bun.sleep(5);
+      expect(exits[0]).toBe(1);
+      const atExit = await row(quoteRef);
+      expect(atExit.state).toBe("submitting");
+      expect(atExit.order_request_started_at).toBeInstanceOf(Date);
+
+      await second.catch(() => undefined);
+      await Bun.sleep(100);
+      expect(posts("/customer/order")).toHaveLength(1);
     });
   });
 

@@ -4,15 +4,23 @@ import { ChowdeckApiError, type ChowdeckClient } from "../../lib/client";
 export const PAYMENT_CHANNEL_PATH = "/customer/payment/channel";
 
 /*
- * The query values the website sends with the channel list. Only their
- * names (methods, country_identifier) have been observed; the values have
- * not, so there are deliberately no defaults. Until they are captured, no
- * server configuration supplies them and place_order is not registered.
+ * The query values the website sends with the channel list.
  */
 export type PaymentChannelQuery = {
   methods: string;
   countryIdentifier: string;
 };
+
+/*
+ * Captured read-only on 2026-10-21 from the website's "Pay online" picker:
+ * GET /customer/payment/channel?methods=&country_identifier=NG, with methods
+ * present and empty, and no other parameters. Non-empty methods values were
+ * never observed. Production configuration must match these exactly.
+ */
+export const CAPTURED_PAYMENT_CHANNEL_QUERY: Readonly<PaymentChannelQuery> = Object.freeze({
+  methods: "",
+  countryIdentifier: "NG",
+});
 
 export type PaymentChannel = { id: number; name: string };
 
@@ -23,12 +31,17 @@ export type PaymentChannel = { id: number; name: string };
 export const SUPPORTED_PAYMENT_CHANNELS = ["opay"] as const;
 export type SupportedPaymentChannel = (typeof SUPPORTED_PAYMENT_CHANNELS)[number];
 
-const isActive = (value: unknown) => value === undefined || value === true || value === 1;
+/*
+ * Every observed channel carried is_active: 1. A channel that does not say
+ * it is active is treated as unavailable.
+ */
+const isActive = (value: unknown) => value === true || value === 1;
 
 /*
  * Resolves a channel name to the id the order sends as payment_method_id,
  * from the observed response: data[] of { id, name, processor, is_active }.
- * Returns undefined when the channel is absent or inactive.
+ * Returns undefined when the channel is absent or not active. methods is
+ * always sent, even empty, as the website sends it.
  */
 export const resolvePaymentChannel = async (
   client: ChowdeckClient,

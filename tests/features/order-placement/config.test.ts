@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import { readOrderPlacementConfig } from "../../../features/order-placement/config";
 
-const CHANNEL = {
-  CHOWBOT_PAYMENT_CHANNEL_METHODS: "TEST-PLACEHOLDER-METHODS",
-  CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "TEST-PLACEHOLDER-COUNTRY",
+/*
+ * The captured website request: methods present and empty, country NG.
+ */
+const CAPTURED = {
+  CHOWBOT_PAYMENT_CHANNEL_METHODS: "",
+  CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG",
 };
 
 describe("readOrderPlacementConfig", () => {
@@ -12,15 +15,19 @@ describe("readOrderPlacementConfig", () => {
     expect(readOrderPlacementConfig({})).toEqual({ placeOrderEnabled: false, warnings: [] });
   });
 
-  test("channel values alone never enable place_order", () => {
-    const config = readOrderPlacementConfig(CHANNEL);
+  test("accepts the captured values, with methods set but empty", () => {
+    const config = readOrderPlacementConfig(CAPTURED);
 
-    expect(config.placeOrderEnabled).toBe(false);
-    expect(config.paymentChannelQuery).toEqual({ methods: "TEST-PLACEHOLDER-METHODS", countryIdentifier: "TEST-PLACEHOLDER-COUNTRY" });
+    expect(config.paymentChannelQuery).toEqual({ methods: "", countryIdentifier: "NG" });
+    expect(config.warnings).toEqual([]);
+  });
+
+  test("channel values alone never enable place_order", () => {
+    expect(readOrderPlacementConfig(CAPTURED).placeOrderEnabled).toBe(false);
   });
 
   test.each([["false"], ["TRUE"], ["1"], ["yes"], [""]])("only the exact value true enables it, not %p", (flag) => {
-    expect(readOrderPlacementConfig({ ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: flag }).placeOrderEnabled).toBe(false);
+    expect(readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PLACE_ORDER_ENABLED: flag }).placeOrderEnabled).toBe(false);
   });
 
   test("warns about an unrecognised flag value", () => {
@@ -29,20 +36,39 @@ describe("readOrderPlacementConfig", () => {
 
   test.each([
     ["no channel values", {}],
-    ["only methods", { CHOWBOT_PAYMENT_CHANNEL_METHODS: "x" }],
-    ["a blank country identifier", { ...CHANNEL, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "  " }],
+    ["methods unset", { CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG" }],
+    ["the country unset", { CHOWBOT_PAYMENT_CHANNEL_METHODS: "" }],
   ])("the flag with %s supplies no channel query and warns", (_, env) => {
     const config = readOrderPlacementConfig({ ...env, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
 
     expect(config.paymentChannelQuery).toBeUndefined();
-    expect(config.warnings[0]).toContain("place_order stays disabled");
+    expect(config.warnings.join(" ")).toContain("place_order stays disabled");
   });
 
-  test("the flag with both channel values enables it", () => {
-    const config = readOrderPlacementConfig({ ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
+  test.each([
+    ["a guessed non-empty methods value", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_METHODS: "card,opay" }],
+    ["a lowercase country", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "ng" }],
+    ["another country", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "GH" }],
+    ["an empty country", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "" }],
+  ])("refuses %s, even with the flag on", (_, env) => {
+    const config = readOrderPlacementConfig({ ...env, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
+
+    expect(config.paymentChannelQuery).toBeUndefined();
+    expect(config.warnings[0]).toContain("differ from the captured website request");
+  });
+
+  test("treats whitespace-only methods as the captured empty value", () => {
+    expect(readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_METHODS: "  " }).paymentChannelQuery).toEqual({
+      methods: "",
+      countryIdentifier: "NG",
+    });
+  });
+
+  test("the flag with both captured values enables it", () => {
+    const config = readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
 
     expect(config.placeOrderEnabled).toBe(true);
-    expect(config.paymentChannelQuery).toBeDefined();
+    expect(config.paymentChannelQuery).toEqual({ methods: "", countryIdentifier: "NG" });
     expect(config.warnings).toEqual([]);
   });
 });
