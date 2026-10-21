@@ -1,0 +1,6 @@
+{
+  // The root tsconfig does not reach dot-directories, so CI scripts are
+  // typechecked separately with the same compiler options.
+  "extends": "../../tsconfig.json",
+  "include": ["./*.ts"]
+}

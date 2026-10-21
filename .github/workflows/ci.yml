@@ -1,0 +1,121 @@
+name: CI
+
+# Read-only verification: nothing is pushed, published or deployed, and no
+# secrets are needed. Tests talk only to the Postgres service below and to
+# local mocks; Chowdeck is never contacted.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Matches the Dockerfile's oven/bun:1.3.13 images.
+  BUN_VERSION: 1.3.13
+  TEST_DATABASE_URL: postgres://chowbot:chowbot-ci@localhost:5432/chowbot_test
+  # drizzle-kit's config reads DATABASE_URL; db:check does not connect. It must
+  # differ from TEST_DATABASE_URL, which the test helper enforces.
+  DATABASE_URL: postgres://chowbot:chowbot-ci@localhost:5432/chowbot_unused
+
+jobs:
+  test:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: chowbot
+          POSTGRES_PASSWORD: chowbot-ci
+          POSTGRES_DB: chowbot_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U chowbot -d chowbot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: |
+          bun run typecheck
+          bunx tsc --noEmit -p .github/scripts/tsconfig.json
+
+      - name: Check migrations
+        run: bun run db:check
+
+      - name: Test (PostgreSQL-backed; skipped tests fail the build)
+        run: |
+          set -o pipefail
+          bun test 2>&1 | tee "$RUNNER_TEMP/test.log"
+          if grep -qE '^\s*[1-9][0-9]* skip' "$RUNNER_TEMP/test.log"; then
+            echo "::error::Some tests were skipped; the PostgreSQL-backed suite must run in full."
+            exit 1
+          fi
+
+      - name: Build
+        run: bun run build
+
+      - name: Smoke-test the built HTTP artifact
+        run: CHOWBOT_HTTP_ARTIFACT=dist/http.js bun test tests/http.test.ts -t "built artifact"
+
+  container:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: chowbot
+          POSTGRES_PASSWORD: chowbot-ci
+          POSTGRES_DB: chowbot_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U chowbot -d chowbot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies (for the test harness)
+        run: bun install --frozen-lockfile
+
+      - name: Build the image
+        run: docker build -t "chowbot:ci-${GITHUB_SHA}" .
+
+      - name: Smoke-test the HTTP artifact extracted from the image
+        run: |
+          id=$(docker create "chowbot:ci-${GITHUB_SHA}")
+          mkdir -p .artifact-check
+          docker cp "$id":/app/dist .artifact-check/dist
+          docker rm "$id"
+          CHOWBOT_HTTP_ARTIFACT=.artifact-check/dist/http.js bun test tests/http.test.ts -t "built artifact"
+
+      - name: Run the container (migrations, probes, graceful stop)
+        run: bun .github/scripts/container-smoke.ts "chowbot:ci-${GITHUB_SHA}"
