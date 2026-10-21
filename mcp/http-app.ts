@@ -28,6 +28,7 @@ import type { ChowdeckClient } from "../lib/client";
 import type { ClientStore } from "../lib/oauth-clients";
 import { createServer, type ServerOptions } from "./server";
 import type { PaymentChannelQuery } from "../features/order-placement/channels";
+import type { PaymentStartConfig } from "../features/payments/service";
 import { bindSession, type SessionStore } from "../lib/session";
 import {
   bindOrderSubmissions,
@@ -66,6 +67,8 @@ export type HttpAppOptions = {
   orderSubmissions?: OrderSubmissionStore;
   requestStateCodec?: RequestStateCodec;
   paymentChannelQuery?: PaymentChannelQuery;
+  paymentStartConfig?: PaymentStartConfig;
+  placeOrderEnabled?: boolean;
 };
 
 type AuthenticatedRequest = { auth?: AuthInfo };
@@ -116,6 +119,8 @@ export const createHttpApp = ({
   orderSubmissions,
   requestStateCodec,
   paymentChannelQuery,
+  paymentStartConfig,
+  placeOrderEnabled,
 }: HttpAppOptions) => {
   assertIssuerHostedBy(issuerUrl, serverUrl);
 
@@ -156,6 +161,8 @@ export const createHttpApp = ({
         }),
         ...(requestStateCodec && { requestStateCodec }),
         ...(paymentChannelQuery && { paymentChannelQuery }),
+        ...(paymentStartConfig && { paymentStartConfig }),
+        ...(placeOrderEnabled === true && { placeOrderEnabled }),
       });
     }),
   );

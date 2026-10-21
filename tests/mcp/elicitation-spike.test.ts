@@ -549,4 +549,34 @@ describe("elicitation spike: URL mode for payment links", () => {
     expect(textOf(second.body)).toBe("URL ROUND DONE action=accept");
     expect(JSON.stringify(second.body)).not.toContain("PRIVATE-PAYMENT-LINK");
   });
+
+  /*
+   * The SDK enforces the url capability only after the handler has returned,
+   * so a payment tool must check it itself before starting a payment
+   * upstream; otherwise the payment is started and its link is dropped.
+   */
+  test.each([
+    ["only form mode", { elicitation: { form: {} } }],
+    ["no elicitation", {}],
+  ])(
+    "the SDK refuses the URL request, without the link, for a client declaring %s",
+    async (_, capabilities) => {
+      const token = await issue("user-a");
+
+      const round = await modernCall({
+        token,
+        name: "url_spike",
+        args: {},
+        capabilities,
+      });
+
+      expect(round.status).toBe(400);
+      expect(round.body.result).toBeUndefined();
+      expect(round.body.error.code).toBe(-32021);
+      expect(round.body.error.data.requiredCapabilities).toEqual({
+        elicitation: { url: {} },
+      });
+      expect(JSON.stringify(round.body)).not.toContain("PRIVATE-PAYMENT-LINK");
+    },
+  );
 });

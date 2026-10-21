@@ -1,0 +1,209 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+
+import { createKeyring } from "../lib/encryption";
+import { issueAccessToken } from "../lib/oauth";
+import { registerClient } from "../lib/oauth-clients";
+import { createPostgresStores } from "../lib/postgres";
+import { migrate } from "../lib/postgres/migrations";
+import { createTestDatabase, describePostgres } from "./helpers/postgres";
+
+/*
+ * Runs the production HTTP server against a throwaway test database and
+ * lists the tools a signed-in user gets, twice: from the source entry point
+ * (http.ts) and from the built artifact the container runs (dist/http.js).
+ * The artifact is built with the package's own build script into a temporary
+ * directory, so dist/ and tracked files are never touched; set
+ * CHOWBOT_HTTP_ARTIFACT to smoke-test an existing artifact instead. The child
+ * runs from a directory holding only a link to the migrations, as the
+ * container runs from /app, with every variable set explicitly, so the
+ * project's .env (and its DATABASE_URL) is never loaded, and Chowdeck's base
+ * URL points at a closed local port. Listing tools contacts nothing.
+ */
+
+const ROOT = join(import.meta.dir, "..");
+const CHANNEL = {
+  CHOWBOT_PAYMENT_CHANNEL_METHODS: "TEST-PLACEHOLDER-METHODS",
+  CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "TEST-PLACEHOLDER-COUNTRY",
+};
+
+type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
+
+let database: TestDatabase;
+let workdir: string;
+let artifactDir: string | undefined;
+let child: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+const key = randomBytes(32);
+
+/*
+ * Builds with exactly the package's build script, redirected to outdir.
+ */
+const buildArtifact = async (outdir: string) => {
+  const { scripts } = await Bun.file(join(ROOT, "package.json")).json();
+  const build = scripts.build as string;
+  expect(build).toContain("--outdir dist");
+  const argv = build.replace("--outdir dist", `--outdir ${outdir}`).split(" ");
+  const proc = Bun.spawn(argv, { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+  if ((await proc.exited) !== 0) throw new Error(`build failed:\n${await new Response(proc.stderr).text()}`);
+  return join(outdir, "http.js");
+};
+
+const ENTRIES: [string, () => Promise<string>][] = [
+  ["source (http.ts)", async () => join(ROOT, "http.ts")],
+  [
+    "built artifact (dist/http.js)",
+    async () => {
+      if (process.env.CHOWBOT_HTTP_ARTIFACT) return join(ROOT, process.env.CHOWBOT_HTTP_ARTIFACT);
+      artifactDir = await mkdtemp(join(tmpdir(), "chowbot-artifact-"));
+      return buildArtifact(artifactDir);
+    },
+  ],
+];
+
+const freePort = () => {
+  const probe = Bun.serve({ port: 0, fetch: () => new Response() });
+  const { port } = probe;
+  probe.stop(true);
+  return port;
+};
+
+const waitForStart = async (process: Bun.Subprocess<"ignore", "pipe", "pipe">) => {
+  const decoder = new TextDecoder();
+  let output = "";
+  const reader = process.stderr.getReader();
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const chunk = await Promise.race([reader.read(), Bun.sleep(500).then(() => undefined)]);
+    if (chunk?.value) output += decoder.decode(chunk.value);
+    if (output.includes("up and running")) {
+      reader.releaseLock();
+      return output;
+    }
+    if (chunk?.done || process.exitCode !== null) break;
+  }
+  reader.releaseLock();
+  throw new Error(`http.ts did not start:\n${output}`);
+};
+
+/*
+ * Starts http.ts with the given place_order environment and returns the
+ * tool names an authenticated user sees, plus the server's log output.
+ */
+const toolsWith = async (entry: string, placeOrderEnv: Record<string, string>) => {
+  const port = freePort();
+  const serverUrl = `http://127.0.0.1:${port}/mcp`;
+  child = Bun.spawn(["bun", entry], {
+    cwd: workdir,
+    env: {
+      PATH: process.env.PATH!,
+      HOME: process.env.HOME!,
+      PORT: String(port),
+      DATABASE_URL: database.config.url,
+      CHOWBOT_ENCRYPTION_KEY: key.toString("base64"),
+      MCP_SERVER_URL: serverUrl,
+      OAUTH_ISSUER_URL: `http://127.0.0.1:${port}`,
+      CHOWDECK_API_BASE_URL: "http://127.0.0.1:9",
+      ...placeOrderEnv,
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const log = await waitForStart(child);
+
+  const sql = database.connect();
+  const stores = createPostgresStores(sql, createKeyring(key));
+  const client = await registerClient(stores.clients, { redirect_uris: ["https://app.example.com/cb"] });
+  const userId = await stores.users.findOrCreateByPhone(`080${Math.floor(Math.random() * 1e8)}`);
+  const token = await issueAccessToken(stores.tokens, {
+    userId, clientId: client.client_id, scopes: [], resource: serverUrl, expiresAt: Math.floor(Date.now() / 1000) + 600,
+  });
+
+  const response = await fetch(serverUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+      "mcp-protocol-version": "2025-06-18",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  const text = await response.text();
+  const data = text.split("\n").find((line) => line.startsWith("data: "));
+  const body = JSON.parse(data ? data.slice("data: ".length) : text);
+  return { names: (body.result.tools as { name: string }[]).map((tool) => tool.name), log };
+};
+
+const mtime = async (path: string) => (await stat(path).catch(() => undefined))?.mtimeMs;
+
+describePostgres.each(ENTRIES)("the production HTTP server: %s", (_, resolveEntry) => {
+  let entry: string;
+  let distBefore: number | undefined;
+  let packageBefore: string;
+
+  beforeAll(async () => {
+    distBefore = await mtime(join(ROOT, "dist", "http.js"));
+    packageBefore = await Bun.file(join(ROOT, "package.json")).text();
+    entry = await resolveEntry();
+    database = await createTestDatabase();
+    await migrate(database.connect());
+    workdir = await mkdtemp(join(tmpdir(), "chowbot-http-"));
+    await symlink(join(ROOT, "drizzle"), join(workdir, "drizzle"));
+  }, 120_000);
+
+  afterEach(async () => {
+    child?.kill();
+    await child?.exited;
+    child = undefined;
+  });
+
+  afterAll(async () => {
+    await rm(workdir, { recursive: true, force: true });
+    if (artifactDir) await rm(artifactDir, { recursive: true, force: true });
+    artifactDir = undefined;
+    await database.drop();
+  });
+
+  test("registers no place_order or start_payment by default, but the recovery-safe tools", async () => {
+    const { names } = await toolsWith(entry, {});
+
+    expect(names).toEqual(expect.arrayContaining(["get_order_submission", "resolve_order_submission", "preview_order"]));
+    expect(names).not.toContain("place_order");
+    expect(names).not.toContain("start_payment");
+  }, 30_000);
+
+  test.each([
+    ["channel values without the flag", CHANNEL],
+    ["channel values with the flag false", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "false" }],
+    ["channel values with a non-exact flag", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "1" }],
+    ["the flag without channel values", { CHOWBOT_PLACE_ORDER_ENABLED: "true" }],
+    ["the flag with only one channel value", { CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_METHODS: "TEST-PLACEHOLDER-METHODS" }],
+  ])("keeps place_order unregistered with %s", async (_, env) => {
+    const { names } = await toolsWith(entry, env);
+
+    expect(names).not.toContain("place_order");
+    expect(names).not.toContain("start_payment");
+  }, 30_000);
+
+  test("warns at startup when the flag is on but channel values are missing", async () => {
+    const { log } = await toolsWith(entry, { CHOWBOT_PLACE_ORDER_ENABLED: "true" });
+
+    expect(log).toContain("place_order stays disabled");
+  }, 30_000);
+
+  test("registers place_order only with the flag and both channel values, and never start_payment", async () => {
+    const { names } = await toolsWith(entry, { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
+
+    expect(names).toContain("place_order");
+    expect(names).not.toContain("start_payment");
+  }, 30_000);
+
+  test("leaves dist/ and package.json untouched", async () => {
+    expect(await mtime(join(ROOT, "dist", "http.js"))).toBe(distBefore);
+    expect(await Bun.file(join(ROOT, "package.json")).text()).toBe(packageBefore);
+  });
+});

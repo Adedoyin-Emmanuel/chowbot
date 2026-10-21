@@ -13,14 +13,16 @@ import {
   type PaymentChannelQuery,
   type SupportedPaymentChannel,
 } from "./channels";
-import type {
-  ClaimRefusal,
-  OrderEvidence,
-  OrderSubmission,
-  UserOrderSubmissions,
+import {
+  RELEASED_WARNING_DAYS,
+  type ClaimRefusal,
+  type OrderEvidence,
+  type OrderSubmission,
+  type ReleasedSubmission,
+  type UserOrderSubmissions,
 } from "../../lib/order-submissions";
 import { logger } from "../../utils/logger";
-import OrderService from "../orders/service";
+import OrderService, { readPaymentEvidence } from "../orders/service";
 import { isRecord } from "../../utils/object";
 import CheckoutService from "../checkout/service";
 import { cartFingerprint } from "../carts/service";
@@ -152,11 +154,20 @@ class OrderPlacementService {
     return Boolean(envelope && caps?.elicitation?.form);
   }
 
+  /*
+   * Other attempts at the restaurant that could already have produced an
+   * order: those still locking a cart while unpaid or unknown, and those an
+   * operator released in the last RELEASED_WARNING_DAYS.
+   */
   private async unresolvedAttempts(vendorId: number, excludeId: string) {
-    return (await this.submissions.listOpen(vendorId)).filter(
+    const open = (await this.submissions.listOpen(vendorId)).filter(
       (attempt) =>
         attempt.id !== excludeId && UNRESOLVED_STATES.has(attempt.state),
     );
+    const released = (
+      await this.submissions.listRecentlyReleased(vendorId)
+    ).filter((attempt) => attempt.id !== excludeId);
+    return { open, released, total: open.length + released.length };
   }
 
   /*
@@ -276,15 +287,20 @@ class OrderPlacementService {
       `Deliver to: ${addressLabel}.`,
       `Total: ${submission.computedTotal} (raw Chowdeck amount: cart total plus delivery and service fees, computed by ChowBot).`,
       `Payment: ${channel.name}. The order is created unpaid; payment is completed separately.`,
-      ...(unresolved.length > 0
+      ...(unresolved.open.length > 0
         ? [
-            `Warning: you have ${unresolved.length} earlier order attempt(s) at this restaurant that are unpaid or have an unknown outcome. Placing this order may result in more than one order. Confirm acknowledge_unresolved_attempts to continue.`,
+            `Warning: you have ${unresolved.open.length} earlier order attempt(s) at this restaurant that are unpaid or have an unknown outcome. Placing this order may result in more than one order. Confirm acknowledge_unresolved_attempts to continue.`,
+          ]
+        : []),
+      ...(unresolved.released.length > 0
+        ? [
+            `Warning: ${unresolved.released.length} earlier order attempt(s) at this restaurant were marked abandoned by ChowBot support in the last ${RELEASED_WARNING_DAYS} days. Abandoned is not cancelled: ChowBot did not cancel anything on Chowdeck, and an order from them may still exist and may still be payable. Placing this order may result in more than one order. Confirm acknowledge_unresolved_attempts to continue.`,
           ]
         : []),
     ].join(" ");
 
     const requestedSchema =
-      unresolved.length > 0
+      unresolved.total > 0
         ? z.object({
             confirm: z.boolean(),
             acknowledge_unresolved_attempts: z.boolean(),
@@ -302,7 +318,7 @@ class OrderPlacementService {
           nonce,
           addressId: args.address_id,
           channel: args.payment_channel,
-          acknowledgementRequired: unresolved.length > 0,
+          acknowledgementRequired: unresolved.total > 0,
         } satisfies PlacementState,
         ctx,
       ),
@@ -355,7 +371,7 @@ class OrderPlacementService {
     if (
       !state.acknowledgementRequired &&
       (await this.unresolvedAttempts(submission.vendorId, submission.id))
-        .length > 0
+        .total > 0
     ) {
       return text(
         "Order not placed: another order attempt at this restaurant became unresolved after confirmation. Start again.",
@@ -536,25 +552,10 @@ class OrderPlacementService {
     return false;
   }
 
-  /*
-   * Order evidence from Chowdeck for a known order id: paid only when the
-   * payment status is success or the timeline shows MADE_PAYMENT.
-   */
-  private async paymentEvidence(
+  private paymentEvidence(
     orderId: number,
   ): Promise<{ paid: boolean; evidence: OrderEvidence }> {
-    const { order } = await this.orders.getOrder(String(orderId));
-    const evidence = {
-      orderStatus: typeof order.status === "string" ? order.status : null,
-      paymentStatus:
-        typeof order.payment?.status === "string" ? order.payment.status : null,
-    };
-    if (evidence.paymentStatus === "success") return { paid: true, evidence };
-    const { timeline } = await this.orders.getOrderTimeline(String(orderId));
-    return {
-      paid: timeline.some((entry) => entry.action === "MADE_PAYMENT"),
-      evidence,
-    };
+    return readPaymentEvidence(this.orders, orderId);
   }
 
   /*
@@ -599,7 +600,36 @@ class OrderPlacementService {
       }
     }
 
+    /*
+     * Abandoned (operator-released) created orders still in the warning
+     * window keep being checked, with the same evidence rule. A payment found
+     * is recorded beside the attempt; nothing else about it changes and the
+     * lock is not retaken. A failed lookup records nothing and implies
+     * neither cancellation nor non-payment.
+     */
+    for (const attempt of await this.submissions.listRecentlyReleased(restaurantId)) {
+      if (attempt.state !== "created" || !attempt.chowdeckOrderId || attempt.paidAfterReleaseAt) continue;
+      try {
+        const { paid, evidence } = await this.paymentEvidence(attempt.chowdeckOrderId);
+        if (paid) {
+          await this.submissions.recordPaidAfterRelease(attempt.id, evidence);
+          checks.set(attempt.id, "payment confirmed by Chowdeck after the attempt was abandoned");
+        } else {
+          checks.set(
+            attempt.id,
+            `not paid yet (Chowdeck payment status: ${evidence.paymentStatus ?? "unknown"})`,
+          );
+        }
+      } catch (error) {
+        checks.set(
+          attempt.id,
+          `payment could not be checked (${describeError(error)}); this does not mean the order is unpaid or no longer exists`,
+        );
+      }
+    }
+
     const open = await this.submissions.listOpen(restaurantId);
+    const released = await this.submissions.listRecentlyReleased(restaurantId);
     return json({
       restaurant_id: restaurantId,
       attempts: open.map((attempt) => ({
@@ -608,10 +638,28 @@ class OrderPlacementService {
         ...(attempt.chowdeckOrderId && { order_id: attempt.chowdeckOrderId }),
         claimed_at: attempt.claimedAt?.toISOString() ?? null,
         order_request_started: attempt.orderRequestStartedAt !== null,
+        ...paymentStartOf(attempt),
         ...(checks.has(attempt.id) && {
           payment_check: checks.get(attempt.id),
         }),
         guidance: guidanceFor(attempt),
+      })),
+      abandoned: released.map((attempt) => ({
+        quote_ref: attempt.id,
+        status: "abandoned",
+        last_known_state: attempt.state,
+        ...(attempt.chowdeckOrderId && { order_id: attempt.chowdeckOrderId }),
+        order_request_started: attempt.orderRequestStartedAt !== null,
+        ...paymentStartOf(attempt),
+        reason: attempt.recoveryReasonCode,
+        abandoned_at: attempt.lockReleasedAt?.toISOString() ?? null,
+        ...(attempt.paidAfterReleaseAt && {
+          paid_after_abandoned: { confirmed_at: attempt.paidAfterReleaseAt.toISOString() },
+        }),
+        ...(checks.has(attempt.id) && {
+          payment_check: checks.get(attempt.id),
+        }),
+        guidance: abandonedGuidanceFor(attempt),
       })),
     });
   }
@@ -692,6 +740,38 @@ class OrderPlacementService {
     });
   }
 }
+
+/*
+ * Only the recorded payment-start state and time: never the payment link,
+ * reference or other processor data, which ChowBot does not keep.
+ */
+const paymentStartOf = (attempt: OrderSubmission) =>
+  attempt.paymentStartedAt
+    ? {
+        payment_start: {
+          state: attempt.paymentStartState ?? "sent; outcome not recorded",
+          started_at: attempt.paymentStartedAt.toISOString(),
+        },
+      }
+    : {};
+
+/*
+ * "Abandoned" is ChowBot's own label for an attempt an operator released: it
+ * means ChowBot stopped tracking it, never that the order was cancelled.
+ */
+const abandonedGuidanceFor = (attempt: ReleasedSubmission) =>
+  [
+    `ChowBot support marked this attempt abandoned (${attempt.recoveryReasonCode?.startsWith("user_reported_") ? "based on your report, not verified with Chowdeck" : "reason recorded"}), so ChowBot no longer tracks it. Abandoned is not cancelled: ChowBot did not cancel anything on Chowdeck.`,
+    attempt.paidAfterReleaseAt
+      ? "Chowdeck has since confirmed this order was paid: it is a real, paid order. Do not place it again."
+      : attempt.state === "created"
+        ? "The order may still exist and may still be payable."
+        : "An order may or may not exist for this attempt.",
+    ...(attempt.paymentStartedAt
+      ? ["A payment page started for it may still work."]
+      : []),
+    "A new order at this restaurant may duplicate it.",
+  ].join(" ");
 
 const guidanceFor = (attempt: OrderSubmission) => {
   switch (attempt.state) {

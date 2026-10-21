@@ -12,6 +12,7 @@ import { createPostgresStores } from "./lib/postgres";
 import { MCP_SERVER_URL, OAUTH_ISSUER_URL } from "./constants/oauth";
 import { createKeyring, parseEncryptionKey } from "./lib/encryption";
 import { createChowbotRequestStateCodec } from "./lib/request-state";
+import { readOrderPlacementConfig } from "./features/order-placement/config";
 
 const EXPIRED_RECORD_SWEEP_MS = 60 * 60 * 1000;
 
@@ -35,6 +36,10 @@ const start = async () => {
       ),
     );
 
+  const { placeOrderEnabled, paymentChannelQuery, warnings } =
+    readOrderPlacementConfig(process.env);
+  for (const warning of warnings) logger.warn(warning);
+
   await sweepExpired();
   setInterval(sweepExpired, EXPIRED_RECORD_SWEEP_MS).unref();
 
@@ -43,6 +48,8 @@ const start = async () => {
     issuerUrl: OAUTH_ISSUER_URL,
     ...createPostgresStores(sql, keyring),
     requestStateCodec: createChowbotRequestStateCodec(keyring.requestStateKey),
+    placeOrderEnabled,
+    ...(paymentChannelQuery && { paymentChannelQuery }),
   });
 
   app.listen(Number(PORT), () => {

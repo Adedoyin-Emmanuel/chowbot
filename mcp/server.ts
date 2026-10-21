@@ -11,6 +11,8 @@ import { registerCheckoutTools } from "../features/checkout/tools";
 import { registerOrderTools } from "../features/orders/tools";
 import { registerOrderPlacementTools } from "../features/order-placement/tools";
 import type { PaymentChannelQuery } from "../features/order-placement/channels";
+import { registerPaymentTools } from "../features/payments/tools";
+import type { PaymentStartConfig } from "../features/payments/service";
 import { registerAddressTools } from "../features/addresses/tools";
 import { registerArithmeticTool } from "../features/arithmetic/tools";
 import { registerRestaurantTools } from "../features/restaurants/tools";
@@ -39,6 +41,8 @@ export type ServerOptions = {
   submissions?: UserOrderSubmissions;
   requestStateCodec?: RequestStateCodec;
   paymentChannelQuery?: PaymentChannelQuery;
+  paymentStartConfig?: PaymentStartConfig;
+  placeOrderEnabled?: boolean;
 };
 
 /*
@@ -52,6 +56,8 @@ export const createServer = ({
   submissions,
   requestStateCodec,
   paymentChannelQuery,
+  paymentStartConfig,
+  placeOrderEnabled,
 }: ServerOptions = {}) => {
   const server = new McpServer(
     {
@@ -74,6 +80,13 @@ export const createServer = ({
     submissions,
     requestStateCodec,
     paymentChannelQuery,
+    placeOrderEnabled,
+  });
+  registerPaymentTools(server, {
+    session,
+    submissions,
+    requestStateCodec,
+    paymentStartConfig,
   });
 
   if (enableChatLogin) registerAuthTools(server, session);

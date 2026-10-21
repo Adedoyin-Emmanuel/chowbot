@@ -41,18 +41,19 @@ export type OrderPlacementOptions = {
   submissions?: UserOrderSubmissions;
   requestStateCodec?: RequestStateCodec;
   paymentChannelQuery?: PaymentChannelQuery;
+  placeOrderEnabled?: boolean;
   client?: ChowdeckClient;
 };
 
 /*
  * Registered only on the hosted server, which has durable per-user
- * submission records. place_order additionally needs the requestState codec
- * and the payment-channel query; without the channel query values (not yet
- * observed) it is not registered at all.
+ * submission records. place_order additionally needs the explicit enablement
+ * flag, the requestState codec and the payment-channel query; without any of
+ * them it is not registered at all.
  */
 export const registerOrderPlacementTools = (
   server: McpServer,
-  { session, submissions, requestStateCodec, paymentChannelQuery, client }: OrderPlacementOptions,
+  { session, submissions, requestStateCodec, paymentChannelQuery, placeOrderEnabled, client }: OrderPlacementOptions,
 ) => {
   if (!session || !submissions) return;
   const service = new OrderPlacementService(
@@ -105,7 +106,7 @@ export const registerOrderPlacementTools = (
     },
   );
 
-  if (!requestStateCodec || !paymentChannelQuery) return;
+  if (placeOrderEnabled !== true || !requestStateCodec || !paymentChannelQuery) return;
 
   server.registerTool(
     "place_order",

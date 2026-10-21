@@ -29,6 +29,27 @@
       "when": 1792550901096,
       "tag": "0003_order_request_marker",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792554847681,
+      "tag": "0004_payment_start_outcome",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792572444624,
+      "tag": "0005_operator_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792574113737,
+      "tag": "0006_paid_after_release_and_bootstrap",
+      "breakpoints": true
     }
   ]
 }

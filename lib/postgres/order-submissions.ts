@@ -3,9 +3,10 @@ import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, sql } f
 
 import type { Database } from "./database";
 import type { Keyring } from "../encryption";
-import { LOCKING_SUBMISSION_STATES, orderSubmissions } from "./schema";
+import { LOCKING_SUBMISSION_STATES, orderSubmissionRecoveries, orderSubmissions } from "./schema";
 import {
   QUOTE_LIFETIME_SECONDS,
+  RELEASED_WARNING_DAYS,
   UNSENT_RECOVERY_GRACE_SECONDS,
   type NewQuote,
   type LinkResult,
@@ -14,6 +15,7 @@ import {
   type GateFailure,
   type OrderSubmission,
   type SubmissionOutcome,
+  type PaymentStartState,
   type ConfirmationRequest,
   type OrderSubmissionStore,
 } from "../order-submissions";
@@ -36,6 +38,11 @@ const toSubmission = (row: Row): OrderSubmission => ({
   chowdeckOrderId: row.chowdeckOrderId,
   claimedAt: row.confirmationConsumedAt,
   orderRequestStartedAt: row.orderRequestStartedAt,
+  paymentStartedAt: row.paymentStartedAt,
+  paymentStartState: row.paymentStartState,
+  lockReleasedAt: row.lockReleasedAt,
+  lockReleaseReason: row.lockReleaseReason,
+  paidAfterReleaseAt: row.paidAfterReleaseAt,
   failureReason: row.failureReason,
   resolution: row.resolution,
   createdAt: row.createdAt,
@@ -302,7 +309,8 @@ export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
 
   /*
    * Records verified payment. The cart lock is kept: it is released only by
-   * a later claim that finds the cart changed.
+   * a later claim that finds the cart changed. An attempt an operator has
+   * already released is never changed here (see recordPaidAfterRelease).
    */
   async recordPaid(userId: string, id: string, evidence: OrderEvidence) {
     if (!this.valid(userId, id)) return false;
@@ -317,7 +325,43 @@ export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
         evidencePaymentStatus: evidence.paymentStatus,
         evidenceCheckedAt: sql`now()`,
       })
-      .where(and(owned(userId, id), eq(orderSubmissions.state, "created")))
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "created"),
+          isNull(orderSubmissions.lockReleasedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * Records payment Chowdeck confirmed for a created order after an operator
+   * released (abandoned) it. Only the paid_after_release columns and
+   * updated_at change: the state, order id, resolution, lock release and the
+   * recovery audit record stay as they were, and the lock is not retaken.
+   * Recorded once; later reads leave the first record in place.
+   */
+  async recordPaidAfterRelease(userId: string, id: string, evidence: OrderEvidence) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({
+        paidAfterReleaseAt: sql`now()`,
+        paidAfterReleaseOrderStatus: evidence.orderStatus,
+        paidAfterReleasePaymentStatus: evidence.paymentStatus,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "created"),
+          isNotNull(orderSubmissions.chowdeckOrderId),
+          eq(orderSubmissions.lockReleaseReason, "operator_released"),
+          isNull(orderSubmissions.paidAfterReleaseAt),
+        ),
+      )
       .returning({ id: orderSubmissions.id });
     return rows.length === 1;
   }
@@ -378,5 +422,74 @@ export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
       )
       .orderBy(desc(orderSubmissions.createdAt));
     return rows.map(toSubmission);
+  }
+
+  /*
+   * This user's attempts at a restaurant whose lock an operator released in
+   * the last RELEASED_WARNING_DAYS, newest first, with the recovery reason.
+   */
+  async listRecentlyReleased(userId: string, vendorId: number) {
+    if (!USER_ID_PATTERN.test(userId)) return [];
+    const rows = await this.db
+      .select({ row: orderSubmissions, recoveryReasonCode: orderSubmissionRecoveries.reasonCode })
+      .from(orderSubmissions)
+      .leftJoin(orderSubmissionRecoveries, eq(orderSubmissionRecoveries.submissionId, orderSubmissions.id))
+      .where(
+        and(
+          eq(orderSubmissions.userId, userId),
+          eq(orderSubmissions.vendorId, vendorId),
+          eq(orderSubmissions.lockReleaseReason, "operator_released"),
+          sql`${orderSubmissions.lockReleasedAt} > now() - make_interval(days => ${RELEASED_WARNING_DAYS})`,
+        ),
+      )
+      .orderBy(desc(orderSubmissions.lockReleasedAt));
+    return rows.map(({ row, recoveryReasonCode }) => ({
+      ...toSubmission(row),
+      recoveryReasonCode,
+    }));
+  }
+
+  /*
+   * The payment-start marker, committed before the payment-start request is
+   * sent. Only one can ever be set per attempt, and only on an unpaid created
+   * order with the given id, so at most one payment start is ever sent for
+   * an attempt, across every server instance.
+   */
+  async markPaymentStarted(userId: string, id: string, chowdeckOrderId: number) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ paymentStartedAt: sql`now()`, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "created"),
+          eq(orderSubmissions.chowdeckOrderId, chowdeckOrderId),
+          isNull(orderSubmissions.paymentStartedAt),
+          isNull(orderSubmissions.lockReleasedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * Records the payment-start outcome once. The marker is never cleared, so
+   * a rejected or unknown start is not retried.
+   */
+  async recordPaymentStart(userId: string, id: string, state: PaymentStartState) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ paymentStartState: state, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          isNotNull(orderSubmissions.paymentStartedAt),
+          isNull(orderSubmissions.paymentStartState),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
   }
 }

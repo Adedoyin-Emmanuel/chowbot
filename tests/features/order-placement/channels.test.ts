@@ -1,7 +1,12 @@
 import type { Server } from "bun";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 
+import { randomBytes } from "node:crypto";
+
 import { ChowdeckClient } from "../../../lib/client";
+import { createServer } from "../../../mcp/server";
+import { createKeyring } from "../../../lib/encryption";
+import { createChowbotRequestStateCodec } from "../../../lib/request-state";
 import { resolvePaymentChannel } from "../../../features/order-placement/channels";
 
 /*
@@ -83,5 +88,62 @@ describe("resolvePaymentChannel", () => {
 
     await expect(resolve()).rejects.toThrow("failed with status 500");
     expect(seen).toHaveLength(1);
+  });
+});
+
+/*
+ * Guards for enablement: until the real channel query values and the
+ * payment-start redirect values are captured, production must not supply
+ * placeholder values (so place_order stays unregistered) and nothing may
+ * start a payment.
+ */
+describe("production configuration", () => {
+  const ROOT = `${import.meta.dir}/../../..`;
+  const productionSources = async () => {
+    const sources: { path: string; text: string }[] = [];
+    for await (const path of new Bun.Glob("**/*.ts").scan({ cwd: ROOT })) {
+      if (/^(tests|node_modules|dist)\//.test(path)) continue;
+      sources.push({ path, text: await Bun.file(`${ROOT}/${path}`).text() });
+    }
+    return sources;
+  };
+
+  test("contains no placeholder channel query values", async () => {
+    const leaks = (await productionSources()).filter(({ text }) => text.includes("PLACEHOLDER"));
+
+    expect(leaks.map(({ path }) => path)).toEqual([]);
+  });
+
+  test("the hosted entry point takes place_order settings only from the environment", async () => {
+    const entry = await Bun.file(`${ROOT}/http.ts`).text();
+
+    expect(entry).toContain("readOrderPlacementConfig(process.env)");
+    expect(entry).not.toMatch(/methods\s*:|countryIdentifier\s*:|placeOrderEnabled\s*:\s*true/);
+  });
+
+  test("only the start_payment service names the payment-start endpoint", async () => {
+    const callers = (await productionSources()).filter(({ text }) => text.includes("/payment/start"));
+
+    expect(callers.map(({ path }) => path)).toEqual(["features/payments/service.ts"]);
+  });
+
+  test("the hosted entry point supplies no payment-start configuration", async () => {
+    const entry = await Bun.file(`${ROOT}/http.ts`).text();
+
+    expect(entry).not.toContain("paymentStartConfig");
+    expect(entry).not.toContain("createPaymentStartConfig");
+  });
+
+  test("the production server composition registers neither place_order nor start_payment", async () => {
+    const server = createServer({
+      session: { get: async () => undefined, save: async () => {}, clear: async () => {} },
+      submissions: {} as never,
+      requestStateCodec: createChowbotRequestStateCodec(createKeyring(randomBytes(32)).requestStateKey),
+    });
+    const names = Object.keys((server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
+
+    expect(names).toContain("get_order_submission");
+    expect(names).not.toContain("place_order");
+    expect(names).not.toContain("start_payment");
   });
 });

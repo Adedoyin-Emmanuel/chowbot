@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   text,
   uuid,
+  boolean,
   check,
   index,
   bigint,
@@ -23,6 +24,14 @@ const bytea = customType<{ data: Uint8Array }>({
  * once, as a real JSON array.
  */
 const jsonbArray = customType<{ data: string[]; driverData: string[] }>({
+  dataType: () => "jsonb",
+  toDriver: (value) => value,
+});
+
+/*
+ * A JSON object passed through for Bun to encode once, as for jsonbArray.
+ */
+const jsonbObject = customType<{ data: Record<string, unknown>; driverData: Record<string, unknown> }>({
   dataType: () => "jsonb",
   toDriver: (value) => value,
 });
@@ -196,6 +205,15 @@ export const ORDER_SUBMISSION_STATES = [
  */
 export const LOCKING_SUBMISSION_STATES = ["submitting", "created", "unknown", "paid"] as const;
 
+export const PAYMENT_START_STATES = ["started", "rejected", "unknown"] as const;
+
+/*
+ * Why a cart lock was released: by a later claim that found the paid
+ * order's cart changed, or by an authenticated operator (with an audit row in
+ * order_submission_recoveries). Neither changes the attempt's state.
+ */
+export const LOCK_RELEASE_REASONS = ["cart_changed", "operator_released"] as const;
+
 const inList = (values: readonly string[]) =>
   sql.raw(values.map((value) => `'${value}'`).join(", "));
 
@@ -238,8 +256,12 @@ export const orderSubmissions = pgTable(
     evidenceCheckedAt: timestamp("evidence_checked_at", { withTimezone: true }),
     chowdeckOrderId: bigint("chowdeck_order_id", { mode: "number" }),
     lockReleasedAt: timestamp("lock_released_at", { withTimezone: true }),
-    lockReleaseReason: text("lock_release_reason", { enum: ["cart_changed"] }),
+    lockReleaseReason: text("lock_release_reason", { enum: LOCK_RELEASE_REASONS }),
     paymentStartedAt: timestamp("payment_started_at", { withTimezone: true }),
+    paymentStartState: text("payment_start_state", { enum: PAYMENT_START_STATES }),
+    paidAfterReleaseAt: timestamp("paid_after_release_at", { withTimezone: true }),
+    paidAfterReleaseOrderStatus: text("paid_after_release_order_status"),
+    paidAfterReleasePaymentStatus: text("paid_after_release_payment_status"),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
@@ -261,7 +283,7 @@ export const orderSubmissions = pgTable(
     ),
     check(
       "order_submissions_lock_release_check",
-      sql`(${table.lockReleasedAt} IS NULL) = (${table.lockReleaseReason} IS NULL) AND (${table.lockReleaseReason} IS NULL OR ${table.lockReleaseReason} IN ('cart_changed'))`,
+      sql`(${table.lockReleasedAt} IS NULL) = (${table.lockReleaseReason} IS NULL) AND (${table.lockReleaseReason} IS NULL OR ${table.lockReleaseReason} IN (${inList(LOCK_RELEASE_REASONS)}))`,
     ),
     check(
       "order_submissions_confirmation_pending_check",
@@ -292,6 +314,26 @@ export const orderSubmissions = pgTable(
         AND (${table.failureReason} IS NULL OR ${table.failureReason} NOT IN ('gate_rejected', 'gate_uncertain', 'not_sent') OR ${table.orderRequestStartedAt} IS NULL)
         AND (${table.failureReason} IS NULL OR ${table.failureReason} <> 'order_rejected' OR ${table.orderRequestStartedAt} IS NOT NULL)`,
     ),
+    /*
+     * The payment-start marker: payment_started_at is committed before the
+     * one payment-start request is sent, only for a created order. A marker
+     * without a state is a request whose outcome was never recorded.
+     */
+    check(
+      "order_submissions_payment_start_check",
+      sql`(${table.paymentStartedAt} IS NULL OR ${table.chowdeckOrderId} IS NOT NULL)
+        AND (${table.paymentStartState} IS NULL OR ${table.paymentStartedAt} IS NOT NULL)
+        AND (${table.paymentStartState} IS NULL OR ${table.paymentStartState} IN (${inList(PAYMENT_START_STATES)}))`,
+    ),
+    /*
+     * Payment confirmed by Chowdeck after an operator released (abandoned) a
+     * created order. It is recorded beside the attempt, never by changing its
+     * state, resolution or lock.
+     */
+    check(
+      "order_submissions_paid_after_release_check",
+      sql`${table.paidAfterReleaseAt} IS NULL OR (${table.state} = 'created' AND ${table.chowdeckOrderId} IS NOT NULL AND ${table.lockReleaseReason} = 'operator_released')`,
+    ),
     uniqueIndex("order_submissions_one_lock_per_cart_idx")
       .on(table.userId, table.cartId)
       .where(sql`${table.lockReleasedAt} IS NULL AND ${table.state} IN (${inList(LOCKING_SUBMISSION_STATES)})`),
@@ -300,5 +342,90 @@ export const orderSubmissions = pgTable(
     uniqueIndex("order_submissions_chowdeck_order_id_idx")
       .on(table.chowdeckOrderId)
       .where(sql`${table.chowdeckOrderId} IS NOT NULL`),
+  ],
+);
+
+/*
+ * Operators who may release stuck order attempts from the recovery CLI. The
+ * credential is stored only as a password hash (argon2id); the plaintext is
+ * shown once when the operator is added.
+ */
+export const adminOperators = pgTable(
+  "admin_operators",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull().unique(),
+    credentialHash: text("credential_hash").notNull(),
+    createdAt: createdAt(),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    bootstrap: boolean("bootstrap").notNull().default(false),
+  },
+  (table) => [
+    check("admin_operators_name_check", sql`${table.name} ~ '^[a-z0-9][a-z0-9._-]{1,62}$'`),
+    /*
+     * At most one operator is ever created without authentication: the
+     * first. The bootstrap insert also runs under a table lock that refuses
+     * it once any operator exists.
+     */
+    uniqueIndex("admin_operators_one_bootstrap_idx").on(table.bootstrap).where(sql`${table.bootstrap}`),
+  ],
+);
+
+export const RECOVERY_REASON_CODES = [
+  "user_reported_no_order",
+  "user_accepts_duplicate_risk",
+  "order_not_retrievable",
+  "user_reported_abandoned",
+  "user_reported_cancelled_in_app",
+] as const;
+
+export const RECOVERY_LOOKUP_OUTCOMES = ["unpaid", "failed", "not_applicable"] as const;
+
+/*
+ * Append-only audit of operator lock releases (a trigger in the migration
+ * rejects UPDATE, DELETE and TRUNCATE). One release per attempt. Each row
+ * keeps a snapshot of the attempt as it was, the read-only Chowdeck lookup
+ * made just before, who released it, why, and the exact risk disclosure the
+ * operator acknowledged. User statements are stored only as reason codes
+ * named user_reported_*, never as Chowdeck facts.
+ */
+export const orderSubmissionRecoveries = pgTable(
+  "order_submission_recoveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    submissionId: uuid("submission_id")
+      .notNull()
+      .references(() => orderSubmissions.id, { onDelete: "restrict" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    operatorId: uuid("operator_id")
+      .notNull()
+      .references(() => adminOperators.id, { onDelete: "restrict" }),
+    reasonCode: text("reason_code", { enum: RECOVERY_REASON_CODES }).notNull(),
+    note: text("note").notNull(),
+    attemptSnapshot: jsonbObject("attempt_snapshot").notNull(),
+    lookupOutcome: text("lookup_outcome", { enum: RECOVERY_LOOKUP_OUTCOMES }).notNull(),
+    lookupOrderStatus: text("lookup_order_status"),
+    lookupPaymentStatus: text("lookup_payment_status"),
+    lookupError: text("lookup_error"),
+    duplicateRiskAcknowledged: boolean("duplicate_risk_acknowledged").notNull(),
+    disclosure: text("disclosure").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check("order_submission_recoveries_reason_check", sql`${table.reasonCode} IN (${inList(RECOVERY_REASON_CODES)})`),
+    check(
+      "order_submission_recoveries_lookup_check",
+      sql`${table.lookupOutcome} IN (${inList(RECOVERY_LOOKUP_OUTCOMES)})
+        AND (${table.lookupOutcome} = 'failed') = (${table.lookupError} IS NOT NULL)
+        AND (${table.reasonCode} <> 'order_not_retrievable' OR ${table.lookupOutcome} = 'failed')`,
+    ),
+    check("order_submission_recoveries_note_check", sql`char_length(btrim(${table.note})) BETWEEN 10 AND 2000`),
+    check("order_submission_recoveries_acknowledged_check", sql`${table.duplicateRiskAcknowledged} = true`),
+    check("order_submission_recoveries_snapshot_check", sql`jsonb_typeof(${table.attemptSnapshot}) = 'object'`),
+    check("order_submission_recoveries_disclosure_check", sql`char_length(${table.disclosure}) > 0`),
+    uniqueIndex("order_submission_recoveries_one_per_attempt_idx").on(table.submissionId),
+    index("order_submission_recoveries_user_id_idx").on(table.userId),
   ],
 );

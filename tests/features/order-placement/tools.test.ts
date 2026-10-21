@@ -19,6 +19,8 @@ import { registerCheckoutTools } from "../../../features/checkout/tools";
 import { createTestDatabase, describePostgres } from "../../helpers/postgres";
 import type { OrderSubmissionStore } from "../../../lib/order-submissions";
 import { registerOrderPlacementTools } from "../../../features/order-placement/tools";
+import { createDrizzle } from "../../../lib/postgres/database";
+import { PostgresRecoveryStore } from "../../../lib/postgres/recovery";
 
 /*
  * End-to-end placement over the real hosted stack: createHttpApp, the
@@ -149,6 +151,7 @@ const storeWith = (overrides: Partial<OrderSubmissionStore>): OrderSubmissionSto
   const methods = [
     "createQuote", "get", "issueConfirmation", "claim", "recordGateFailure", "markOrderRequestStarted",
     "recoverUnsent", "recordOutcome", "recordPaid", "linkOrder", "listOpen",
+    "listRecentlyReleased", "markPaymentStarted", "recordPaymentStart",
   ] as const;
   const delegate = Object.fromEntries(methods.map((m) => [m, (real[m] as Function).bind(real)]));
   return { ...delegate, ...overrides } as OrderSubmissionStore;
@@ -169,6 +172,7 @@ const startApp = async (options: { store?: OrderSubmissionStore; timeoutMs?: num
         ...opts,
         client,
         ...(options.channelQuery !== false && { paymentChannelQuery: TEST_CHANNEL_QUERY }),
+        placeOrderEnabled: true,
       });
       return server;
     },
@@ -251,6 +255,19 @@ const placeOrder = async (baseUrl: string, inputResponses: Record<string, unknow
   return { quoteRef, first, second };
 };
 
+/*
+ * Test-database cleanup only: the audit table is append-only, so its rows
+ * are cleared in one transaction with the trigger briefly disabled, and
+ * re-enabled before the transaction commits.
+ */
+const clearSubmissions = () =>
+  sql.begin(async (tx) => {
+    await tx`ALTER TABLE order_submission_recoveries DISABLE TRIGGER order_submission_recoveries_no_update_or_delete`;
+    await tx`DELETE FROM order_submission_recoveries`;
+    await tx`ALTER TABLE order_submission_recoveries ENABLE TRIGGER order_submission_recoveries_no_update_or_delete`;
+    await tx`DELETE FROM order_submissions`;
+  });
+
 const row = async (id: string) => (await sql`SELECT * FROM order_submissions WHERE id = ${id}`)[0];
 
 const PRIVATE_MARKERS = ["PRIVATE-", String(FEE_ID), String(ADDRESS_ID), String(VENDOR_ADDRESS_ID), "delivery_pin", "4821", "tracking_url", "secret-token"];
@@ -298,7 +315,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
   beforeEach(async () => {
     received = [];
     routes = new Map();
-    await sql`DELETE FROM order_submissions`;
+    await clearSubmissions();
     await resetGlobalRateLimit();
   });
 
@@ -314,13 +331,17 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
     const session = { get: async () => undefined, save: async () => {}, clear: async () => {} };
     const submissions = {} as never;
 
-    test("place_order exists only with a store, the codec and a payment-channel query", async () => {
+    test("place_order exists only with a store, the codec, a payment-channel query and the enablement flag", async () => {
       expect(await names({ session })).not.toContain("get_order_submission");
       const hosted = await names({ session, submissions, requestStateCodec: codec });
       expect(hosted).toEqual(expect.arrayContaining(["get_order_submission", "resolve_order_submission"]));
       expect(hosted).not.toContain("place_order");
-      expect(await names({ session, submissions, requestStateCodec: codec, paymentChannelQuery: TEST_CHANNEL_QUERY })).toContain("place_order");
-      expect(await names({ session, submissions, paymentChannelQuery: TEST_CHANNEL_QUERY })).not.toContain("place_order");
+      const configured = { session, submissions, requestStateCodec: codec, paymentChannelQuery: TEST_CHANNEL_QUERY };
+      expect(await names(configured)).not.toContain("place_order");
+      expect(await names({ ...configured, placeOrderEnabled: false })).not.toContain("place_order");
+      expect(await names({ ...configured, placeOrderEnabled: true })).toContain("place_order");
+      expect(await names({ session, submissions, paymentChannelQuery: TEST_CHANNEL_QUERY, placeOrderEnabled: true })).not.toContain("place_order");
+      expect(await names({ session, submissions, requestStateCodec: codec, placeOrderEnabled: true })).not.toContain("place_order");
     });
   });
 
@@ -771,6 +792,78 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect((await row(quoteRef)).state).toBe("created");
       expect(JSON.parse(textOf(body)).attempts[0].payment_check).toContain("payment could not be checked");
     });
+
+    /*
+     * Whether Chowdeck serves an unpaid order by id is not yet observed;
+     * if it does not, payment can never be confirmed and the lock stays.
+     */
+    test.each([
+      ["404", 404, "Order not found"],
+      ["401", 401, "Unauthenticated"],
+    ])("keeps the order created and the lock held when the order lookup returns %s", async (_, code, message) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, () => Response.json({ status: "failed", message }, { status: code }));
+
+      const body = await status(baseUrl);
+
+      const attempt = JSON.parse(textOf(body)).attempts[0];
+      expect(attempt.payment_check).toBe(`payment could not be checked (GET /customer/order/${ORDER_ID} failed with status ${code}: ${message})`);
+      expect(attempt.state).toBe("created");
+      expect(received.some((r) => r.path.endsWith("/timeline"))).toBe(false);
+      const locked = await row(quoteRef);
+      expect(locked.state).toBe("created");
+      expect(locked.lock_released_at).toBeNull();
+    });
+
+    test.each([
+      ["omits payment", orderDetail({ payment: undefined })],
+      ["sends a null payment", orderDetail({ payment: null })],
+      ["sends a payment without a status", orderDetail({ payment: { amount: 554000 } })],
+    ])("treats an order that %s as unpaid unless the timeline shows MADE_PAYMENT", async (_, detail) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, detail);
+      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED"]));
+
+      const unpaid = await status(baseUrl);
+
+      expect(JSON.parse(textOf(unpaid)).attempts[0].payment_check).toBe("not paid yet (Chowdeck payment status: unknown)");
+      expect((await row(quoteRef)).state).toBe("created");
+
+      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED", "MADE_PAYMENT"]));
+      await status(baseUrl);
+
+      const paid = await row(quoteRef);
+      expect(paid.state).toBe("paid");
+      expect(paid.evidence_payment_status).toBeNull();
+    });
+
+    test("keeps the order created when the payment status is missing and the timeline cannot be read", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: undefined }));
+      route(`GET /customer/order/${ORDER_ID}/timeline`, () => Response.json({ message: "Order not found" }, { status: 404 }));
+
+      const body = await status(baseUrl);
+
+      expect(JSON.parse(textOf(body)).attempts[0].payment_check).toContain("payment could not be checked");
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+
+    test("does not count the order response's made_payment as payment evidence", async () => {
+      scriptHappyPath();
+      route("POST /customer/order", orderCreated({ made_payment: true }));
+      const baseUrl = await startApp();
+
+      const { quoteRef, second } = await placeOrder(baseUrl);
+
+      expect(JSON.parse(textOf(second)).status).toBe("created; Chowdeck reports it paid");
+      expect((await row(quoteRef)).state).toBe("created");
+    });
   });
 
   describe("resolve_order_submission (R3)", () => {
@@ -801,6 +894,9 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       ["another restaurant's order", orderDetail({ vendor_id: 555 }), "different restaurant"],
       ["an order older than the attempt", orderDetail({ created_at: "2020-01-01T00:00:00Z" }), "could not be shown to come after this attempt"],
       ["an order Chowdeck cannot confirm", () => Response.json({ status: "failed", message: "Order not found" }, { status: 404 }), "Chowdeck could not confirm that order"],
+      ["an order lookup refused as unauthenticated", () => Response.json({ message: "Unauthenticated" }, { status: 401 }), "Chowdeck could not confirm that order"],
+      ["an order lookup that fails upstream", () => Response.json({ message: "Server Error" }, { status: 500 }), "Chowdeck could not confirm that order"],
+      ["an order without a creation time", orderDetail({ created_at: undefined }), "could not be shown to come after this attempt"],
     ])("refuses %s and keeps the lock", async (_, detail, reason) => {
       const baseUrl = await startApp();
       const quoteRef = await unknownAttempt(baseUrl);
@@ -812,6 +908,33 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect((await row(quoteRef)).state).toBe("unknown");
     });
 
+    test("links an order whose payment status Chowdeck omits, recording no payment status", async () => {
+      const baseUrl = await startApp();
+      const quoteRef = await unknownAttempt(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: undefined }));
+
+      const body = await link(baseUrl, quoteRef);
+
+      expect(JSON.parse(textOf(body)).state).toBe("created");
+      const linked = await row(quoteRef);
+      expect(linked.evidence_payment_status).toBeNull();
+      expect(linked.lock_released_at).toBeNull();
+    });
+
+    test("links a paid order as created; only get_order_submission records the payment", async () => {
+      const baseUrl = await startApp();
+      const quoteRef = await unknownAttempt(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: { status: "success" } }));
+
+      await link(baseUrl, quoteRef);
+      expect((await row(quoteRef)).state).toBe("created");
+
+      await call({ baseUrl, name: "get_order_submission", args: { restaurant_id: 102555 } });
+      const paid = await row(quoteRef);
+      expect(paid.state).toBe("paid");
+      expect(paid.lock_released_at).toBeNull();
+    });
+
     test("refuses an attempt whose request never started, and another user's attempt", async () => {
       scriptHappyPath();
       const baseUrl = await startApp({ store: storeWith({ markOrderRequestStarted: async () => { throw new Error("lost"); } }) });
@@ -821,6 +944,233 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       expect(textOf(await link(plain, quoteRef))).toContain("only an attempt whose order request was sent");
       expect(textOf(await call({ baseUrl: plain, token: bob.token, name: "resolve_order_submission", args: { quote_ref: quoteRef, outcome: "link_order", order_id: ORDER_ID } }))).toContain("does not exist for your account");
+    });
+  });
+
+  describe("abandoned attempts", () => {
+    const status = (baseUrl: string) => call({ baseUrl, name: "get_order_submission", args: { restaurant_id: 102555 } });
+
+    const releaseByOperator = async (id: string, state: "created" | "unknown", reasonCode: "user_reported_abandoned" | "user_reported_no_order") => {
+      const [operator] = await sql`INSERT INTO admin_operators (name, credential_hash) VALUES (${`ops-${crypto.randomUUID().slice(0, 8)}`}, 'hash') RETURNING id`;
+      const result = await new PostgresRecoveryStore(createDrizzle(sql)).release({
+        submissionId: id, expectedState: state, operatorId: operator.id, reasonCode, note: "Released in a test by an operator.",
+        lookup: { outcome: "not_applicable" }, disclosure: "test disclosure", duplicateRiskAcknowledged: true,
+      });
+      expect(result.ok).toBe(true);
+    };
+
+    const seedReleasedUnknown = async () => {
+      const [row] = await sql`INSERT INTO order_submissions ${sql({
+        user_id: alice.userId, vendor_id: 102555, cart_id: 12345, fee_id: 1, address_binding: "b", cart_fingerprint: "f",
+        computed_total: 1, quote_expires_at: new Date(Date.now() + 300_000), state: "unknown",
+        confirmation_consumed_at: new Date(), order_request_started_at: new Date(Date.now() - 25 * 3600_000),
+      })} RETURNING id`;
+      await releaseByOperator(row.id, "unknown", "user_reported_no_order");
+      return row.id as string;
+    };
+
+    test("get_order_submission shows it as abandoned with its last known state and reason, never as cancelled", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      await releaseByOperator(quoteRef, "created", "user_reported_abandoned");
+
+      const body = JSON.parse(textOf(await status(baseUrl)));
+
+      expect(body.attempts).toEqual([]);
+      const [abandoned] = body.abandoned;
+      expect(abandoned).toMatchObject({
+        quote_ref: quoteRef, status: "abandoned", last_known_state: "created", order_id: ORDER_ID,
+        reason: "user_reported_abandoned",
+      });
+      expect(Date.parse(abandoned.abandoned_at)).not.toBeNaN();
+      expect(abandoned.guidance).toContain("marked this attempt abandoned (based on your report, not verified with Chowdeck)");
+      expect(abandoned.guidance).toContain("Abandoned is not cancelled: ChowBot did not cancel anything on Chowdeck");
+      expect(abandoned.guidance).toContain("may still be payable");
+      expect(JSON.stringify(body)).not.toMatch(/\b(was|is|has been) cancell?ed\b/i);
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+
+    test.each([
+      ["6 days 23 hours 59 minutes", true],
+      ["7 days 1 second", false],
+    ])("an attempt abandoned %s ago is still listed: %p", async (age, listed) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const id = await seedReleasedUnknown();
+      await sql`UPDATE order_submissions SET lock_released_at = now() - ${age}::interval WHERE id = ${id}`;
+
+      const body = JSON.parse(textOf(await status(baseUrl)));
+
+      expect(body.abandoned.map((a: { quote_ref: string }) => a.quote_ref)).toEqual(listed ? [id] : []);
+      if (listed) expect(body.abandoned[0].last_known_state).toBe("unknown");
+    });
+
+    test("place_order warns about a recently abandoned attempt and requires the acknowledgement", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      await seedReleasedUnknown();
+
+      const { first, second } = await placeOrder(baseUrl);
+
+      const message = first.inputRequests.confirm.params.message;
+      expect(message).toContain("1 earlier order attempt(s) at this restaurant were marked abandoned by ChowBot support in the last 7 days");
+      expect(message).toContain("Abandoned is not cancelled: ChowBot did not cancel anything on Chowdeck");
+      expect(message).toContain("may still be payable");
+      expect(Object.keys(first.inputRequests.confirm.params.requestedSchema.properties)).toEqual(["confirm", "acknowledge_unresolved_attempts"]);
+      expect(textOf(second)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    const abandonPlacedOrder = async (baseUrl: string) => {
+      const { quoteRef } = await placeOrder(baseUrl);
+      await releaseByOperator(quoteRef, "created", "user_reported_abandoned");
+      const before = await row(quoteRef);
+      const [audit] = await sql`SELECT * FROM order_submission_recoveries WHERE submission_id = ${quoteRef}`;
+      return { quoteRef, before, audit };
+    };
+    const orderReads = () => received.filter((r) => r.method === "GET" && r.path.startsWith(`/customer/order/${ORDER_ID}`));
+
+    test.each([
+      ["the payment status is success", orderDetail({ payment: { status: "success" } }), timeline([]), "success"],
+      ["the timeline shows MADE_PAYMENT", orderDetail({ payment: undefined }), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), null],
+    ])("records a payment found after abandonment when %s, changing nothing else", async (_, detail, steps, paymentStatus) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef, before, audit } = await abandonPlacedOrder(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, detail);
+      route(`GET /customer/order/${ORDER_ID}/timeline`, steps);
+
+      const body = JSON.parse(textOf(await status(baseUrl)));
+
+      expect(body.attempts).toEqual([]);
+      const [abandoned] = body.abandoned;
+      expect(abandoned.payment_check).toBe("payment confirmed by Chowdeck after the attempt was abandoned");
+      expect(Date.parse(abandoned.paid_after_abandoned.confirmed_at)).not.toBeNaN();
+      expect(abandoned.last_known_state).toBe("created");
+      expect(abandoned.guidance).toContain("Chowdeck has since confirmed this order was paid");
+      expect(abandoned.guidance).toContain("Do not place it again");
+
+      const after = await row(quoteRef);
+      expect(after.paid_after_release_at).toBeInstanceOf(Date);
+      expect(after.paid_after_release_payment_status).toBe(paymentStatus);
+      for (const column of ["state", "chowdeck_order_id", "resolution", "resolved_at", "lock_released_at", "lock_release_reason",
+        "evidence_order_status", "evidence_payment_status", "evidence_checked_at", "order_request_started_at"]) {
+        expect(after[column]).toEqual(before[column]);
+      }
+      expect(after.state).toBe("created");
+      expect(after.lock_released_at).toBeInstanceOf(Date);
+      const [auditAfter] = await sql`SELECT * FROM order_submission_recoveries WHERE submission_id = ${quoteRef}`;
+      expect(auditAfter).toEqual(audit);
+    });
+
+    test("reads a recorded post-abandonment payment once, and later reads do not ask Chowdeck again", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await abandonPlacedOrder(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: { status: "success" } }));
+      await status(baseUrl);
+      const first = (await row(quoteRef)).paid_after_release_at;
+      received = [];
+
+      const again = JSON.parse(textOf(await status(baseUrl)));
+      await status(baseUrl);
+
+      expect(orderReads()).toHaveLength(0);
+      expect((await row(quoteRef)).paid_after_release_at).toEqual(first);
+      expect(again.abandoned[0].paid_after_abandoned).toBeDefined();
+    });
+
+    test.each([
+      ["Chowdeck shows it unpaid", orderDetail(), timeline(["ORDER_CREATED"]), "not paid yet (Chowdeck payment status: pending)"],
+      ["the order lookup returns 404", () => Response.json({ message: "Order not found" }, { status: 404 }), timeline([]), "payment could not be checked"],
+      ["the order lookup fails upstream", () => Response.json({ message: "Server Error" }, { status: 500 }), timeline([]), "payment could not be checked"],
+      ["the timeline cannot be read", orderDetail({ payment: undefined }), () => Response.json({ message: "nope" }, { status: 404 }), "payment could not be checked"],
+    ])("records nothing and keeps the uncertainty when %s", async (_, detail, steps, check) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef, before, audit } = await abandonPlacedOrder(baseUrl);
+      route(`GET /customer/order/${ORDER_ID}`, detail);
+      route(`GET /customer/order/${ORDER_ID}/timeline`, steps);
+
+      const first = JSON.parse(textOf(await status(baseUrl)));
+      const second = JSON.parse(textOf(await status(baseUrl)));
+
+      for (const body of [first, second]) {
+        const [abandoned] = body.abandoned;
+        expect(abandoned.payment_check).toContain(check);
+        expect(abandoned).not.toHaveProperty("paid_after_abandoned");
+        expect(abandoned.guidance).toContain("The order may still exist and may still be payable");
+        expect(JSON.stringify(body)).not.toMatch(/cancell?ed\b(?<!not cancelled)/i);
+      }
+      const after = await row(quoteRef);
+      expect(after).toEqual({ ...before, updated_at: after.updated_at });
+      expect(after.paid_after_release_at).toBeNull();
+      expect((await sql`SELECT * FROM order_submission_recoveries WHERE submission_id = ${quoteRef}`)[0]).toEqual(audit);
+    });
+
+    test("does not check attempts abandoned more than 7 days ago, or abandoned attempts without an order id", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await abandonPlacedOrder(baseUrl);
+      await sql`UPDATE order_submissions SET lock_released_at = now() - interval '7 days 1 second' WHERE id = ${quoteRef}`;
+      const unknown = await seedReleasedUnknown();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: { status: "success" } }));
+      received = [];
+
+      const body = JSON.parse(textOf(await status(baseUrl)));
+
+      expect(received.filter((r) => r.path.startsWith("/customer/order/"))).toHaveLength(0);
+      expect((await row(quoteRef)).paid_after_release_at).toBeNull();
+      expect(body.abandoned.map((a: { quote_ref: string }) => a.quote_ref)).toEqual([unknown]);
+      expect(body.abandoned[0]).not.toHaveProperty("payment_check");
+      expect(body.abandoned[0].guidance).toContain("An order may or may not exist for this attempt");
+    });
+
+    test("the normal payment path can never change an abandoned attempt", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await abandonPlacedOrder(baseUrl);
+
+      const recorded = await stores.orderSubmissions.recordPaid(alice.userId, quoteRef, { orderStatus: "x", paymentStatus: "success" });
+
+      expect(recorded).toBe(false);
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+
+    test("place_order stops warning once the attempt was abandoned more than 7 days ago", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const id = await seedReleasedUnknown();
+      await sql`UPDATE order_submissions SET lock_released_at = now() - interval '7 days 1 second' WHERE id = ${id}`;
+
+      const { first, second } = await placeOrder(baseUrl);
+
+      expect(first.inputRequests.confirm.params.message).not.toContain("marked abandoned");
+      expect(Object.keys(first.inputRequests.confirm.params.requestedSchema.properties)).toEqual(["confirm"]);
+      expect(JSON.parse(textOf(second)).order_id).toBe(ORDER_ID);
+    });
+  });
+
+  describe("payment-start status in get_order_submission", () => {
+    test.each([
+      ["unknown", "unknown"],
+      [null, "sent; outcome not recorded"],
+    ])("shows the recorded state %p and its time, and nothing from the processor", async (recorded, shown) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      await sql`UPDATE order_submissions SET payment_started_at = now(), payment_start_state = ${recorded} WHERE id = ${quoteRef}`;
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail());
+      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED"]));
+
+      const body = JSON.parse(textOf(await call({ baseUrl, name: "get_order_submission", args: { restaurant_id: 102555 } })));
+
+      const { payment_start } = body.attempts[0];
+      expect(payment_start.state).toBe(shown);
+      expect(Date.parse(payment_start.started_at)).not.toBeNaN();
+      expect(Object.keys(payment_start)).toEqual(["state", "started_at"]);
+      expect(JSON.stringify(body)).not.toMatch(/authorization_url|reference|processor/);
     });
   });
 });

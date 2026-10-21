@@ -18,6 +18,13 @@ export type OrderSubmissionState =
 export type GateFailure = "gate_rejected" | "gate_uncertain";
 
 /*
+ * The recorded outcome of the one payment-start request for an order.
+ * started: Chowdeck returned a payment link; rejected: Chowdeck definitely
+ * refused; unknown: a payment may or may not have been started.
+ */
+export type PaymentStartState = "started" | "rejected" | "unknown";
+
+/*
  * What a caller may learn about a record. fee_id, the address binding and
  * the nonce hash never leave the store.
  */
@@ -38,6 +45,19 @@ export type OrderSubmission = {
   paymentMethodId: number | null;
   paymentChannelName: string | null;
   orderRequestStartedAt: Date | null;
+  paymentStartedAt: Date | null;
+  paymentStartState: PaymentStartState | null;
+  lockReleasedAt: Date | null;
+  lockReleaseReason: "cart_changed" | "operator_released" | null;
+  paidAfterReleaseAt: Date | null;
+};
+
+/*
+ * An attempt whose lock an operator released recently, with the recorded
+ * recovery reason. Its state is still the attempt's real state.
+ */
+export type ReleasedSubmission = OrderSubmission & {
+  recoveryReasonCode: string | null;
 };
 
 /*
@@ -124,6 +144,25 @@ export interface OrderSubmissionStore {
     evidence: OrderEvidence,
   ): Promise<LinkResult>;
   listOpen(userId: string, vendorId: number): Promise<OrderSubmission[]>;
+  markPaymentStarted(
+    userId: string,
+    id: string,
+    chowdeckOrderId: number,
+  ): Promise<boolean>;
+  recordPaymentStart(
+    userId: string,
+    id: string,
+    state: PaymentStartState,
+  ): Promise<boolean>;
+  listRecentlyReleased(
+    userId: string,
+    vendorId: number,
+  ): Promise<ReleasedSubmission[]>;
+  recordPaidAfterRelease(
+    userId: string,
+    id: string,
+    evidence: OrderEvidence,
+  ): Promise<boolean>;
 }
 
 /*
@@ -149,6 +188,10 @@ export type UserOrderSubmissions = {
     evidence: OrderEvidence,
   ): Promise<LinkResult>;
   listOpen(vendorId: number): Promise<OrderSubmission[]>;
+  markPaymentStarted(id: string, chowdeckOrderId: number): Promise<boolean>;
+  recordPaymentStart(id: string, state: PaymentStartState): Promise<boolean>;
+  listRecentlyReleased(vendorId: number): Promise<ReleasedSubmission[]>;
+  recordPaidAfterRelease(id: string, evidence: OrderEvidence): Promise<boolean>;
 };
 
 export const bindOrderSubmissions = (
@@ -169,9 +212,25 @@ export const bindOrderSubmissions = (
   linkOrder: (id, chowdeckOrderId, evidence) =>
     store.linkOrder(userId, id, chowdeckOrderId, evidence),
   listOpen: (vendorId) => store.listOpen(userId, vendorId),
+  markPaymentStarted: (id, chowdeckOrderId) =>
+    store.markPaymentStarted(userId, id, chowdeckOrderId),
+  recordPaymentStart: (id, state) =>
+    store.recordPaymentStart(userId, id, state),
+  listRecentlyReleased: (vendorId) =>
+    store.listRecentlyReleased(userId, vendorId),
+  recordPaidAfterRelease: (id, evidence) =>
+    store.recordPaidAfterRelease(userId, id, evidence),
 });
 
 export const QUOTE_LIFETIME_SECONDS = 5 * 60;
+
+/*
+ * Operator recovery: an attempt whose order request was sent with an unknown
+ * outcome may be released only this long after the request started, and a
+ * released attempt keeps triggering duplicate-order warnings for this long.
+ */
+export const UNKNOWN_RECOVERY_WAIT_HOURS = 24;
+export const RELEASED_WARNING_DAYS = 7;
 
 /*
  * A claimed submission whose order-request marker was never committed is

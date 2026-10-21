@@ -206,4 +206,24 @@ class OrderService {
   }
 }
 
+/*
+ * Payment evidence from Chowdeck for a known order id: paid only when the
+ * payment status is success or the timeline shows MADE_PAYMENT. Lookup
+ * failures are thrown, never read as unpaid.
+ */
+export const readPaymentEvidence = async (orders: OrderService, orderId: number) => {
+  const { order } = await orders.getOrder(String(orderId));
+  const evidence = {
+    orderStatus: typeof order.status === "string" ? order.status : null,
+    paymentStatus:
+      typeof order.payment?.status === "string" ? order.payment.status : null,
+  };
+  if (evidence.paymentStatus === "success") return { paid: true, evidence };
+  const { timeline } = await orders.getOrderTimeline(String(orderId));
+  return {
+    paid: timeline.some((entry) => entry.action === "MADE_PAYMENT"),
+    evidence,
+  };
+};
+
 export default OrderService;

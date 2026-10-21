@@ -691,6 +691,21 @@ describe("get_order", () => {
     });
   });
 
+  test.each([
+    ["omits", undefined],
+    ["nulls", null],
+  ])(
+    "leaves payment out, rather than inventing a status, when Chowdeck %s it",
+    async (_, payment) => {
+      route(`GET ${ORDER_PATH}`, orderResponse({ status: "pending", payment }));
+
+      const parsed = JSON.parse(textOf(await getOrder()));
+
+      expect(parsed.order.status).toBe("pending");
+      expect(parsed.order).not.toHaveProperty("payment");
+    },
+  );
+
   test("reports a missing order with Chowdeck's message", async () => {
     route(`GET ${ORDER_PATH}`, () =>
       Response.json(
