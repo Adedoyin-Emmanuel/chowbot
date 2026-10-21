@@ -93,7 +93,16 @@ export type PlaceOrderArgs = {
   tip?: "none" | { amount_naira: number };
   gift?: GiftRecipientInput;
   promo_code?: string;
+  /*
+   * Two-step confirmation, for clients that cannot show a confirmation
+   * prompt: the code returned by the first call, sent back only after the
+   * user explicitly agrees to the summary it came with.
+   */
+  confirmation?: string;
+  acknowledge_unresolved_attempts?: boolean;
 };
+
+type ConfirmationAnswer = { confirm: boolean; acknowledge_unresolved_attempts?: boolean };
 
 /*
  * Validates the extras from the arguments alone (no Chowdeck calls). Used
@@ -203,13 +212,6 @@ class OrderPlacementService {
     return headers;
   }
 
-  private canElicit(ctx: ServerContext) {
-    const envelope = ctx.mcpReq.envelope as Record<string, unknown> | undefined;
-    const caps = envelope?.["io.modelcontextprotocol/clientCapabilities"] as
-      { elicitation?: { form?: unknown } } | undefined;
-    return Boolean(envelope && caps?.elicitation?.form);
-  }
-
   /*
    * Other attempts at the restaurant that could already have produced an
    * order: those still locking a cart while unpaid or unknown, and those an
@@ -240,21 +242,38 @@ class OrderPlacementService {
     return checked;
   }
 
+  /*
+   * Use an explicit two-call confirmation for every client. A capability
+   * declaration alone cannot establish that the host can render an
+   * elicitation UI; returning one can fail before the summary reaches the
+   * user. The signed state is user- and method-bound and expires after five
+   * minutes. Submission still follows the same nonce, claim, digest, lock,
+   * and one-send checks.
+   */
   async placeOrder(args: PlaceOrderArgs, ctx: ServerContext) {
     await this.authHeaders();
-    if (!this.canElicit(ctx)) {
+    if (args.confirmation === undefined) return this.askForConfirmation(args, ctx, "code");
+    if (!this.requestStateCodec) {
+      return text("Order not placed: order placement is not available on this server.", true);
+    }
+    let state: PlacementState;
+    try {
+      state = (await this.requestStateCodec.verify(args.confirmation, ctx)) as PlacementState;
+    } catch {
       return text(
-        "Order not placed: this client cannot show ChowBot's order confirmation. Use preview_order to review the order, and place it in the Chowdeck app.",
+        "Order not placed: the confirmation code is invalid, expired or not yours. Call place_order again without confirmation to get a new summary, and show it to the user.",
         true,
       );
     }
-    const state = ctx.mcpReq.requestState<PlacementState>();
-    return state === undefined
-      ? this.askForConfirmation(args, ctx)
-      : this.submit(args, ctx, state);
+    return this.submit(args, ctx, state, {
+      confirm: true,
+      ...(args.acknowledge_unresolved_attempts !== undefined && {
+        acknowledge_unresolved_attempts: args.acknowledge_unresolved_attempts,
+      }),
+    });
   }
 
-  private async askForConfirmation(args: PlaceOrderArgs, ctx: ServerContext) {
+  private async askForConfirmation(args: PlaceOrderArgs, ctx: ServerContext, mode: "prompt" | "code") {
     if (!this.requestStateCodec || !this.channelQuery) {
       return text(
         "Order not placed: order placement is not available on this server.",
@@ -420,23 +439,38 @@ class OrderPlacementService {
           })
         : z.object({ confirm: z.boolean() });
 
+    const requestState = await this.requestStateCodec.mint(
+      {
+        v: 1,
+        submissionId: submission.id,
+        nonce,
+        addressId: args.address_id,
+        channel: args.payment_channel,
+        acknowledgementRequired: unresolved.total > 0,
+        notesDigest: notesDigestOf(checked.raw),
+        extrasDigest: extrasDigestOf(extras),
+      } satisfies PlacementState,
+      ctx,
+    );
+    if (mode === "code") {
+      return json({
+        status: "confirmation_required",
+        order_placed: false,
+        summary: message,
+        confirmation: requestState,
+        expires_in_seconds: REQUEST_STATE_TTL_SECONDS,
+        ...(unresolved.total > 0 && { requires_acknowledge_unresolved_attempts: true }),
+        next_step:
+          "Nothing was ordered. Show the user this summary in full and ask whether to place the order. Only if they explicitly say yes, call place_order again with exactly the same arguments plus confirmation set to this value" +
+          (unresolved.total > 0 ? " and acknowledge_unresolved_attempts: true (only if they also accept the warning about earlier attempts)" : "") +
+          ". Never call it again without their yes, and never after an unknown outcome.",
+      });
+    }
     return inputRequired({
       inputRequests: {
         confirm: inputRequired.elicit({ message, requestedSchema }),
       },
-      requestState: await this.requestStateCodec.mint(
-        {
-          v: 1,
-          submissionId: submission.id,
-          nonce,
-          addressId: args.address_id,
-          channel: args.payment_channel,
-          acknowledgementRequired: unresolved.total > 0,
-          notesDigest: notesDigestOf(checked.raw),
-          extrasDigest: extrasDigestOf(extras),
-        } satisfies PlacementState,
-        ctx,
-      ),
+      requestState,
     });
   }
 
@@ -444,6 +478,7 @@ class OrderPlacementService {
     args: PlaceOrderArgs,
     ctx: ServerContext,
     state: PlacementState,
+    given?: ConfirmationAnswer,
   ) {
     if (
       state.submissionId !== args.quote_ref ||
@@ -455,11 +490,9 @@ class OrderPlacementService {
         true,
       );
     }
-    const answer = acceptedContent(
-      ctx.mcpReq.inputResponses,
-      "confirm",
-      answerSchema,
-    );
+    const answer =
+      given ??
+      acceptedContent(ctx.mcpReq.inputResponses, "confirm", answerSchema);
     if (answer?.confirm !== true)
       return text("Order not placed: it was not confirmed.");
     if (

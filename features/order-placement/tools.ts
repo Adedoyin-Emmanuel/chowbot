@@ -25,6 +25,15 @@ const placeOrderSchema = {
     .enum(SUPPORTED_PAYMENT_CHANNELS)
     .describe("Online payment channel. The order is created unpaid; payment is completed separately."),
   ...checkoutDraftSchema,
+  confirmation: z
+    .string()
+    .max(4096)
+    .optional()
+    .describe("Only in the second call: the confirmation value from the first call's summary, after the user explicitly said yes to it"),
+  acknowledge_unresolved_attempts: z
+    .boolean()
+    .optional()
+    .describe("Only when the summary asked for it and the user accepted the warning about earlier order attempts"),
 };
 
 const failure = (action: string, tool: string, error: unknown) => {
@@ -115,7 +124,7 @@ export const registerOrderPlacementTools = (
     {
       title: "Place order",
       description:
-        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). Asks the user to confirm the items, address, total and payment channel through the client before anything is sent. The order is created unpaid; payment is not started by ChowBot. An optional tip, gift recipient or promo code (as in preview_order) is shown in the confirmation and sent with the order; ChowBot never adds a tip itself, and a promo code is accepted only when Chowdeck's discount calculation shows a discount. Never call it again after an unknown outcome.",
+        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). The user must confirm the restaurant, items, delivery address, quoted total, payment channel, notes and any order options before anything is sent. The first call without confirmation places nothing and returns the full summary plus a confirmation value; show that entire summary to the user and only if they explicitly say yes, call place_order again with the same arguments plus confirmation. This two-call confirmation works without client-specific confirmation UI. The order is created unpaid; payment is not started by ChowBot. An optional tip, gift recipient or promo code (as in preview_order) is shown in the confirmation and sent with the order; ChowBot never adds a tip itself, and a promo code is accepted only when Chowdeck's discount calculation shows a discount. Never call it again after an unknown outcome.",
       inputSchema: z.object(placeOrderSchema),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },

@@ -398,18 +398,24 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
     test.each([
       ["a legacy client", { legacy: true }],
       ["a modern client without elicitation", { capabilities: {} }],
-    ])("refuses %s without contacting Chowdeck about the order", async (_, variant) => {
+    ])("gives %s a summary and a confirmation code, and places nothing yet", async (_, variant) => {
       scriptHappyPath();
       const baseUrl = await startApp();
       const quoteRef = await getQuoteRef(baseUrl);
-      received = [];
 
       const body = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef), ...variant });
 
-      expect(body.result.isError).toBe(true);
-      expect(textOf(body)).toContain("cannot show ChowBot's order confirmation");
-      expect(received).toHaveLength(0);
-      expect((await row(quoteRef)).state).toBe("quoted");
+      expect(body.result.isError).toBeUndefined();
+      const result = JSON.parse(textOf(body));
+      expect(result).toMatchObject({ status: "confirmation_required", order_placed: false, expires_in_seconds: 300 });
+      expect(result.summary).toContain("Place this order at Chicken Republic - Opebi?");
+      expect(result.summary).toContain("Total: 554000");
+      expect(result.confirmation).toMatch(/^v1\./);
+      expect(result.next_step).toContain("Only if they explicitly say yes");
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect(posts("/customer/delivery/amount")).toHaveLength(1);
+      expect((await row(quoteRef)).state).toBe("confirmation_pending");
+      expectNothingPrivate(result);
     });
 
     test.each([
@@ -1417,6 +1423,146 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       const { quoteRef, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 } });
 
       expect(textOf(second!)).toContain("The order's outcome is unknown");
+      expect(posts("/customer/order")).toHaveLength(1);
+      expect((await row(quoteRef)).state).toBe("unknown");
+    });
+  });
+
+  /*
+   * Two-step confirmation for clients without a confirmation prompt (the
+   * Claude app). The code is the same signed state the prompt flow uses.
+   */
+  describe("two-step confirmation", () => {
+    const firstCall = async (baseUrl: string, quoteRef: string, extra: Record<string, unknown> = {}, token = alice.token) => {
+      const body = await call({ baseUrl, token, name: "place_order", args: { ...placeArgs(quoteRef), ...extra }, legacy: true });
+      return JSON.parse(textOf(body)) as { confirmation: string; summary: string; requires_acknowledge_unresolved_attempts?: boolean };
+    };
+    const secondCall = (baseUrl: string, args: Record<string, unknown>, token = alice.token) =>
+      call({ baseUrl, token, name: "place_order", args, legacy: true });
+
+    test("does not send a prompt interaction even when the client declares form elicitation", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+
+      const first = await call({
+        baseUrl,
+        name: "place_order",
+        args: placeArgs(quoteRef),
+        capabilities: { elicitation: { form: {} } },
+      });
+
+      const summary = JSON.parse(textOf(first));
+      expect(summary).toMatchObject({ status: "confirmation_required", order_placed: false });
+      expect(summary.summary).toContain("Chicken Republic - Opebi");
+      expect(summary.summary).toContain("Deliver to: Home");
+      expect(summary.summary).toContain("Total: 554000");
+      expect(summary.summary).toContain("opay");
+      expect(summary.confirmation).toMatch(/^v1\./);
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    test.each([
+      ["a legacy client", { legacy: true }],
+      ["a modern client without elicitation", { capabilities: {} }],
+    ])("places the order once %s sends the code back", async (_, variant) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const first = JSON.parse(textOf(await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef), ...variant })));
+
+      const second = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), confirmation: first.confirmation }, ...variant });
+
+      expect(JSON.parse(textOf(second))).toMatchObject({ order_id: ORDER_ID, quote_ref: quoteRef, status: "created; awaiting payment" });
+      expect(posts("/customer/order")).toHaveLength(1);
+      expect(posts("/customer/delivery/amount")).toHaveLength(2);
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+
+    test("a code can be used only once", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const { confirmation } = await firstCall(baseUrl, quoteRef);
+      await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation });
+
+      const replay = await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation });
+
+      expect(textOf(replay)).toContain("this confirmation was already used");
+      expect(posts("/customer/order")).toHaveLength(1);
+    });
+
+    test.each([
+      ["a tampered code", (c: string) => c.slice(0, -2) + (c.endsWith("AA") ? "BB" : "AA")],
+      ["a made-up code", () => "v1.eyJwIjp7fX0.AAAA"],
+    ])("refuses %s and sends nothing", async (_, mutate) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const { confirmation } = await firstCall(baseUrl, quoteRef);
+
+      const result = await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation: mutate(confirmation) });
+
+      expect(textOf(result)).toContain("the confirmation code is invalid, expired or not yours");
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("confirmation_pending");
+    });
+
+    test("another user cannot use someone's code", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const { confirmation } = await firstCall(baseUrl, quoteRef);
+
+      const result = await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation }, bob.token);
+
+      expect(textOf(result)).toContain("the confirmation code is invalid, expired or not yours");
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    test.each([
+      ["a different address", { address_id: ADDRESS_ID + 1 }, "the order details changed after confirmation was requested"],
+      ["an added tip", { tip: { amount_naira: 200 } }, "the tip, gift or promo code differs from what was confirmed"],
+    ])("refuses the code with %s", async (_, change, message) => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const { confirmation } = await firstCall(baseUrl, quoteRef);
+
+      const result = await secondCall(baseUrl, { ...placeArgs(quoteRef), ...change, confirmation });
+
+      expect(textOf(result)).toContain(message);
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    test("earlier unresolved attempts still need an explicit acknowledgement", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      await sql`INSERT INTO order_submissions ${sql({
+        user_id: alice.userId, vendor_id: 102555, cart_id: 12345, fee_id: 1, address_binding: "b", cart_fingerprint: "f",
+        computed_total: 1, quote_expires_at: new Date(Date.now() + 300_000), state: "unknown",
+        confirmation_consumed_at: new Date(), order_request_started_at: new Date(),
+      })}`;
+      const quoteRef = await getQuoteRef(baseUrl);
+      const first = await firstCall(baseUrl, quoteRef);
+      expect(first.requires_acknowledge_unresolved_attempts).toBe(true);
+      expect(first.summary).toContain("earlier order attempt(s) at this restaurant");
+
+      const without = await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation: first.confirmation });
+      expect(textOf(without)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    test("an unclear outcome is never retried", async () => {
+      scriptHappyPath();
+      route("POST /customer/order", () => Response.json({ message: "Server Error" }, { status: 503 }));
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const { confirmation } = await firstCall(baseUrl, quoteRef);
+
+      const result = await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation });
+
+      expect(textOf(result)).toContain("The order's outcome is unknown");
       expect(posts("/customer/order")).toHaveLength(1);
       expect((await row(quoteRef)).state).toBe("unknown");
     });
