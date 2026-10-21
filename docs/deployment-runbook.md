@@ -1,9 +1,8 @@
 # ChowBot deployment and recovery runbook
 
 Operational steps for the hosted HTTP server (`dist/http.js`) and the recovery CLI
-(`dist/cli/recovery.js`). Live order placement is **off** by default and must stay off
-until a controlled test is explicitly approved. `start_payment` has **no** production
-configuration path and is never registered by `http.ts`.
+(`dist/cli/recovery.js`). Live ordering (`place_order` and `start_payment`) is **on** by
+default in the hosted server; `CHOWBOT_PLACE_ORDER_ENABLED=false` turns both off (kill switch).
 
 Never print secrets. Never pass a credential as a command-line argument
 (`docker exec -e TOKEN=…`, `--note "token"`): it lands in shell history and process listings.
@@ -72,18 +71,19 @@ migrator takes no lock and has no down-migrations, so:
 | `OAUTH_ISSUER_URL` | optional | Defaults to the origin of `MCP_SERVER_URL`; must be on the same host. |
 | `PORT` | optional | Default 2800. |
 | `CHOWBOT_SHUTDOWN_GRACE_MS` | optional | Default: Chowdeck request timeout + 10 s (25 s). See §4. |
-| `CHOWBOT_PLACE_ORDER_ENABLED` | **unset or `false`** | Only the exact value `true` enables `place_order`. |
-| `CHOWBOT_PAYMENT_CHANNEL_METHODS` | empty, or unset | The captured value is the **empty string**. Any other value keeps `place_order` off. |
-| `CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER` | `NG`, or unset | Any other value keeps `place_order` off. |
+| `CHOWBOT_PLACE_ORDER_ENABLED` | unset (on), or `false` (off) | Kill switch for `place_order` **and** `start_payment`. Any value other than `true`/`false` turns both off, with a warning. |
+| `CHOWBOT_PAYMENT_CHANNEL_METHODS` | unset | Defaults to the captured value, the **empty string**. If set, any other value turns live ordering off. |
+| `CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER` | unset | Defaults to the captured `NG`. If set, any other value turns live ordering off. |
 
-There is no setting that registers `start_payment`. Do not add one.
+`start_payment` follows the same switch and uses the Chowdeck website's own redirect pages
+(`https://chowdeck.com/store/ongoing-order?orderId=<id>` and `/store/checkout?status=failed`).
 
 Check the place_order settings without exposing secrets:
 ```sh
 docker exec <container> env | grep -E '^CHOWBOT_(PLACE_ORDER|PAYMENT_CHANNEL|SHUTDOWN)'
 ```
-Some platforms drop variables whose value is empty. If `CHOWBOT_PAYMENT_CHANNEL_METHODS` is
-dropped, `place_order` stays off and, when the flag is `true`, start-up logs
+Some platforms drop variables whose value is empty. Leaving both channel variables unset avoids
+this. If only one of them reaches the server, live ordering turns off and start-up logs
 "…not both set to the captured values…".
 
 ## 4. Probes, shutdown and proxies
@@ -151,8 +151,9 @@ curl -s "$MCP_SERVER_URL" -H "authorization: Bearer $TOKEN" \
   -H 'mcp-protocol-version: 2025-06-18' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
-Expected by default: `get_order_submission`, `resolve_order_submission` and `preview_order`
-present; **`place_order` and `start_payment` absent**.
+Expected by default: `place_order`, `start_payment`, `get_order_submission`,
+`resolve_order_submission` and `preview_order` present. With the kill switch set to `false`,
+`place_order` and `start_payment` are absent.
 
 ## 7. Incidents
 
@@ -195,8 +196,10 @@ ORDER BY created_at;
   ```
 
 ### 7.3 Unpaid order (`created`)
-1. ChowBot does not start payments (`start_payment` is off). Whether the user can find and pay
-   the order in the Chowdeck app is **unknown**.
+1. Pay with `start_payment` (it needs a client that supports URL-mode elicitation). If it
+   refuses because Chowdeck cannot confirm the order is unpaid, the order could not be read by
+   id; report that, as it decides how payment must work. Whether the user can find and pay the
+   order in the Chowdeck app instead is **unknown**.
 2. `get_order_submission` checks Chowdeck for payment and records it only on authoritative
    evidence (payment status `success` or a `MADE_PAYMENT` timeline step).
 3. If the user will not pay: `abandon <attempt-id> --reason user_reported_abandoned`. If the
@@ -210,12 +213,11 @@ ORDER BY created_at;
 
 1. **Prerequisites:** the proxy-trust decision (§4); a written plan for how the test order
    will be paid or abandoned (§7.3); a deploy freeze; two working operators.
-2. **Enable** (single replica): `CHOWBOT_PLACE_ORDER_ENABLED=true`,
-   `CHOWBOT_PAYMENT_CHANNEL_METHODS=` (empty), `CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER=NG`.
-   Restart, confirm start-up logs show **no** place_order warning, and confirm §6 lists
-   `place_order` and still **not** `start_payment`.
-3. **Disable after the test:** set `CHOWBOT_PLACE_ORDER_ENABLED=false` (or unset it), restart,
-   and confirm §6 no longer lists `place_order`. Resolve the test attempt with §7.
+2. **Enabled by default** (single replica): leave `CHOWBOT_PLACE_ORDER_ENABLED` and the channel
+   variables unset. Confirm start-up logs show **no** "live ordering is off" warning, and that §6
+   lists `place_order` and `start_payment`.
+3. **Disable if needed:** set `CHOWBOT_PLACE_ORDER_ENABLED=false`, restart, and confirm §6 no
+   longer lists either tool. Resolve any test attempt with §7.
 4. **Rollback boundary:** migrations 0004–0006 first shipped in commit `1db9ad5`. **Never roll
    back to an image older than `1db9ad5`** once they are applied: older code does not
    understand abandoned attempts. An image built from `1db9ad5` itself is schema-compatible,

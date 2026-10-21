@@ -115,6 +115,58 @@ export const registerCartTools = (
     },
   );
 
+  const noteInput = z
+    .string()
+    .max(4000)
+    .nullable()
+    .optional();
+
+  server.registerTool(
+    "get_cart_notes",
+    {
+      title: "Get checkout notes",
+      description:
+        "Show the restaurant note and the delivery (rider) note saved on the signed-in user's cart for a restaurant. These are the notes an order from this cart would carry.",
+      inputSchema: z.object({ restaurant_id: restaurantId }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ restaurant_id }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        return textResult(JSON.stringify(await service.getNotes(restaurant_id)));
+      } catch (error) {
+        return failure("get checkout notes", "get_cart_notes", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_cart_notes",
+    {
+      title: "Set checkout notes",
+      description:
+        "Set or clear the restaurant note (instructions for the restaurant) and/or the delivery note (instructions for the rider) on the signed-in user's existing cart for a restaurant. Give only the note(s) to change; null or an empty string clears one. Up to 500 characters each (ChowBot's limit). Saved on Chowdeck's cart, as the website does, and confirmed by re-reading the cart. Does not place an order.",
+      inputSchema: z.object({
+        restaurant_id: restaurantId,
+        vendor_note: noteInput.describe("Instructions for the restaurant; null or \"\" clears it"),
+        delivery_note: noteInput.describe("Instructions for the delivery rider; null or \"\" clears it"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ restaurant_id, vendor_note, delivery_note }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        const notes = {
+          ...(vendor_note !== undefined && { vendor: vendor_note }),
+          ...(delivery_note !== undefined && { delivery: delivery_note }),
+        };
+        return textResult(JSON.stringify(await service.setNotes(restaurant_id, notes)));
+      } catch (error) {
+        return failure("set checkout notes", "set_cart_notes", error);
+      }
+    },
+  );
+
   server.registerTool(
     "add_to_cart",
     {

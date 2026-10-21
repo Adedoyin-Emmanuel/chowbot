@@ -1,17 +1,22 @@
 import { CAPTURED_PAYMENT_CHANNEL_QUERY, type PaymentChannelQuery } from "./channels";
 
 /*
- * Production configuration for place_order, read only from the environment
- * and with no defaults:
+ * Production configuration for live ordering (place_order and
+ * start_payment), read from the environment:
  *
- *   CHOWBOT_PLACE_ORDER_ENABLED                 must be exactly "true"
- *   CHOWBOT_PAYMENT_CHANNEL_METHODS             must be set, to the captured value: empty
- *   CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER  must be set, to the captured value: NG
+ *   CHOWBOT_PLACE_ORDER_ENABLED                 unset or "true": on; "false": off
+ *   CHOWBOT_PAYMENT_CHANNEL_METHODS             optional; if set, must be the captured value: empty
+ *   CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER  optional; if set, must be the captured value: NG
  *
- * A variable set to an empty string is present; an unset one is not. Values
- * that differ from the captured website request are refused rather than
- * sent. place_order is registered only when the flag is on and both channel
- * values are present and match. Channel values alone never enable it.
+ * Live ordering is on by default in the hosted server. The flag is a kill
+ * switch: "false" turns off both tools without a code change. Any other
+ * value is treated as a typo and also turns them off, with a warning.
+ *
+ * The channel query defaults to the one captured from the website
+ * (methods="", country_identifier=NG). If either variable is set, both must
+ * be set to exactly those values; anything else turns live ordering off
+ * rather than sending an unobserved query. A variable set to an empty
+ * string is present; an unset one is not.
  */
 export type OrderPlacementConfig = {
   placeOrderEnabled: boolean;
@@ -25,26 +30,29 @@ export const readOrderPlacementConfig = (
   const flag = env.CHOWBOT_PLACE_ORDER_ENABLED?.trim();
   const methods = env.CHOWBOT_PAYMENT_CHANNEL_METHODS?.trim();
   const countryIdentifier = env.CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER?.trim();
-  const placeOrderEnabled = flag === "true";
-  const present = methods !== undefined && countryIdentifier !== undefined;
+  const warnings: string[] = [];
+
+  let switchOn = flag === undefined || flag === "" || flag === "true";
+  if (flag && flag !== "true" && flag !== "false") {
+    warnings.push(`CHOWBOT_PLACE_ORDER_ENABLED must be "true" or "false" (or unset); live ordering is off.`);
+    switchOn = false;
+  }
+
+  const anySet = methods !== undefined || countryIdentifier !== undefined;
   const matchesCapture =
     methods === CAPTURED_PAYMENT_CHANNEL_QUERY.methods &&
     countryIdentifier === CAPTURED_PAYMENT_CHANNEL_QUERY.countryIdentifier;
-  const paymentChannelQuery = present && matchesCapture ? { methods, countryIdentifier } : undefined;
+  const paymentChannelQuery: PaymentChannelQuery | undefined = !anySet
+    ? { ...CAPTURED_PAYMENT_CHANNEL_QUERY }
+    : matchesCapture
+      ? { methods: methods!, countryIdentifier: countryIdentifier! }
+      : undefined;
+  if (!paymentChannelQuery) {
+    warnings.push(
+      `The payment-channel query values differ from the captured website request (methods="", country_identifier=NG), or only one is set; live ordering is off.`,
+    );
+  }
 
-  const warnings: string[] = [];
-  if (present && !matchesCapture) {
-    warnings.push(
-      `The payment-channel query values differ from the captured website request (methods="", country_identifier=NG); place_order stays disabled.`,
-    );
-  }
-  if (flag && flag !== "true" && flag !== "false") {
-    warnings.push(`CHOWBOT_PLACE_ORDER_ENABLED must be "true" or "false"; place_order stays disabled.`);
-  }
-  if (placeOrderEnabled && !paymentChannelQuery) {
-    warnings.push(
-      "CHOWBOT_PLACE_ORDER_ENABLED is true but the payment-channel query values are not both set to the captured values; place_order stays disabled.",
-    );
-  }
+  const placeOrderEnabled = switchOn && paymentChannelQuery !== undefined;
   return { placeOrderEnabled, ...(paymentChannelQuery && { paymentChannelQuery }), warnings };
 };

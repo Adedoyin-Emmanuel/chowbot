@@ -2,11 +2,12 @@ import { z } from "zod";
 import type { McpServer, RequestStateCodec } from "@modelcontextprotocol/server";
 
 import { logger } from "../../utils/logger";
-import OrderPlacementService from "./service";
+import OrderPlacementService, { type PlaceOrderArgs } from "./service";
 import type { UserSession } from "../../lib/session";
 import { textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
 import { CheckoutRefusedError } from "../checkout/service";
+import { checkoutDraftSchema } from "../checkout/tools";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import type { UserOrderSubmissions } from "../../lib/order-submissions";
 import { SUPPORTED_PAYMENT_CHANNELS, type PaymentChannelQuery } from "./channels";
@@ -23,6 +24,7 @@ const placeOrderSchema = {
   payment_channel: z
     .enum(SUPPORTED_PAYMENT_CHANNELS)
     .describe("Online payment channel. The order is created unpaid; payment is completed separately."),
+  ...checkoutDraftSchema,
 };
 
 const failure = (action: string, tool: string, error: unknown) => {
@@ -113,13 +115,13 @@ export const registerOrderPlacementTools = (
     {
       title: "Place order",
       description:
-        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). Asks the user to confirm the items, address, total and payment channel through the client before anything is sent. The order is created unpaid; payment is not started by ChowBot. No tip is added. Never call it again after an unknown outcome.",
+        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). Asks the user to confirm the items, address, total and payment channel through the client before anything is sent. The order is created unpaid; payment is not started by ChowBot. An optional tip, gift recipient or promo code (as in preview_order) is shown in the confirmation and sent with the order; ChowBot never adds a tip itself, and a promo code is accepted only when Chowdeck's discount calculation shows a discount. Never call it again after an unknown outcome.",
       inputSchema: z.object(placeOrderSchema),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async (args, ctx) => {
       try {
-        return await service.placeOrder(args, ctx);
+        return await service.placeOrder(args as PlaceOrderArgs, ctx);
       } catch (error) {
         return failure("place the order", "place_order", error);
       }

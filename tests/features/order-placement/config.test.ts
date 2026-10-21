@@ -3,46 +3,51 @@ import { describe, expect, test } from "bun:test";
 import { readOrderPlacementConfig } from "../../../features/order-placement/config";
 
 /*
- * The captured website request: methods present and empty, country NG.
+ * Live ordering is on by default in the hosted server;
+ * CHOWBOT_PLACE_ORDER_ENABLED=false is the kill switch. The channel query
+ * defaults to the captured website request (methods="", country NG) and
+ * may only be overridden with exactly those values.
  */
+
 const CAPTURED = {
   CHOWBOT_PAYMENT_CHANNEL_METHODS: "",
   CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG",
 };
 
 describe("readOrderPlacementConfig", () => {
-  test("has no defaults: an empty environment enables nothing", () => {
-    expect(readOrderPlacementConfig({})).toEqual({ placeOrderEnabled: false, warnings: [] });
+  test("is on by default, with the captured channel query", () => {
+    expect(readOrderPlacementConfig({})).toEqual({
+      placeOrderEnabled: true,
+      paymentChannelQuery: { methods: "", countryIdentifier: "NG" },
+      warnings: [],
+    });
   });
 
-  test("accepts the captured values, with methods set but empty", () => {
-    const config = readOrderPlacementConfig(CAPTURED);
-
-    expect(config.paymentChannelQuery).toEqual({ methods: "", countryIdentifier: "NG" });
-    expect(config.warnings).toEqual([]);
+  test.each([["true"], [""], ["  true  "]])("stays on for %p", (flag) => {
+    expect(readOrderPlacementConfig({ CHOWBOT_PLACE_ORDER_ENABLED: flag }).placeOrderEnabled).toBe(true);
   });
 
-  test("channel values alone never enable place_order", () => {
-    expect(readOrderPlacementConfig(CAPTURED).placeOrderEnabled).toBe(false);
+  test("the kill switch turns it off without a warning", () => {
+    expect(readOrderPlacementConfig({ CHOWBOT_PLACE_ORDER_ENABLED: "false" })).toMatchObject({ placeOrderEnabled: false, warnings: [] });
   });
 
-  test.each([["false"], ["TRUE"], ["1"], ["yes"], [""]])("only the exact value true enables it, not %p", (flag) => {
-    expect(readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PLACE_ORDER_ENABLED: flag }).placeOrderEnabled).toBe(false);
+  test.each([["TRUE"], ["1"], ["yes"], ["off"]])("treats the unrecognised value %p as off, with a warning", (flag) => {
+    const config = readOrderPlacementConfig({ CHOWBOT_PLACE_ORDER_ENABLED: flag });
+
+    expect(config.placeOrderEnabled).toBe(false);
+    expect(config.warnings[0]).toContain('must be "true" or "false" (or unset)');
   });
 
-  test("warns about an unrecognised flag value", () => {
-    expect(readOrderPlacementConfig({ CHOWBOT_PLACE_ORDER_ENABLED: "yes" }).warnings[0]).toContain('must be "true" or "false"');
+  test("accepts the captured values when set explicitly, with methods set but empty", () => {
+    expect(readOrderPlacementConfig(CAPTURED)).toEqual({
+      placeOrderEnabled: true,
+      paymentChannelQuery: { methods: "", countryIdentifier: "NG" },
+      warnings: [],
+    });
   });
 
-  test.each([
-    ["no channel values", {}],
-    ["methods unset", { CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG" }],
-    ["the country unset", { CHOWBOT_PAYMENT_CHANNEL_METHODS: "" }],
-  ])("the flag with %s supplies no channel query and warns", (_, env) => {
-    const config = readOrderPlacementConfig({ ...env, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
-
-    expect(config.paymentChannelQuery).toBeUndefined();
-    expect(config.warnings.join(" ")).toContain("place_order stays disabled");
+  test("treats whitespace-only methods as the captured empty value", () => {
+    expect(readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_METHODS: "  " }).placeOrderEnabled).toBe(true);
   });
 
   test.each([
@@ -50,25 +55,17 @@ describe("readOrderPlacementConfig", () => {
     ["a lowercase country", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "ng" }],
     ["another country", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "GH" }],
     ["an empty country", { ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "" }],
-  ])("refuses %s, even with the flag on", (_, env) => {
-    const config = readOrderPlacementConfig({ ...env, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
+    ["only methods set", { CHOWBOT_PAYMENT_CHANNEL_METHODS: "" }],
+    ["only the country set", { CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG" }],
+  ])("turns live ordering off for %s, rather than sending an unobserved query", (_, env) => {
+    const config = readOrderPlacementConfig(env);
 
+    expect(config.placeOrderEnabled).toBe(false);
     expect(config.paymentChannelQuery).toBeUndefined();
     expect(config.warnings[0]).toContain("differ from the captured website request");
   });
 
-  test("treats whitespace-only methods as the captured empty value", () => {
-    expect(readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PAYMENT_CHANNEL_METHODS: "  " }).paymentChannelQuery).toEqual({
-      methods: "",
-      countryIdentifier: "NG",
-    });
-  });
-
-  test("the flag with both captured values enables it", () => {
-    const config = readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
-
-    expect(config.placeOrderEnabled).toBe(true);
-    expect(config.paymentChannelQuery).toEqual({ methods: "", countryIdentifier: "NG" });
-    expect(config.warnings).toEqual([]);
+  test("the kill switch wins over valid channel values", () => {
+    expect(readOrderPlacementConfig({ ...CAPTURED, CHOWBOT_PLACE_ORDER_ENABLED: "false" }).placeOrderEnabled).toBe(false);
   });
 });

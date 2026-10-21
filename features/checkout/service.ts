@@ -7,6 +7,26 @@ import { logger } from "../../utils/logger";
 import type { UserOrderSubmissions } from "../../lib/order-submissions";
 import CartService, { cartFingerprint, type CartDetail } from "../carts/service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
+import {
+  CONFIG_PATH,
+  formatNaira,
+  tipFromNaira,
+  parseTipConfig,
+  validatePromoCode,
+  validateGiftRecipient,
+  type TipChoice,
+  type TipConfig,
+  type GiftRecipient,
+  type GiftRecipientInput,
+  PHONE_VALIDATE_PATH,
+} from "./draft";
+import {
+  totalOff,
+  DISCOUNT_APPLY_PATH,
+  discountRequestBody,
+  parseAppliedDiscounts,
+  type AppliedDiscount,
+} from "./discounts";
 import AddressService, { NotSignedInError } from "../addresses/service";
 import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
 
@@ -95,7 +115,14 @@ export type PreviewPaymentMethod = (typeof PREVIEW_PAYMENT_METHODS)[number];
 const WITHHELD_FEE_ID =
   "<withheld: a submission would first request a fresh delivery-fee quote, which creates a fee record, so a dry run requests none>";
 const WITHHELD_ADDRESS_ID = "<withheld: your selected saved address>";
-const WITHHELD_NOTE = "<withheld: copied from your cart>";
+/*
+ * Draft extras for a preview, from tool arguments (see ./draft.ts).
+ */
+export type CheckoutDraftInput = {
+  promo_code?: string;
+  tip?: "none" | { amount_naira: number };
+  gift?: GiftRecipientInput;
+};
 
 export type OrderPreviewResult = {
   dry_run: true;
@@ -104,6 +131,11 @@ export type OrderPreviewResult = {
   cart: Record<string, ScalarValue>;
   validations: string[];
   payload_preview: Record<string, unknown>;
+  checkout_draft: {
+    confirmed_by_chowdeck: Record<string, unknown>;
+    provided_by_you: Record<string, unknown>;
+    not_confirmed: string[];
+  };
   omitted_fields: Record<string, string>;
   not_performed: string[];
   assumptions: string[];
@@ -113,6 +145,29 @@ export type OrderPreviewResult = {
  * A quote ChowBot refuses to request. Messages never include address IDs,
  * source/destination IDs or fee IDs.
  */
+/*
+ * Chowdeck's discount calculation for one cart, with and without a promo
+ * code. code_discount is ChowBot's difference between the two totals; the
+ * response does not say which discount comes from the code.
+ */
+export type PromoCheckResult = {
+  promo_code: string;
+  status: "discount" | "no_discount" | "rejected";
+  rejection?: string;
+  with_code?: { discounts: AppliedDiscount[]; total_off: number };
+  without_code?: { discounts: AppliedDiscount[]; total_off: number };
+  code_discount: number;
+  cart_total: ScalarValue;
+  basis: string[];
+};
+
+const isDefiniteHttpRejection = (error: unknown): error is ChowdeckApiError =>
+  error instanceof ChowdeckApiError &&
+  error.kind === "http" &&
+  error.status !== undefined &&
+  error.status < 500 &&
+  error.status !== 401;
+
 export class CheckoutRefusedError extends Error {
   constructor(message: string) {
     super(message);
@@ -499,11 +554,140 @@ class CheckoutService {
    * no order, no payment and no cart change. Private values in the payload
    * are replaced by placeholders.
    */
+  /*
+   * Chowdeck's tip limits, or undefined when they cannot be read.
+   */
+  async readTipConfig(): Promise<TipConfig | undefined> {
+    try {
+      return parseTipConfig(await this.client.request(CONFIG_PATH, { headers: await this.authHeaders() }));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /*
+   * The website's check of a gift recipient's phone:
+   * POST /auth/phone/validate {phone, country_code} and data.is_valid. Only
+   * an explicit true passes; anything else stops the gift.
+   */
+  async validateGiftPhone(gift: GiftRecipient) {
+    let body: unknown;
+    try {
+      body = await this.client.request(PHONE_VALIDATE_PATH, {
+        method: "POST",
+        headers: await this.authHeaders(),
+        body: { phone: gift.phone, country_code: gift.country_code },
+      });
+    } catch (error) {
+      throw new CheckoutRefusedError(
+        `the gift recipient's phone could not be checked with Chowdeck (${error instanceof ChowdeckApiError ? error.message : "unexpected error"})`,
+      );
+    }
+    const valid = isRecord(body) && isRecord(body.data) ? body.data.is_valid : undefined;
+    if (valid === true) return;
+    throw new CheckoutRefusedError(
+      valid === false
+        ? "Chowdeck says the gift recipient's phone number is not valid for that country"
+        : `POST ${PHONE_VALIDATE_PATH} returned an unexpected response, so the gift recipient's phone is unchecked`,
+    );
+  }
+
+  /*
+   * One discount calculation for a cart, as the website requests it.
+   */
+  async calculateDiscounts(input: {
+    raw: Record<string, unknown>;
+    vendorId: number;
+    addressId: number;
+    orderClass: string;
+    promoCode?: string;
+  }) {
+    const body = await this.client.request(DISCOUNT_APPLY_PATH, {
+      method: "POST",
+      headers: await this.authHeaders(),
+      body: discountRequestBody({ ...input, cart: input.raw }),
+    });
+    const discounts = parseAppliedDiscounts(body);
+    return { discounts, total_off: totalOff(discounts) };
+  }
+
+  /*
+   * Runs Chowdeck's discount calculation for the cart with the code and
+   * without it. A 4xx for the code is Chowdeck refusing it, reported
+   * verbatim. Nothing is retried; an unclear result is an error.
+   */
+  async promoCheck(
+    checked: { raw: Record<string, unknown>; vendorId: number; addressId: number; orderClass: string; cartTotal: ScalarValue },
+    promoCode: string,
+  ): Promise<PromoCheckResult> {
+    const basis = [
+      "Chowdeck's discount calculation (POST /customer/discount/apply), requested as the Chowdeck website builds it; its responses have never been observed on the wire, so this is not a guarantee",
+      "no fee quote was requested, so discounts on delivery fees are not included (the website's own fallback when it has no quote)",
+      "code_discount is ChowBot's difference between the calculation with and without the code",
+    ];
+    let withCode;
+    try {
+      withCode = await this.calculateDiscounts({ ...checked, promoCode });
+    } catch (error) {
+      if (isDefiniteHttpRejection(error)) {
+        return { promo_code: promoCode, status: "rejected", rejection: error.message, code_discount: 0, cart_total: checked.cartTotal, basis };
+      }
+      throw error;
+    }
+    const withoutCode = await this.calculateDiscounts(checked);
+    const codeDiscount = withCode.total_off - withoutCode.total_off;
+    return {
+      promo_code: promoCode,
+      status: codeDiscount > 0 ? "discount" : "no_discount",
+      with_code: withCode,
+      without_code: withoutCode,
+      code_discount: codeDiscount,
+      cart_total: checked.cartTotal,
+      basis,
+    };
+  }
+
+  async checkPromoCode(restaurantId: number, addressId: number, input: string): Promise<PromoCheckResult> {
+    const code = validatePromoCode(input);
+    if (!code.ok) throw new CheckoutRefusedError(`the promo code ${code.error}`);
+    const { cart, raw, vendor } = await this.validateCheckout(restaurantId, addressId);
+    if (cart.packs.length === 0) throw new CheckoutRefusedError("the cart has no items");
+    return this.promoCheck(
+      {
+        raw,
+        vendorId: restaurantId,
+        addressId,
+        orderClass: vendor.fields.self_delivery === true ? "vendor_delivery" : ORDER_CLASS,
+        cartTotal: (cart.total_price ?? null) as ScalarValue,
+      },
+      code.value,
+    );
+  }
+
   async previewOrder(
     restaurantId: number,
     addressId: number,
     paymentMethod: PreviewPaymentMethod,
+    draft: CheckoutDraftInput = {},
   ): Promise<OrderPreviewResult> {
+    // Draft values are checked before anything is asked of Chowdeck.
+    let promoCode: string | undefined;
+    if (draft.promo_code !== undefined) {
+      const checked = validatePromoCode(draft.promo_code);
+      if (!checked.ok) throw new CheckoutRefusedError(`the promo code ${checked.error}`);
+      promoCode = checked.value;
+    }
+    let gift: GiftRecipient | undefined;
+    if (draft.gift !== undefined) {
+      const checked = validateGiftRecipient(draft.gift);
+      if (!checked.ok) throw new CheckoutRefusedError(`the gift recipient's ${checked.error}`);
+      gift = checked.value;
+    }
+    if (typeof draft.tip === "object") {
+      const pre = tipFromNaira(draft.tip.amount_naira, { available: true, minimum: 0, maximum: 0 });
+      if (!pre.ok) throw new CheckoutRefusedError(`the tip ${pre.error}`);
+    }
+
     const { cart, raw, vendor, restaurant } = await this.validateCheckout(
       restaurantId,
       addressId,
@@ -521,8 +705,55 @@ class CheckoutService {
 
     const orderClass =
       vendor.fields.self_delivery === true ? "vendor_delivery" : ORDER_CLASS;
-    const note = (value: unknown) =>
-      typeof value === "string" && value.length > 0 ? WITHHELD_NOTE : null;
+
+    /*
+     * A tip amount is checked against Chowdeck's own limits, read only when
+     * one is given. "none", 0, or no tip argument all send no tip.
+     */
+    let tip: TipChoice;
+    let tipLimits: Record<string, unknown> | undefined;
+    if (typeof draft.tip === "object" && Math.round(draft.tip.amount_naira * 100) !== 0) {
+      const config = await this.readTipConfig();
+      const checked = tipFromNaira(draft.tip.amount_naira, config);
+      if (!checked.ok) throw new CheckoutRefusedError(`the tip ${checked.error}`);
+      tip = checked.value;
+      if (config) {
+        tipLimits = {
+          minimum: formatNaira(config.minimum),
+          maximum: config.maximum > 0 ? formatNaira(config.maximum) : "none set",
+          source: `GET ${CONFIG_PATH}`,
+        };
+      }
+    } else {
+      tip = {
+        kind: "none",
+        reason:
+          typeof draft.tip === "object"
+            ? "a tip of 0 is no tip"
+            : draft.tip === "none"
+              ? "you chose no tip"
+              : "no tip was chosen; ChowBot never adds one",
+      };
+    }
+
+    // The notes are sent exactly as stored on the cart, as the website does.
+    const vendorNote = raw.customer_vendor_note ?? null;
+    const deliveryNote = raw.customer_delivery_note ?? null;
+
+    if (gift) await this.validateGiftPhone(gift);
+
+    /*
+     * A promo code is submitted only when Chowdeck's discount calculation
+     * shows it takes something off, the same rule place_order applies.
+     */
+    let promo: PromoCheckResult | undefined;
+    if (promoCode) {
+      promo = await this.promoCheck(
+        { raw, vendorId: restaurantId, addressId, orderClass, cartTotal: (cart.total_price ?? null) as ScalarValue },
+        promoCode,
+      );
+    }
+    const submittedPromo = promo?.status === "discount" ? promo.promo_code : undefined;
 
     const payload: Record<string, unknown> = {
       source: "web",
@@ -532,17 +763,18 @@ class CheckoutService {
       class: orderClass,
       payment_method: paymentMethod,
       ...(paymentMethod === "pay_for_me" && { has_external_payment: true }),
-      promo_codes: [],
-      customer_vendor_note: note(raw.customer_vendor_note),
-      customer_delivery_note: note(raw.customer_delivery_note),
+      promo_codes: submittedPromo ? [submittedPromo] : [],
+      customer_vendor_note: vendorNote,
+      customer_delivery_note: deliveryNote,
       ...(isAmount(raw.bag_quantity) && { bag_quantity: raw.bag_quantity }),
       requires_delivery_pin: true,
       fee_id: WITHHELD_FEE_ID,
       address_id: WITHHELD_ADDRESS_ID,
       split_payment_with_wallet: false,
-      gift_recipient: null,
+      gift_recipient: gift ?? null,
       country_code: CHECKOUT_COUNTRY_CODE,
       currency: CHECKOUT_CURRENCY,
+      ...(tip.kind === "amount" && { tip: tip.raw }),
     };
 
     const omitted: Record<string, string> = {
@@ -550,7 +782,7 @@ class CheckoutService {
         paymentMethod === "pay_for_me"
           ? "replaced by has_external_payment for pay_for_me"
           : "not sent for wallet: the payment methods Chowdeck lists carry no id",
-      tip: "no tip is added in a preview",
+      ...(tip.kind === "none" && { tip: `${tip.reason}, so tip is left out, as the website does` }),
     };
     if (!isAmount(raw.bag_quantity)) {
       omitted.bag_quantity = "the cart has no numeric bag_quantity";
@@ -577,6 +809,35 @@ class CheckoutService {
         `${paymentMethod} is a supported payment choice`,
       ],
       payload_preview: payload,
+      checkout_draft: {
+        confirmed_by_chowdeck: {
+          cart_total: (cart.total_price ?? null) as ScalarValue,
+          restaurant_note_on_cart: vendorNote,
+          delivery_note_on_cart: deliveryNote,
+          ...(tipLimits && { tip_limits: tipLimits }),
+          ...(promo && { discount_calculation: promo }),
+          ...(gift && { gift_phone: "valid (POST /auth/phone/validate returned is_valid: true)" }),
+        },
+        provided_by_you: {
+          promo_code: promoCode ?? null,
+          tip: tip.kind === "amount" ? { amount: tip.display, raw: tip.raw } : "none",
+          gift_recipient: gift ?? null,
+        },
+        not_confirmed: [
+          "delivery and service fees: no quote is requested in a preview; use get_checkout_quote",
+          ...(promo
+            ? [
+                promo.status === "discount"
+                  ? `promo code ${promo.promo_code}: Chowdeck's calculation shows ${formatNaira(promo.code_discount)} off the items; the discount is only final in Chowdeck's order record`
+                  : promo.status === "rejected"
+                    ? `promo code ${promo.promo_code}: Chowdeck refused it (${promo.rejection}), so it would not be submitted`
+                    : `promo code ${promo.promo_code}: Chowdeck's calculation shows no discount, so it would not be submitted`,
+                "the Chowdeck website only submits promo codes already added to your account (it redeems a new code first); whether Chowdeck accepts a code that was not redeemed is unknown",
+              ]
+            : []),
+          ...(tip.kind === "amount" ? [`the ${tip.display} tip would be added on top of the quoted total`] : []),
+        ],
+      },
       omitted_fields: omitted,
       not_performed: [
         "no delivery-fee quote was requested (it would create a fee record on Chowdeck)",
@@ -588,7 +849,8 @@ class CheckoutService {
         "the payload copies the Chowdeck website's code; the server's required fields have never been observed",
         "the server is assumed to build the order from the stored cart (checkout_from_cart), so no items or prices are sent",
         "a submission would need a fresh delivery-fee quote first; whether Chowdeck accepts an older fee_id is unknown",
-        "promo codes, tips, gifting and splitting with the wallet are left off",
+        "splitting with the wallet is left off",
+        "the notes are copied from your cart as Chowdeck stores them; set them with set_cart_notes",
       ],
     };
   }

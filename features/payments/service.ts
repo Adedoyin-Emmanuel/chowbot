@@ -21,15 +21,27 @@ import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
 export const PAYMENT_START_PATH = "/customer/payment/start/v2";
 
 /*
- * The redirect URLs sent with an OPay payment start. Their names are
- * observed; the values the website sends are not, so there are deliberately
- * no defaults. Until they are captured, no server configuration supplies
- * them and start_payment is not registered.
+ * The redirect URLs the Chowdeck website sends with an OPay payment start
+ * (storefront chunk 3488, read 2026-10-21):
+ *   return_url: `${origin}/store/ongoing-order?orderId=${order id}`
+ *   cancel_url: `${origin}${pathname}${search}?status=failed`, i.e. the
+ *               checkout page, /store/checkout?status=failed
+ * ChowBot sends the same pages on the website's origin, so after paying the
+ * user lands on Chowdeck's own order page. start_payment stays registered
+ * only where a configuration is supplied (none in production): whether
+ * Chowdeck returns an unpaid order by id, which its pre-payment check needs,
+ * has not been observed.
  */
 export type PaymentStartConfig = {
-  returnUrl: string;
-  cancelUrl: string;
+  origin: string;
 };
+
+export const CHOWDECK_WEBSITE_ORIGIN = "https://chowdeck.com";
+
+export const paymentRedirects = (config: PaymentStartConfig, orderId: number) => ({
+  return_url: `${config.origin}/store/ongoing-order?orderId=${orderId}`,
+  cancel_url: `${config.origin}/store/checkout?status=failed`,
+});
 
 const isHttpsUrl = (value: unknown): value is string => {
   if (typeof value !== "string") return false;
@@ -40,16 +52,11 @@ const isHttpsUrl = (value: unknown): value is string => {
   }
 };
 
-export const createPaymentStartConfig = (
-  returnUrl: string,
-  cancelUrl: string,
-): PaymentStartConfig => {
-  if (!isHttpsUrl(returnUrl) || !isHttpsUrl(cancelUrl)) {
-    throw new Error(
-      "Payment-start return and cancel URLs must be absolute https URLs",
-    );
+export const createPaymentStartConfig = (origin: string = CHOWDECK_WEBSITE_ORIGIN): PaymentStartConfig => {
+  if (!isHttpsUrl(origin) || new URL(origin).origin !== origin) {
+    throw new Error("The payment-start origin must be an https origin such as https://chowdeck.com");
   }
-  return { returnUrl, cancelUrl };
+  return { origin };
 };
 
 type PaymentState = { v: 1; purpose: "start_payment"; submissionId: string };
@@ -233,8 +240,7 @@ class PaymentStartService {
         body: {
           method: submission.paymentChannelName,
           order_id: orderId,
-          return_url: this.config.returnUrl,
-          cancel_url: this.config.cancelUrl,
+          ...paymentRedirects(this.config, orderId),
         },
       });
     } catch (error) {

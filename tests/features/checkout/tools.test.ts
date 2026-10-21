@@ -724,7 +724,7 @@ describe("preview_order (dry run)", () => {
       payment_method: "wallet",
       promo_codes: [],
       customer_vendor_note: null,
-      customer_delivery_note: "<withheld: copied from your cart>",
+      customer_delivery_note: "redacted note",
       bag_quantity: 0,
       requires_delivery_pin: true,
       fee_id: "<withheld: a submission would first request a fresh delivery-fee quote, which creates a fee record, so a dry run requests none>",
@@ -736,7 +736,7 @@ describe("preview_order (dry run)", () => {
     });
     expect(parsed.omitted_fields).toEqual({
       payment_method_id: "not sent for wallet: the payment methods Chowdeck lists carry no id",
-      tip: "no tip is added in a preview",
+      tip: "no tip was chosen; ChowBot never adds one, so tip is left out, as the website does",
     });
     expect(parsed.not_performed).toContain("no order was created");
     expect(parsed.assumptions.length).toBeGreaterThan(0);
@@ -770,10 +770,11 @@ describe("preview_order (dry run)", () => {
     expect(parsed.omitted_fields.bag_quantity).toBe("the cart has no numeric bag_quantity");
   });
 
-  test("withholds every private value", async () => {
-    scriptCheckout({ cart: previewCart({ customer_vendor_note: "PRIVATE-vendor-note" }) });
+  test("withholds every private value, but shows the user's own notes exactly as they would be sent", async () => {
+    scriptCheckout({ cart: previewCart({ customer_vendor_note: "Your own note: no onions" }) });
 
     const text = textOf(await preview());
+    const parsed = JSON.parse(text);
 
     for (const secret of [
       String(ADDRESS_ID),
@@ -781,11 +782,16 @@ describe("preview_order (dry run)", () => {
       String(FEE_ID),
       "PRIVATE-",
       "redacted-",
-      "redacted note",
       "secret-token-alice",
     ]) {
       expect(text).not.toContain(secret);
     }
+    expect(parsed.payload_preview.customer_vendor_note).toBe("Your own note: no onions");
+    expect(parsed.payload_preview.customer_delivery_note).toBe("redacted note");
+    expect(parsed.checkout_draft.confirmed_by_chowdeck).toMatchObject({
+      restaurant_note_on_cart: "Your own note: no onions",
+      delivery_note_on_cart: "redacted note",
+    });
   });
 
   test.each([["online_payment"], ["card"], [""], [undefined]])(
@@ -990,5 +996,314 @@ describe("get_checkout_quote orderable quotes", () => {
 
     expect(result.isError).toBe(true);
     expect(saved).toHaveLength(0);
+  });
+});
+
+/*
+ * The unified dry run: draft promo code, tip and gift details, validated
+ * from arguments. Chowdeck is mocked; values are fictional.
+ */
+describe("preview_order checkout draft", () => {
+  const preview = async (args: Record<string, unknown> = {}) =>
+    callTool(serverFor(await signedIn()), "preview_order", {
+      restaurant_id: 102555,
+      address_id: ADDRESS_ID,
+      payment_method: "wallet",
+      ...args,
+    });
+  const tipsConfig = (tips: Record<string, unknown> = {}) => () =>
+    Response.json({
+      status: "success",
+      data: {
+        delivery_driver_tips_config: { recommendation_percent: [5, 10, "Custom"], default_percent: "", minimum_tip_amount: 10000, maximum_tip_amount: 500000, ...tips },
+      },
+    });
+  const discounts = (entries: Record<string, unknown>[]) => () => Response.json({ status: "success", data: entries });
+  const validPhone = (is_valid: unknown = true) => () => Response.json({ status: "success", data: { is_valid } });
+  const setup = (config: Handler = tipsConfig()) => {
+    scriptCheckout({ cart: cartResponse({ bag_quantity: 0, customer_vendor_note: "No onions", customer_delivery_note: "Blue gate" }) });
+    route("GET /customer/config", config);
+    // First calculation is with the code, the second without it.
+    route("POST /customer/discount/apply", discounts([{ target: "menus", amount_off: 5000 }]), discounts([]));
+    route("POST /auth/phone/validate", validPhone());
+  };
+  const gift = { donor_name: "Ada", name: "Tunde Example", phone: "08012345678", message: "Enjoy!" };
+  const ALLOWED_POSTS = ["/customer/discount/apply", "/auth/phone/validate"];
+  const neverMutates = () => {
+    for (const r of received) if (r.method !== "GET") expect(ALLOWED_POSTS).toContain(r.path);
+    expect(received.some((r) => /delivery\/amount|\/customer\/order|payment|promo-code/.test(r.path))).toBe(false);
+  };
+  const calls = (path: string) => received.filter((r) => r.path === path);
+
+  test("with no draft, sends no tip, no promo code and no gift, and makes no extra calls", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview()));
+
+    expect(parsed.payload_preview).toMatchObject({ promo_codes: [], gift_recipient: null, customer_vendor_note: "No onions", customer_delivery_note: "Blue gate" });
+    expect(parsed.payload_preview).not.toHaveProperty("tip");
+    expect(parsed.checkout_draft.provided_by_you).toEqual({ promo_code: null, tip: "none", gift_recipient: null });
+    expect(received.map((r) => r.method)).toEqual(["GET", "GET", "GET"]);
+  });
+
+  test("an explicit no-tip choice omits tip and says so", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview({ tip: "none" })));
+
+    expect(parsed.payload_preview).not.toHaveProperty("tip");
+    expect(parsed.omitted_fields.tip).toBe("you chose no tip, so tip is left out, as the website does");
+  });
+
+  test("a tip of 0 is no tip, and needs no tip limits from Chowdeck", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview({ tip: { amount_naira: 0 } })));
+
+    expect(parsed.payload_preview).not.toHaveProperty("tip");
+    expect(parsed.checkout_draft.provided_by_you.tip).toBe("none");
+    expect(parsed.omitted_fields.tip).toBe("a tip of 0 is no tip, so tip is left out, as the website does");
+    expect(calls("/customer/config")).toHaveLength(0);
+  });
+
+  test("a chosen tip is checked against Chowdeck's limits and sent once in raw units", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview({ tip: { amount_naira: 250.5 } })));
+
+    expect(parsed.payload_preview.tip).toBe(25050);
+    expect(parsed.checkout_draft.provided_by_you.tip).toEqual({ amount: "₦250.50", raw: 25050 });
+    expect(parsed.checkout_draft.confirmed_by_chowdeck.tip_limits).toEqual({ minimum: "₦100.00", maximum: "₦5,000.00", source: "GET /customer/config" });
+    expect(parsed.checkout_draft.not_confirmed).toContain("the ₦250.50 tip would be added on top of the quoted total");
+    neverMutates();
+  });
+
+  test.each([
+    ["below the minimum", { amount_naira: 50 }, tipsConfig(), "the tip must be at least ₦100.00"],
+    ["above the maximum", { amount_naira: 6000 }, tipsConfig(), "the tip must be at most ₦5,000.00"],
+    ["when tips are unavailable", { amount_naira: 200 }, tipsConfig({ recommendation_percent: undefined }), "the tip is not available"],
+    ["when the limits cannot be read", { amount_naira: 200 }, () => Response.json({ message: "Server Error" }, { status: 500 }), "the tip cannot be checked"],
+  ])("refuses a tip %s", async (_, tip, config, message) => {
+    setup(config);
+
+    const result = await preview({ tip });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(message);
+    neverMutates();
+  });
+
+  test.each([
+    ["negative", { amount_naira: -5 }, "the tip must be a number of naira, 0 or more"],
+    ["sub-kobo", { amount_naira: 100.555 }, "the tip must have at most two decimal places"],
+  ])("refuses a %s tip before contacting Chowdeck", async (_, tip, message) => {
+    setup();
+
+    const result = await preview({ tip });
+
+    expect(textOf(result)).toContain(message);
+    expect(received).toHaveLength(0);
+  });
+
+  test.each([[{ amount: 100 }], ["some"], [{ amount_naira: "100" }]])("rejects the malformed tip %p", async (tip) => {
+    setup();
+
+    const result = await preview({ tip });
+
+    expect(textOf(result)).toContain("Input validation error");
+    expect(received).toHaveLength(0);
+  });
+
+  test("checks a promo code with Chowdeck's calculation, built from the cart as the website builds it", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview({ promo_code: "  SAVE10 " })));
+
+    const [withCode, withoutCode] = calls("/customer/discount/apply");
+    const line = (pack: string, packId: number) => [
+      { item_id: 880557, quantity: 1, type: "menu", pack_id: packId, pack_unique_id: pack },
+      { item_id: 4294037, price: 0, quantity: 1, type: "group", pack_id: packId, group_id: 5844769 },
+      { item_id: 4366226, price: 40000, quantity: 1, type: "group", pack_id: packId, group_id: 5844771 },
+    ];
+    expect(withCode!.body).toEqual({
+      promo_codes: ["SAVE10"],
+      vendor_id: 102555,
+      address_id: ADDRESS_ID,
+      fee_id: 0,
+      cart_id: 30742921,
+      currency: "NGN",
+      order_items: [...line(PACK_1, 1), ...line(PACK_2, 2)],
+      containers: [],
+      delivery_fee: 0,
+      order_class: "delivery",
+    });
+    expect((withoutCode!.body as Record<string, unknown>).promo_codes).toEqual([]);
+    expect(parsed.payload_preview.promo_codes).toEqual(["SAVE10"]);
+    expect(parsed.checkout_draft.confirmed_by_chowdeck.discount_calculation).toMatchObject({ status: "discount", code_discount: 5000 });
+    expect(parsed.checkout_draft.not_confirmed.join("\n")).toContain("Chowdeck's calculation shows ₦50.00 off the items");
+    expect(parsed.checkout_draft.not_confirmed.join("\n")).toContain("only submits promo codes already added to your account");
+    expect(JSON.stringify(parsed)).not.toContain(String(ADDRESS_ID));
+    neverMutates();
+  });
+
+  test.each([
+    ["no discount", [discounts([]), discounts([])], "shows no discount, so it would not be submitted"],
+    ["only the automatic discounts", [discounts([{ target: "deliveryfees", amount_off: 200 }]), discounts([{ target: "deliveryfees", amount_off: 200 }])], "shows no discount, so it would not be submitted"],
+    ["a refusal", [() => Response.json({ status: "failed", message: "Promo code has expired" }, { status: 422 })], "Chowdeck refused it (POST /customer/discount/apply failed with status 422: Promo code has expired), so it would not be submitted"],
+  ])("leaves a promo code out of the payload when Chowdeck's calculation gives %s", async (_, replies, note) => {
+    setup();
+    route("POST /customer/discount/apply", ...replies);
+
+    const parsed = JSON.parse(textOf(await preview({ promo_code: "SAVE10" })));
+
+    expect(parsed.payload_preview.promo_codes).toEqual([]);
+    expect(parsed.checkout_draft.provided_by_you.promo_code).toBe("SAVE10");
+    expect(parsed.checkout_draft.not_confirmed.join("\n")).toContain(note);
+  });
+
+  test("reports an unclear discount calculation as an error, without retrying it", async () => {
+    setup();
+    route("POST /customer/discount/apply", () => Response.json({ message: "Server Error" }, { status: 503 }));
+
+    const result = await preview({ promo_code: "SAVE10" });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("failed with status 503");
+    expect(calls("/customer/discount/apply")).toHaveLength(1);
+  });
+
+  test("refuses a malformed promo code before contacting Chowdeck", async () => {
+    setup();
+
+    const result = await preview({ promo_code: "SAVE 10!" });
+
+    expect(textOf(result)).toContain("the promo code must be 1-40 letters");
+    expect(received).toHaveLength(0);
+  });
+
+  test("includes gift details in the website's shape once Chowdeck confirms the phone", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview({ gift })));
+
+    expect(calls("/auth/phone/validate")[0]!.body).toEqual({ phone: "08012345678", country_code: "NG" });
+    expect(parsed.payload_preview.gift_recipient).toEqual({
+      country_code: "NG",
+      phone: "08012345678",
+      donor_name: "Ada",
+      name: "Tunde Example",
+      message: "Enjoy!",
+      save_as_beneficiary: false,
+    });
+    expect(parsed.checkout_draft.confirmed_by_chowdeck.gift_phone).toBe("valid (POST /auth/phone/validate returned is_valid: true)");
+    neverMutates();
+  });
+
+  test.each([
+    ["is_valid false", validPhone(false), "Chowdeck says the gift recipient's phone number is not valid for that country"],
+    ["no is_valid", () => Response.json({ status: "success", data: {} }), "returned an unexpected response, so the gift recipient's phone is unchecked"],
+    ["a failed check", () => Response.json({ message: "Server Error" }, { status: 500 }), "the gift recipient's phone could not be checked with Chowdeck"],
+  ])("refuses a gift when the phone check gives %s", async (_, reply, message) => {
+    setup();
+    route("POST /auth/phone/validate", reply);
+
+    const result = await preview({ gift });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(message);
+  });
+
+  test.each([
+    ["a missing recipient name", { ...gift, name: "" }, "the gift recipient's name is required"],
+    ["a bad phone", { ...gift, phone: "call me" }, "the gift recipient's phone must be 7-15 digits"],
+    ["an international-format phone", { ...gift, phone: "+234 801 234 5678" }, "the gift recipient's phone must be 7-15 digits only"],
+    ["a bad email", { ...gift, email: "nope" }, "the gift recipient's email is not a valid email address"],
+  ])("refuses gift details with %s before contacting Chowdeck", async (_, details, message) => {
+    setup();
+
+    const result = await preview({ gift: details });
+
+    expect(textOf(result)).toContain(message);
+    expect(received).toHaveLength(0);
+  });
+
+  test("rejects unknown gift fields", async () => {
+    setup();
+
+    const result = await preview({ gift: { ...gift, address: "elsewhere" } });
+
+    expect(textOf(result)).toContain("Input validation error");
+    expect(received).toHaveLength(0);
+  });
+
+  test("combines every draft value in one preview, still with fees unconfirmed", async () => {
+    setup();
+
+    const parsed = JSON.parse(textOf(await preview({ promo_code: "SAVE10", tip: { amount_naira: 200 }, gift })));
+
+    expect(parsed.payload_preview).toMatchObject({ promo_codes: ["SAVE10"], tip: 20000, customer_vendor_note: "No onions", customer_delivery_note: "Blue gate" });
+    expect(parsed.payload_preview.gift_recipient.name).toBe("Tunde Example");
+    expect(parsed.checkout_draft.not_confirmed[0]).toContain("delivery and service fees: no quote is requested in a preview");
+    expect(parsed.submitted).toBe(false);
+    neverMutates();
+  });
+});
+
+describe("check_promo_code", () => {
+  const check = async (args: Record<string, unknown> = {}) =>
+    callTool(serverFor(await signedIn()), "check_promo_code", { restaurant_id: 102555, address_id: ADDRESS_ID, promo_code: "SAVE10", ...args });
+
+  test("reports the code's effect as the difference between two Chowdeck calculations", async () => {
+    scriptCheckout();
+    route(
+      "POST /customer/discount/apply",
+      () => Response.json({ status: "success", data: [{ target: "menus", amount_off: 5000, bogof_amount_off: 1000 }, { target: "deliveryfees", amount_off: 300 }] }),
+      () => Response.json({ status: "success", data: [{ target: "deliveryfees", amount_off: 300 }] }),
+    );
+
+    const result = await check();
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed).toMatchObject({
+      promo_code: "SAVE10",
+      status: "discount",
+      code_discount: 6000,
+      with_code: { total_off: 6300 },
+      without_code: { total_off: 300 },
+      cart_total: 440000,
+    });
+    expect(parsed.basis.join("\n")).toContain("not a guarantee");
+    expect(received.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/customer/discount/apply", "/customer/discount/apply"]);
+    expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
+  });
+
+  test.each([
+    ["data is not a list", { status: "success", data: { amount_off: 1 } }],
+    ["an entry has no numeric amount_off", { status: "success", data: [{ target: "menus", amount_off: "5000" }] }],
+  ])("refuses a response where %s", async (_, body) => {
+    scriptCheckout();
+    route("POST /customer/discount/apply", () => Response.json(body));
+
+    const result = await check();
+
+    expect(textOf(result)).toBe("Failed to check the promo code: POST /customer/discount/apply returned an unexpected response shape");
+  });
+
+  test("treats a missing discount list as no discounts, as the website does", async () => {
+    scriptCheckout();
+    route("POST /customer/discount/apply", () => Response.json({ status: "success" }));
+
+    expect(JSON.parse(textOf(await check()))).toMatchObject({ status: "no_discount", code_discount: 0 });
+  });
+
+  test("refuses a malformed code, and a cart that does not belong to the restaurant, before calculating", async () => {
+    scriptCheckout();
+    expect(textOf(await check({ promo_code: "no spaces!" }))).toContain("the promo code must be 1-40 letters");
+    expect(received).toHaveLength(0);
+
+    scriptCheckout({ addresses: addressList([1]) });
+    expect(textOf(await check())).toContain("address_id is not one of your saved delivery addresses");
+    expect(received.some((r) => r.path === "/customer/discount/apply")).toBe(false);
   });
 });

@@ -174,47 +174,32 @@ describePostgres.each(ENTRIES)("the production HTTP server: %s", (_, resolveEntr
     await database.drop();
   });
 
-  test("registers no place_order or start_payment by default, but the recovery-safe tools", async () => {
-    const { names } = await toolsWith(entry, {});
+  test("registers place_order and start_payment by default, alongside the recovery tools", async () => {
+    const { names, log } = await toolsWith(entry, {});
 
-    expect(names).toEqual(expect.arrayContaining(["get_order_submission", "resolve_order_submission", "preview_order"]));
-    expect(names).not.toContain("place_order");
-    expect(names).not.toContain("start_payment");
+    expect(names).toEqual(expect.arrayContaining(["place_order", "start_payment", "get_order_submission", "resolve_order_submission", "preview_order"]));
+    expect(log).not.toContain("live ordering is off");
+  }, 30_000);
+
+  test("registers both with the captured channel values set explicitly", async () => {
+    const { names } = await toolsWith(entry, { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
+
+    expect(names).toEqual(expect.arrayContaining(["place_order", "start_payment"]));
   }, 30_000);
 
   test.each([
-    ["channel values without the flag", CHANNEL],
-    ["channel values with the flag false", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "false" }],
-    ["channel values with a non-exact flag", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "1" }],
-    ["the flag without channel values", { CHOWBOT_PLACE_ORDER_ENABLED: "true" }],
-    ["the flag with methods unset", { CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG" }],
-    ["the flag with the country unset", { CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_METHODS: "" }],
-    ["the flag with a guessed methods value", { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_METHODS: "card" }],
-  ])("keeps place_order unregistered with %s", async (_, env) => {
-    const { names } = await toolsWith(entry, env);
+    ["the kill switch", { CHOWBOT_PLACE_ORDER_ENABLED: "false" }, ""],
+    ["an unrecognised switch value", { CHOWBOT_PLACE_ORDER_ENABLED: "1" }, 'must be "true" or "false" (or unset)'],
+    ["a guessed methods value", { ...CHANNEL, CHOWBOT_PAYMENT_CHANNEL_METHODS: "card" }, "differ from the captured website request"],
+    ["a lowercase country", { ...CHANNEL, CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "ng" }, "differ from the captured website request"],
+    ["only one channel value", { CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "NG" }, "differ from the captured website request"],
+  ])("registers neither with %s", async (_, env, warning) => {
+    const { names, log } = await toolsWith(entry, env);
 
     expect(names).not.toContain("place_order");
     expect(names).not.toContain("start_payment");
-  }, 30_000);
-
-  test("warns at startup when the flag is on but channel values are missing", async () => {
-    const { log } = await toolsWith(entry, { CHOWBOT_PLACE_ORDER_ENABLED: "true" });
-
-    expect(log).toContain("place_order stays disabled");
-  }, 30_000);
-
-  test("refuses channel values that differ from the capture, with a startup warning", async () => {
-    const { names, log } = await toolsWith(entry, { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true", CHOWBOT_PAYMENT_CHANNEL_COUNTRY_IDENTIFIER: "ng" });
-
-    expect(names).not.toContain("place_order");
-    expect(log).toContain("differ from the captured website request");
-  }, 30_000);
-
-  test("registers place_order only with the flag and both captured channel values, and never start_payment", async () => {
-    const { names } = await toolsWith(entry, { ...CHANNEL, CHOWBOT_PLACE_ORDER_ENABLED: "true" });
-
-    expect(names).toContain("place_order");
-    expect(names).not.toContain("start_payment");
+    expect(names).toContain("get_order_submission");
+    if (warning) expect(log).toContain(warning);
   }, 30_000);
 
   test("answers liveness and readiness probes, then drains and exits 0 on SIGTERM", async () => {

@@ -164,16 +164,16 @@ describe("production configuration", () => {
     expect(callers.map(({ path }) => path)).toEqual(["features/payments/service.ts"]);
   });
 
-  test("the hosted entry point supplies no payment-start configuration", async () => {
+  test("the hosted entry point enables start_payment only with live ordering, on the website's origin", async () => {
     const entry = await Bun.file(`${ROOT}/http.ts`).text();
 
-    expect(entry).not.toContain("paymentStartConfig");
-    expect(entry).not.toContain("createPaymentStartConfig");
+    expect(entry).toContain("...(placeOrderEnabled && { paymentStartConfig: createPaymentStartConfig() })");
+    expect(entry.match(/paymentStartConfig/g)).toHaveLength(1);
   });
 
-  test("tracked configuration never enables place_order", async () => {
-    for (const file of [".env.example", "Dockerfile", "compose.yml"]) {
-      expect(await Bun.file(`${ROOT}/${file}`).text()).not.toMatch(/CHOWBOT_PLACE_ORDER_ENABLED\s*[=:]\s*["']?true/i);
+  test("tracked configuration leaves live ordering at its default, with no unobserved channel values", async () => {
+    for (const file of ["Dockerfile", "compose.yml"]) {
+      expect(await Bun.file(`${ROOT}/${file}`).text()).not.toContain("CHOWBOT_");
     }
     const example = Object.fromEntries(
       (await Bun.file(`${ROOT}/.env.example`).text())
@@ -181,7 +181,7 @@ describe("production configuration", () => {
         .filter((line) => /^[A-Z_]+=/.test(line))
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     );
-    expect(readOrderPlacementConfig(example)).toMatchObject({ placeOrderEnabled: false, warnings: [] });
+    expect(readOrderPlacementConfig(example)).toMatchObject({ placeOrderEnabled: true, warnings: [] });
   });
 
   test("the production server composition registers neither place_order nor start_payment", async () => {

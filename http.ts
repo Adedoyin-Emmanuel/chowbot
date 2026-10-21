@@ -13,6 +13,7 @@ import { MCP_SERVER_URL, OAUTH_ISSUER_URL } from "./constants/oauth";
 import { createKeyring, parseEncryptionKey } from "./lib/encryption";
 import { createChowbotRequestStateCodec } from "./lib/request-state";
 import { readOrderPlacementConfig } from "./features/order-placement/config";
+import { createPaymentStartConfig } from "./features/payments/service";
 import { CHOWDECK_REQUEST_TIMEOUT_MS } from "./constants/chowdeck";
 import { createGracefulShutdown, readShutdownGraceMs } from "./lib/lifecycle";
 
@@ -68,6 +69,8 @@ const start = async () => {
     requestStateCodec: createChowbotRequestStateCodec(keyring.requestStateKey),
     placeOrderEnabled,
     ...(paymentChannelQuery && { paymentChannelQuery }),
+    // start_payment follows the same switch, with the website's redirect pages.
+    ...(placeOrderEnabled && { paymentStartConfig: createPaymentStartConfig() }),
     lifecycle: { isShuttingDown: () => shuttingDown(), checkDatabase },
   });
 

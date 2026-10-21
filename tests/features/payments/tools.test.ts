@@ -25,9 +25,9 @@ import { createPaymentStartConfig } from "../../../features/payments/service";
  * stores, the production requestState codec, modern 2026-07-28 rounds).
  * Only Chowdeck is mocked. The request keys (method, order_id, return_url,
  * cancel_url) and the response keys (authorization_url among them) follow
- * the observed OPay payment start; the redirect URLs below are placeholders,
- * because the real values have not been observed, and the payment link is
- * a marker that must never leave the URL elicitation.
+ * the observed OPay payment start; the redirect URLs are the website's own
+ * (storefront source, read 2026-10-21), and the payment link is a marker
+ * that must never leave the URL elicitation.
  */
 
 type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
@@ -37,10 +37,7 @@ type Handler = () => Response | Promise<Response>;
 const SERVER_URL = new URL("http://localhost:2800/mcp");
 const keyring = createKeyring(randomBytes(32));
 const codec = createChowbotRequestStateCodec(keyring.requestStateKey);
-const TEST_CONFIG = createPaymentStartConfig(
-  "https://return.example/TEST-PLACEHOLDER-RETURN",
-  "https://cancel.example/TEST-PLACEHOLDER-CANCEL",
-);
+const TEST_CONFIG = createPaymentStartConfig();
 
 const ORDER_ID = 7001326;
 const VENDOR_ID = 102555;
@@ -260,12 +257,12 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       expect(names({ session, submissions, requestStateCodec: codec, paymentStartConfig: TEST_CONFIG })).toContain("start_payment");
     });
 
-    test.each([
-      ["a non-https return URL", "http://return.example/x", "https://cancel.example/x"],
-      ["a relative cancel URL", "https://return.example/x", "/cancel"],
-      ["an empty URL", "", "https://cancel.example/x"],
-    ])("the configuration refuses %s", (_, returnUrl, cancelUrl) => {
-      expect(() => createPaymentStartConfig(returnUrl, cancelUrl)).toThrow("absolute https URLs");
+    test("defaults to the Chowdeck website's origin", () => {
+      expect(createPaymentStartConfig()).toEqual({ origin: "https://chowdeck.com" });
+    });
+
+    test.each([["http://chowdeck.com"], ["https://chowdeck.com/store"], ["chowdeck.com"], [""]])("the configuration refuses the origin %p", (origin) => {
+      expect(() => createPaymentStartConfig(origin)).toThrow("https origin");
     });
   });
 
@@ -313,8 +310,8 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       expect(start!.body).toEqual({
         method: "opay",
         order_id: ORDER_ID,
-        return_url: "https://return.example/TEST-PLACEHOLDER-RETURN",
-        cancel_url: "https://cancel.example/TEST-PLACEHOLDER-CANCEL",
+        return_url: `https://chowdeck.com/store/ongoing-order?orderId=${ORDER_ID}`,
+        cancel_url: "https://chowdeck.com/store/checkout?status=failed",
       });
 
       const marked = await row(quoteRef);

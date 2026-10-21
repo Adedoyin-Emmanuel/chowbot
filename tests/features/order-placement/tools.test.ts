@@ -382,6 +382,8 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(message).toContain("Deliver to: Home");
       expect(message).toContain("554000");
       expect(message).toContain("opay");
+      expect(message).toContain("Tip: none (ChowBot does not add a tip). Restaurant note: none. Delivery note: none. Not a gift. No promo code.");
+      expect(message).not.toContain("Estimated total");
       expectNothingPrivate(first);
       expect(posts("/customer/order")).toHaveLength(0);
       expect(posts("/customer/delivery/amount")).toHaveLength(0);
@@ -527,21 +529,18 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
      * ChowBot offers no tip choice: a tip argument is dropped by the schema,
      * the confirmation says no tip is added, and the order carries no tip.
      */
-    test("never sends a tip, even when the caller passes one, and says so in the confirmation", async () => {
+    test("treats no tip argument as no tip, and refuses a bare number as a tip", async () => {
       scriptHappyPath();
       const baseUrl = await startApp();
       const quoteRef = await getQuoteRef(baseUrl);
-      const args = { ...placeArgs(quoteRef), tip: 50000 };
 
-      const first = await call({ baseUrl, name: "place_order", args });
-      expect(first.result.inputRequests.confirm.params.message).toContain("Tip: none (ChowBot does not add a tip).");
-      expect(first.result.inputRequests.confirm.params.message).toContain("Total: 554000");
-      const second = await call({ baseUrl, name: "place_order", args, inputResponses: ACCEPT, requestState: first.result.requestState });
+      const bare = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), tip: 50000 } });
+      expect(bare.result.isError).toBe(true);
+      expect(textOf(bare)).toContain("Input validation error");
 
+      const { second } = await placeOrder(baseUrl);
       expect(JSON.parse(textOf(second)).order_id).toBe(ORDER_ID);
-      const [order] = posts("/customer/order");
-      expect(order!.body).not.toHaveProperty("tip");
-      expect(JSON.stringify(order!.body)).not.toContain("50000");
+      expect(posts("/customer/order")[0]!.body).not.toHaveProperty("tip");
     });
 
     test("sends the gate quote before the order, and the order last", async () => {
@@ -1273,6 +1272,153 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(Date.parse(payment_start.started_at)).not.toBeNaN();
       expect(Object.keys(payment_start)).toEqual(["state", "started_at"]);
       expect(JSON.stringify(body)).not.toMatch(/authorization_url|reference|processor/);
+    });
+  });
+
+  describe("confirmation notes", () => {
+    test("shows the exact cart notes the order would carry", async () => {
+      scriptHappyPath();
+      route("GET /customer/cart/vendor/102555", cart({ customer_vendor_note: "No onions 🌶️", customer_delivery_note: "Blue gate" }));
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+
+      const first = await firstRound(baseUrl, quoteRef);
+
+      expect(first.inputRequests.confirm.params.message).toContain('Restaurant note: "No onions 🌶️". Delivery note: "Blue gate".');
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    test("refuses, sending and claiming nothing, when a note changes after confirmation", async () => {
+      scriptHappyPath();
+      route("GET /customer/cart/vendor/102555", cart({ customer_vendor_note: "No onions" }));
+      const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
+      const first = await firstRound(baseUrl, quoteRef);
+      route("GET /customer/cart/vendor/102555", cart({ customer_vendor_note: "Extra onions" }));
+
+      const second = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef), inputResponses: ACCEPT, requestState: first.requestState });
+
+      expect(textOf(second)).toBe("Order not placed: the cart's restaurant or delivery note changed after confirmation was requested. Start again to confirm the current notes.");
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect(posts("/customer/delivery/amount")).toHaveLength(1);
+      expect((await row(quoteRef)).state).toBe("confirmation_pending");
+    });
+
+    test("still places the order when the notes are unchanged", async () => {
+      scriptHappyPath();
+      route("GET /customer/cart/vendor/102555", cart({ customer_delivery_note: "Blue gate" }));
+      const baseUrl = await startApp();
+
+      const { second } = await placeOrder(baseUrl);
+
+      expect(JSON.parse(textOf(second)).order_id).toBe(ORDER_ID);
+      expect((posts("/customer/order")[0]!.body as Record<string, unknown>).customer_delivery_note).toBe("Blue gate");
+    });
+  });
+
+  /*
+   * Tip, gift and promo code: validated live at confirmation, shown to the
+   * user, bound into the confirmation state and sent in the website's shape.
+   */
+  describe("order extras", () => {
+    const tipsConfig = () =>
+      Response.json({ status: "success", data: { delivery_driver_tips_config: { recommendation_percent: [5, 10, "Custom"], minimum_tip_amount: 10000, maximum_tip_amount: 500000 } } });
+    const discounts = (entries: Record<string, unknown>[]) => () => Response.json({ status: "success", data: entries });
+    const gift = { donor_name: "Ada", name: "Tunde Example", phone: "08012345678", message: "Enjoy!" };
+    const scriptExtras = () => {
+      scriptHappyPath();
+      route("GET /customer/config", tipsConfig);
+      route("POST /auth/phone/validate", () => Response.json({ status: "success", data: { is_valid: true } }));
+      route("POST /customer/discount/apply", discounts([{ target: "menus", amount_off: 5000 }]), discounts([]));
+    };
+    const placeWith = async (baseUrl: string, extras: Record<string, unknown>, second: Record<string, unknown> = extras) => {
+      const quoteRef = await getQuoteRef(baseUrl);
+      const first = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...extras } });
+      if (first.result.resultType !== "input_required") return { quoteRef, first, second: undefined };
+      const result = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...second }, inputResponses: ACCEPT, requestState: first.result.requestState });
+      return { quoteRef, first, second: result };
+    };
+
+    test("confirms and sends a tip, gift and promo code exactly as the website would", async () => {
+      scriptExtras();
+      const baseUrl = await startApp();
+
+      const { first, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 }, gift, promo_code: "SAVE10" });
+
+      const message = first.result.inputRequests.confirm.params.message as string;
+      expect(message).toContain("Tip: ₦200.00 for the rider.");
+      expect(message).toContain('Gift for Tunde Example (phone 08012345678, NG) from Ada, message "Enjoy!".');
+      expect(message).toContain("Promo code SAVE10: Chowdeck's discount calculation shows ₦50.00 off the items; the final discount is set by Chowdeck.");
+      expect(message).toContain("Estimated total: ₦5,690.00 (the total above plus the tip minus the calculated discount; computed by ChowBot, not confirmed by Chowdeck).");
+
+      const [order] = posts("/customer/order");
+      expect(posts("/customer/order")).toHaveLength(1);
+      expect(order!.body).toMatchObject({
+        promo_codes: ["SAVE10"],
+        tip: 20000,
+        gift_recipient: { country_code: "NG", phone: "08012345678", donor_name: "Ada", name: "Tunde Example", message: "Enjoy!", save_as_beneficiary: false },
+        payment_method_id: OPAY_CHANNEL_ID,
+      });
+      expect(order!.body).not.toHaveProperty("payment_method");
+      expect(JSON.parse(textOf(second!))).toMatchObject({ order_id: ORDER_ID, tip: "₦200.00", promo_code: "SAVE10", gift_for: "Tunde Example" });
+    });
+
+    test("sends the same payload as before when no extras are given", async () => {
+      scriptExtras();
+      const baseUrl = await startApp();
+
+      await placeWith(baseUrl, {});
+
+      const body = posts("/customer/order")[0]!.body as Record<string, unknown>;
+      expect(body.promo_codes).toEqual([]);
+      expect(body.gift_recipient).toBeNull();
+      expect(body).not.toHaveProperty("tip");
+      expect(received.some((r) => ["/customer/config", "/auth/phone/validate", "/customer/discount/apply"].includes(r.path))).toBe(false);
+    });
+
+    test.each([
+      ["a promo code with no calculated discount", { promo_code: "SAVE10" }, () => route("POST /customer/discount/apply", discounts([]), discounts([])), "Order not placed: Chowdeck's discount calculation shows no discount for the promo code SAVE10."],
+      ["a refused promo code", { promo_code: "SAVE10" }, () => route("POST /customer/discount/apply", () => Response.json({ message: "Promo code has expired" }, { status: 422 })), "Order not placed: Chowdeck refused the promo code SAVE10 (POST /customer/discount/apply failed with status 422: Promo code has expired)."],
+      ["an invalid gift phone", { gift }, () => route("POST /auth/phone/validate", () => Response.json({ status: "success", data: { is_valid: false } })), "Order not placed: Chowdeck says the gift recipient's phone number is not valid for that country."],
+      ["a tip above the maximum", { tip: { amount_naira: 6000 } }, () => {}, "Order not placed: the tip must be at most ₦5,000.00."],
+    ])("asks for nothing and places nothing with %s", async (_, extras, override, message) => {
+      scriptExtras();
+      override();
+      const baseUrl = await startApp();
+
+      const { quoteRef, first } = await placeWith(baseUrl, extras);
+
+      expect(textOf(first)).toBe(message);
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("quoted");
+    });
+
+    test.each([
+      ["a different tip", { tip: { amount_naira: 200 } }, { tip: { amount_naira: 500 } }],
+      ["a dropped tip", { tip: { amount_naira: 200 } }, {}],
+      ["an added promo code", {}, { promo_code: "SAVE10" }],
+      ["a changed gift recipient", { gift }, { gift: { ...gift, name: "Someone Else" } }],
+    ])("refuses %s at submission, sending and claiming nothing", async (_, confirmed, submitted) => {
+      scriptExtras();
+      const baseUrl = await startApp();
+
+      const { quoteRef, second } = await placeWith(baseUrl, confirmed, submitted);
+
+      expect(textOf(second!)).toBe("Order not placed: the tip, gift or promo code differs from what was confirmed. Start again.");
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("confirmation_pending");
+    });
+
+    test("an unclear outcome with extras is still never retried", async () => {
+      scriptExtras();
+      route("POST /customer/order", () => Response.json({ message: "Server Error" }, { status: 503 }));
+      const baseUrl = await startApp();
+
+      const { quoteRef, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 } });
+
+      expect(textOf(second!)).toContain("The order's outcome is unknown");
+      expect(posts("/customer/order")).toHaveLength(1);
+      expect((await row(quoteRef)).state).toBe("unknown");
     });
   });
 });

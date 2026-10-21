@@ -6,6 +6,7 @@ import {
 import MenuService, { type OptionGroup } from "../menus/service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import AddressService, { NotSignedInError } from "../addresses/service";
+import { NOTE_FIELDS, storedNote, validateNote, type NoteKind } from "./notes";
 import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
 
 export type CartRow = Record<string, ScalarValue>;
@@ -80,6 +81,31 @@ export type AddToCartResult = {
  * A request ChowBot refuses before writing to Chowdeck. Messages never
  * include private values such as address IDs.
  */
+export type CartNotes = {
+  restaurant_id: number;
+  cart_id: ScalarValue;
+  vendor_note: string;
+  delivery_note: string;
+};
+
+/*
+ * What set_cart_notes reports per note: what was sent, and whether the cart
+ * re-read afterwards holds exactly that ("verified"), something else
+ * ("mismatch"), or could not be read ("unverified").
+ */
+export type NoteUpdate = {
+  sent: string;
+  stored?: string;
+  verification: "verified" | "mismatch" | "unverified";
+};
+
+export type SetCartNotesResult = {
+  restaurant_id: number;
+  updated: Partial<Record<NoteKind, NoteUpdate>>;
+  notes?: CartNotes;
+  verification_error?: string;
+};
+
 export class CartRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -347,6 +373,98 @@ class CartService {
       result: { restaurant_id: restaurantId, exists: true, cart },
       raw: data as Record<string, unknown>,
     };
+  }
+
+  /*
+   * The restaurant and delivery notes on the user's own cart at a restaurant.
+   */
+  async getNotes(restaurantId: number): Promise<CartNotes> {
+    const { result, raw } = await this.getVendorCartSnapshot(restaurantId);
+    if (!result.exists) {
+      throw new CartRequestError("there is no cart for this restaurant; add an item first");
+    }
+    return {
+      restaurant_id: restaurantId,
+      cart_id: result.cart.id as ScalarValue,
+      vendor_note: storedNote(raw, "vendor"),
+      delivery_note: storedNote(raw, "delivery"),
+    };
+  }
+
+  /*
+   * Sets or clears the notes as the storefront does: one
+   * POST /customer/cart/vendor/{id} per note, with only that field, on the
+   * user's existing cart for this restaurant. Each write is sent once; an
+   * unknown outcome stops further writes and is reported, never retried.
+   * The cart is then re-read to confirm what Chowdeck stored.
+   */
+  async setNotes(
+    restaurantId: number,
+    notes: Partial<Record<NoteKind, string | null>>,
+  ): Promise<SetCartNotesResult> {
+    const values: Partial<Record<NoteKind, string>> = {};
+    for (const kind of ["vendor", "delivery"] as const) {
+      if (!(kind in notes)) continue;
+      const checked = validateNote(notes[kind] ?? null);
+      if (!checked.ok) throw new CartRequestError(`the ${kind} note ${checked.error}`);
+      values[kind] = checked.value;
+    }
+    if (Object.keys(values).length === 0) {
+      throw new CartRequestError("give vendor_note and/or delivery_note (null or an empty string clears one)");
+    }
+
+    const headers = await this.authHeaders();
+    const before = await this.getVendorCart(restaurantId);
+    if (!before.exists) {
+      throw new CartRequestError("there is no cart for this restaurant; add an item first");
+    }
+
+    const path = vendorCartPath(restaurantId);
+    const updated: SetCartNotesResult["updated"] = {};
+    for (const kind of ["vendor", "delivery"] as const) {
+      const value = values[kind];
+      if (value === undefined) continue;
+      let response: unknown;
+      try {
+        response = await this.client.request(path, {
+          method: "POST",
+          headers,
+          body: { [NOTE_FIELDS[kind]]: value },
+        });
+      } catch (error) {
+        if (error instanceof ChowdeckApiError && isDefiniteRejection(error)) {
+          throw new ChowdeckApiError(
+            "http",
+            `${error.message}; the ${kind} note was not saved${Object.keys(updated).length ? " (the earlier note was saved)" : ""}`,
+            error.status,
+          );
+        }
+        throw uncertainOutcome(
+          `${error instanceof ChowdeckApiError ? error.message : "unexpected error"}; the ${kind} note may or may not have been saved`,
+        );
+      }
+      if (!isRecord(response) || response.status !== "success") {
+        throw uncertainOutcome(`POST ${path} returned an unexpected response; the ${kind} note may or may not have been saved`);
+      }
+      updated[kind] = { sent: value, verification: "unverified" };
+    }
+
+    try {
+      const after = await this.getNotes(restaurantId);
+      for (const kind of ["vendor", "delivery"] as const) {
+        const update = updated[kind];
+        if (!update) continue;
+        update.stored = kind === "vendor" ? after.vendor_note : after.delivery_note;
+        update.verification = update.stored === update.sent ? "verified" : "mismatch";
+      }
+      return { restaurant_id: restaurantId, updated, notes: after };
+    } catch (error) {
+      return {
+        restaurant_id: restaurantId,
+        updated,
+        verification_error: `the cart could not be re-read to confirm the notes (${error instanceof Error ? error.message : "unexpected error"})`,
+      };
+    }
   }
 
   async listCarts(): Promise<CartListResult> {

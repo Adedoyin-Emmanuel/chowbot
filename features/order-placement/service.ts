@@ -23,8 +23,16 @@ import {
 } from "../../lib/order-submissions";
 import { logger } from "../../utils/logger";
 import OrderService, { readPaymentEvidence } from "../orders/service";
-import { isRecord } from "../../utils/object";
-import CheckoutService from "../checkout/service";
+import { isRecord, type ScalarValue } from "../../utils/object";
+import CheckoutService, { CheckoutRefusedError } from "../checkout/service";
+import {
+  formatNaira,
+  tipFromNaira,
+  validatePromoCode,
+  validateGiftRecipient,
+  type GiftRecipient,
+  type GiftRecipientInput,
+} from "../checkout/draft";
 import { cartFingerprint } from "../carts/service";
 import { REQUEST_STATE_TTL_SECONDS } from "../../lib/request-state";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
@@ -56,12 +64,60 @@ type PlacementState = {
   addressId: number;
   channel: SupportedPaymentChannel;
   acknowledgementRequired: boolean;
+  /*
+   * The cart notes the user saw in the confirmation; the order copies the
+   * notes from the cart at submission, so they must still match.
+   */
+  notesDigest?: string;
+  /*
+   * The tip, gift and promo code the user confirmed, bound the same way.
+   */
+  extrasDigest?: string;
 };
+
+/*
+ * Checkout extras the order carries, as validated for submission.
+ */
+type OrderExtras = { tipRaw?: number; gift?: GiftRecipient; promoCode?: string };
+
+const extrasDigestOf = (extras: OrderExtras) =>
+  sha256(JSON.stringify([extras.tipRaw ?? null, extras.gift ?? null, extras.promoCode ?? null]));
+
+const notesDigestOf = (raw: Record<string, unknown>) =>
+  sha256(JSON.stringify([raw.customer_vendor_note ?? null, raw.customer_delivery_note ?? null]));
 
 export type PlaceOrderArgs = {
   quote_ref: string;
   address_id: number;
   payment_channel: SupportedPaymentChannel;
+  tip?: "none" | { amount_naira: number };
+  gift?: GiftRecipientInput;
+  promo_code?: string;
+};
+
+/*
+ * Validates the extras from the arguments alone (no Chowdeck calls). Used
+ * at submission, where the live checks were already made at confirmation
+ * and the result is bound by extrasDigest.
+ */
+const extrasFromArgs = (args: PlaceOrderArgs): OrderExtras => {
+  const extras: OrderExtras = {};
+  if (typeof args.tip === "object") {
+    const tip = tipFromNaira(args.tip.amount_naira, { available: true, minimum: 0, maximum: 0 });
+    if (!tip.ok) throw new CheckoutRefusedError(`the tip ${tip.error}`);
+    if (tip.value.kind === "amount") extras.tipRaw = tip.value.raw;
+  }
+  if (args.gift !== undefined) {
+    const gift = validateGiftRecipient(args.gift);
+    if (!gift.ok) throw new CheckoutRefusedError(`the gift recipient's ${gift.error}`);
+    extras.gift = gift.value;
+  }
+  if (args.promo_code !== undefined) {
+    const code = validatePromoCode(args.promo_code);
+    if (!code.ok) throw new CheckoutRefusedError(`the promo code ${code.error}`);
+    extras.promoCode = code.value;
+  }
+  return extras;
 };
 
 const answerSchema = z.object({
@@ -247,6 +303,47 @@ class OrderPlacementService {
       );
     }
 
+    /*
+     * The live checks for the extras: Chowdeck's tip limits, the gift
+     * phone check and the promo discount calculation. A promo code is
+     * accepted only when Chowdeck's calculation shows a discount.
+     */
+    let extras: OrderExtras;
+    let promoDiscount = 0;
+    try {
+      extras = extrasFromArgs(args);
+      if (extras.tipRaw !== undefined && typeof args.tip === "object") {
+        const tip = tipFromNaira(args.tip.amount_naira, await this.checkout.readTipConfig());
+        if (!tip.ok) throw new CheckoutRefusedError(`the tip ${tip.error}`);
+      }
+      if (extras.gift) await this.checkout.validateGiftPhone(extras.gift);
+      if (extras.promoCode) {
+        const promo = await this.checkout.promoCheck(
+          {
+            raw: checked.raw,
+            vendorId: submission.vendorId,
+            addressId: args.address_id,
+            orderClass: checked.vendor.fields.self_delivery === true ? "vendor_delivery" : "delivery",
+            cartTotal: (checked.cart.total_price ?? null) as ScalarValue,
+          },
+          extras.promoCode,
+        );
+        if (promo.status !== "discount") {
+          throw new CheckoutRefusedError(
+            promo.status === "rejected"
+              ? `Chowdeck refused the promo code ${promo.promo_code} (${promo.rejection})`
+              : `Chowdeck's discount calculation shows no discount for the promo code ${promo.promo_code}`,
+          );
+        }
+        promoDiscount = promo.code_discount;
+      }
+    } catch (error) {
+      if (error instanceof CheckoutRefusedError || error instanceof ChowdeckApiError) {
+        return text(`Order not placed: ${error.message}.`, true);
+      }
+      throw error;
+    }
+
     const unresolved = await this.unresolvedAttempts(
       submission.vendorId,
       submission.id,
@@ -287,7 +384,22 @@ class OrderPlacementService {
       `Deliver to: ${addressLabel}.`,
       `Total: ${submission.computedTotal} (raw Chowdeck amount: cart total plus delivery and service fees, computed by ChowBot).`,
       `Payment: ${channel.name}. The order is created unpaid; payment is completed separately.`,
-      "Tip: none (ChowBot does not add a tip).",
+      extras.tipRaw !== undefined
+        ? `Tip: ${formatNaira(extras.tipRaw)} for the rider.`
+        : "Tip: none (ChowBot does not add a tip).",
+      `Restaurant note: ${quotedNote(checked.raw.customer_vendor_note)}.`,
+      `Delivery note: ${quotedNote(checked.raw.customer_delivery_note)}.`,
+      extras.gift
+        ? `Gift for ${extras.gift.name} (phone ${extras.gift.phone}, ${extras.gift.country_code}) from ${extras.gift.donor_name}${extras.gift.message ? `, message "${extras.gift.message}"` : ""}${extras.gift.save_as_beneficiary ? ", saved as a beneficiary on your account" : ""}.`
+        : "Not a gift.",
+      extras.promoCode
+        ? `Promo code ${extras.promoCode}: Chowdeck's discount calculation shows ${formatNaira(promoDiscount)} off the items; the final discount is set by Chowdeck.`
+        : "No promo code.",
+      ...(extras.tipRaw !== undefined || extras.promoCode
+        ? [
+            `Estimated total: ${formatNaira(submission.computedTotal + (extras.tipRaw ?? 0) - promoDiscount)} (the total above${extras.tipRaw !== undefined ? " plus the tip" : ""}${extras.promoCode ? " minus the calculated discount" : ""}; computed by ChowBot, not confirmed by Chowdeck).`,
+          ]
+        : []),
       ...(unresolved.open.length > 0
         ? [
             `Warning: you have ${unresolved.open.length} earlier order attempt(s) at this restaurant that are unpaid or have an unknown outcome. Placing this order may result in more than one order. Confirm acknowledge_unresolved_attempts to continue.`,
@@ -320,6 +432,8 @@ class OrderPlacementService {
           addressId: args.address_id,
           channel: args.payment_channel,
           acknowledgementRequired: unresolved.total > 0,
+          notesDigest: notesDigestOf(checked.raw),
+          extrasDigest: extrasDigestOf(extras),
         } satisfies PlacementState,
         ctx,
       ),
@@ -369,6 +483,25 @@ class OrderPlacementService {
         "Order not placed: the cart changed since the quote. Call get_checkout_quote again.",
         true,
       );
+    let extras: OrderExtras;
+    try {
+      extras = extrasFromArgs(args);
+    } catch (error) {
+      if (error instanceof CheckoutRefusedError) return text(`Order not placed: ${error.message}.`, true);
+      throw error;
+    }
+    if (state.extrasDigest !== extrasDigestOf(extras)) {
+      return text(
+        "Order not placed: the tip, gift or promo code differs from what was confirmed. Start again.",
+        true,
+      );
+    }
+    if (state.notesDigest !== notesDigestOf(checked.raw)) {
+      return text(
+        "Order not placed: the cart's restaurant or delivery note changed after confirmation was requested. Start again to confirm the current notes.",
+        true,
+      );
+    }
     if (
       !state.acknowledgementRequired &&
       (await this.unresolvedAttempts(submission.vendorId, submission.id))
@@ -431,7 +564,7 @@ class OrderPlacementService {
       );
     }
 
-    return this.sendOrderOnce(submission, args, checked, claim.feeId);
+    return this.sendOrderOnce(submission, args, checked, claim.feeId, extras);
   }
 
   private async sendOrderOnce(
@@ -439,6 +572,7 @@ class OrderPlacementService {
     args: PlaceOrderArgs,
     checked: Awaited<ReturnType<CheckoutService["validateForOrder"]>>,
     feeId: number,
+    extras: OrderExtras,
   ) {
     const raw = checked.raw;
     const body = {
@@ -456,12 +590,14 @@ class OrderPlacementService {
       split_payment_with_wallet: false,
       requires_delivery_pin: true,
       bag_quantity: raw.bag_quantity,
-      promo_codes: [],
+      promo_codes: extras.promoCode ? [extras.promoCode] : [],
       currency: CHECKOUT_CURRENCY,
       country_code: CHECKOUT_COUNTRY_CODE,
       customer_vendor_note: raw.customer_vendor_note ?? null,
       customer_delivery_note: raw.customer_delivery_note ?? null,
-      gift_recipient: null,
+      gift_recipient: extras.gift ?? null,
+      // As the website: tip only when one was chosen, in raw x100 units.
+      ...(extras.tipRaw !== undefined && { tip: extras.tipRaw }),
     };
 
     let response: unknown;
@@ -510,6 +646,9 @@ class OrderPlacementService {
       restaurant_id: submission.vendorId,
       payment_channel: submission.paymentChannelName,
       computed_total: submission.computedTotal,
+      ...(extras.tipRaw !== undefined && { tip: formatNaira(extras.tipRaw) }),
+      ...(extras.promoCode && { promo_code: extras.promoCode }),
+      ...(extras.gift && { gift_for: extras.gift.name }),
       status:
         data.made_payment === true
           ? "created; Chowdeck reports it paid"
@@ -773,6 +912,13 @@ const abandonedGuidanceFor = (attempt: ReleasedSubmission) =>
       : []),
     "A new order at this restaurant may duplicate it.",
   ].join(" ");
+
+/*
+ * A cart note as the confirmation shows it: the exact text the order would
+ * carry, or "none".
+ */
+const quotedNote = (value: unknown) =>
+  typeof value === "string" && value.trim() ? `"${value}"` : "none";
 
 const guidanceFor = (attempt: OrderSubmission) => {
   switch (attempt.state) {
