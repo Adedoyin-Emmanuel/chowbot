@@ -3,7 +3,7 @@ import type { Server as BunServer } from "bun";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/server";
 
 import { ChowdeckClient } from "../../lib/client";
@@ -14,6 +14,7 @@ import { textResult } from "../../utils/tool-result";
 import { migrate } from "../../lib/postgres/migrations";
 import { createPostgresStores } from "../../lib/postgres";
 import { hashToken, issueAccessToken } from "../../lib/oauth";
+import { resetGlobalRateLimit } from "../helpers/rate-limit";
 import { createTestDatabase, describePostgres } from "../helpers/postgres";
 
 type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
@@ -33,10 +34,25 @@ let database: TestDatabase;
 let chowdeck: BunServer<undefined>;
 const instances: Instance[] = [];
 
-const sessionProbe = ({ session }: ServerOptions) => {
+const sessionProbe = ({ session, submissions }: ServerOptions) => {
   const server = new McpServer({ name: "ChowBot", version: "test" });
   server.registerTool("whoami", { inputSchema: z.object({}) }, async () =>
     textResult((await session?.get())?.token ?? "no session"),
+  );
+  server.registerTool("save_quote", { inputSchema: z.object({}) }, async () => {
+    if (!submissions) return textResult("no store");
+    const { id } = await submissions.createQuote({
+      vendorId: 102555,
+      cartId: 30742921,
+      feeId: 99887766,
+      addressId: 918273,
+      cartFingerprint: "fingerprint-1",
+      computedTotal: 554000,
+    });
+    return textResult(id);
+  });
+  server.registerTool("read_quote", { inputSchema: z.object({ id: z.string() }) }, async ({ id }) =>
+    textResult((await submissions?.get(id))?.state ?? "not found"),
   );
   return server;
 };
@@ -109,6 +125,22 @@ const callWhoami = async (instance: Instance, token: string) => {
   return JSON.parse(data.slice("data: ".length)).result.content[0].text as string;
 };
 
+const callProbe = async (instance: Instance, token: string, name: string, args: Record<string, unknown> = {}) => {
+  const response = await fetch(`${instance.baseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2025-06-18",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const text = await response.text();
+  const data = text.split("\n").find((line) => line.startsWith("data: "))!;
+  return JSON.parse(data.slice("data: ".length)).result.content[0].text as string;
+};
+
 describePostgres("hosted HTTP server on PostgreSQL", () => {
   beforeAll(async () => {
     database = await createTestDatabase();
@@ -123,6 +155,8 @@ describePostgres("hosted HTTP server on PostgreSQL", () => {
       },
     });
   });
+
+  beforeEach(resetGlobalRateLimit);
 
   afterAll(async () => {
     for (const { server } of instances) server.close();
@@ -284,5 +318,38 @@ describePostgres("hosted HTTP server on PostgreSQL", () => {
     expect(rows).not.toContain(initial.body.refresh_token!);
     expect(rows).not.toContain(rotated.body.refresh_token!);
     expect(rows).toContain("reuse_detected");
+  });
+
+  test("order submissions are bound to the signed-in user on every instance", async () => {
+    const issuing = await startInstance();
+    const registration = await fetch(`${issuing.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await registration.json()) as { client_id: string };
+    const issueFor = async (phone: string) => {
+      const code = await signIn(issuing, clientId, phone);
+      const { userId } = (await issuing.stores.codes.consume(hashToken(code)))!;
+      const token = await issueAccessToken(issuing.stores.tokens, {
+        userId,
+        clientId,
+        scopes: [],
+        resource: SERVER_URL.href,
+        expiresAt: Math.floor(Date.now() / 1000) + 600,
+      });
+      return { userId, token };
+    };
+    const alice = await issueFor("08055556666");
+    const bob = await issueFor("08077778888");
+
+    const quoteId = await callProbe(issuing, alice.token, "save_quote");
+    const other = await startInstance();
+
+    expect(await callProbe(other, alice.token, "read_quote", { id: quoteId })).toBe("quoted");
+    expect(await callProbe(other, bob.token, "read_quote", { id: quoteId })).toBe("not found");
+    const [row] = await database.connect()`SELECT user_id, address_binding FROM order_submissions WHERE id = ${quoteId}`;
+    expect(row.user_id).toBe(alice.userId);
+    expect(row.address_binding).not.toContain("918273");
   });
 });

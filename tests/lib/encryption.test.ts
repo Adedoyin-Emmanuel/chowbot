@@ -108,3 +108,33 @@ describe("phone hashing", () => {
     expect(hash).not.toContain("08012345678");
   });
 });
+
+describe("address binding", () => {
+  test("is deterministic per key and user, and never contains the address id", () => {
+    const masterKey = key();
+    const keyring = createKeyring(masterKey);
+
+    const binding = keyring.bindAddress("user-a", 918273);
+
+    expect(binding).toBe(createKeyring(masterKey).bindAddress("user-a", 918273));
+    expect(binding).not.toBe(keyring.bindAddress("user-b", 918273));
+    expect(binding).not.toBe(keyring.bindAddress("user-a", 918274));
+    expect(binding).not.toBe(createKeyring(key()).bindAddress("user-a", 918273));
+    expect(binding).not.toBe(keyring.hashPhone("user-a\u0000918273"));
+    expect(binding).toMatch(/^[0-9a-f]{64}$/);
+    expect(binding).not.toContain("918273");
+  });
+});
+
+describe("request-state key", () => {
+  test("is a stable 32-byte key derived from the master key and distinct per master key", () => {
+    const masterKey = key();
+
+    const derived = createKeyring(masterKey).requestStateKey;
+
+    expect(derived).toHaveLength(32);
+    expect(Buffer.from(derived).equals(Buffer.from(createKeyring(masterKey).requestStateKey))).toBe(true);
+    expect(Buffer.from(derived).equals(Buffer.from(createKeyring(key()).requestStateKey))).toBe(false);
+    expect(Buffer.from(derived).equals(masterKey)).toBe(false);
+  });
+});

@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
+import type { UserOrderSubmissions } from "../../lib/order-submissions";
 import { textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
 import CheckoutService, {
@@ -57,8 +58,9 @@ export const registerCheckoutTools = (
   server: McpServer,
   session?: UserSession,
   client?: ChowdeckClient,
+  submissions?: UserOrderSubmissions,
 ) => {
-  const service = session && new CheckoutService(session, client);
+  const service = session && new CheckoutService(session, client, submissions);
 
   server.registerTool(
     "get_checkout_quote",

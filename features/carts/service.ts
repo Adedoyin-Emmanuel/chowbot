@@ -212,6 +212,25 @@ const parseCart = (value: unknown): CartDetail | undefined => {
   };
 };
 
+/*
+ * A stable digest of what a cart would order: every pack, row id, item,
+ * type, quantity and option group, plus the server's total. Any add,
+ * removal, duplicate, quantity change or repricing changes it.
+ */
+export const cartFingerprint = (cart: CartDetail) => {
+  const packs = cart.packs
+    .map((pack) => ({
+      pack: pack.pack_reference,
+      rows: pack.rows
+        .map((row) => [row.cart_item_id, row.item_id, row.type, row.quantity, row.menu_group_id ?? null])
+        .sort((a, b) => Number(a[0]) - Number(b[0])),
+    }))
+    .sort((a, b) => String(a.pack).localeCompare(String(b.pack)));
+  return new Bun.CryptoHasher("sha256")
+    .update(JSON.stringify({ packs, total: cart.total_price ?? null }))
+    .digest("hex");
+};
+
 const summarizeCart = (cart: CartDetail): CartSummary => {
   const { packs, validation_issues, ...fields } = cart;
   return {

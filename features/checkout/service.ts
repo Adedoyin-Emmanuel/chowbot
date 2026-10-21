@@ -3,7 +3,9 @@ import {
   pickScalarFields,
   type ScalarValue,
 } from "../../utils/object";
-import CartService, { type CartDetail } from "../carts/service";
+import { logger } from "../../utils/logger";
+import type { UserOrderSubmissions } from "../../lib/order-submissions";
+import CartService, { cartFingerprint, type CartDetail } from "../carts/service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import AddressService, { NotSignedInError } from "../addresses/service";
 import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
@@ -75,6 +77,10 @@ export type CheckoutQuoteResult = {
   computed_total_unavailable_reason?: string;
   payment_methods: Record<string, ScalarValue>[] | null;
   quote: Record<string, ScalarValue | Record<string, ScalarValue>[]>;
+  orderable: boolean;
+  quote_ref?: string;
+  quote_valid_until?: string;
+  not_orderable_reasons?: string[];
 };
 
 /*
@@ -150,6 +156,7 @@ class CheckoutService {
   constructor(
     private readonly session: UserSession,
     private readonly client = new ChowdeckClient(),
+    private readonly submissions?: UserOrderSubmissions,
   ) {
     this.carts = new CartService(session, client);
     this.addresses = new AddressService(session, client);
@@ -256,7 +263,7 @@ class CheckoutService {
     restaurantId: number,
     addressId: number,
   ): Promise<CheckoutQuoteResult> {
-    const { cart, vendor, restaurant } = await this.validateCheckout(
+    const { cart, raw, vendor, restaurant } = await this.validateCheckout(
       restaurantId,
       addressId,
     );
@@ -272,7 +279,74 @@ class CheckoutService {
       cart_id: cart.id,
     });
 
-    return this.buildQuoteResult(cart, restaurant, quoteData, total);
+    const result = await this.buildQuoteResult(cart, restaurant, quoteData, total);
+    return this.recordOrderableQuote(result, {
+      restaurantId,
+      addressId,
+      cart,
+      raw,
+      vendorCurrency: vendor.fields.currency,
+      feeId: quoteData.id,
+    });
+  }
+
+  /*
+   * A quote becomes orderable only when every value a submission needs is
+   * confidently known and its durable record has been saved. Otherwise it
+   * stays informational: no quote_ref, no record. The fee id is stored
+   * internally and never returned.
+   */
+  private async recordOrderableQuote(
+    result: CheckoutQuoteResult,
+    context: {
+      restaurantId: number;
+      addressId: number;
+      cart: CartDetail;
+      raw: Record<string, unknown>;
+      vendorCurrency: unknown;
+      feeId: unknown;
+    },
+  ): Promise<CheckoutQuoteResult> {
+    const { cart, raw } = context;
+    const reasons: string[] = [];
+    if (!this.submissions) reasons.push("ordering is only available on the hosted ChowBot server");
+    if (!result.computed_total) reasons.push("no total could be computed confidently");
+    if (!isPositiveId(context.feeId)) reasons.push("Chowdeck returned no usable delivery-fee record");
+    if (!isPositiveId(cart.id)) reasons.push("the cart has no usable id");
+    if (!isAmount(raw.bag_quantity)) reasons.push("the cart has no numeric bag_quantity");
+    if (context.vendorCurrency !== undefined && context.vendorCurrency !== CHECKOUT_CURRENCY) {
+      reasons.push(`only ${CHECKOUT_CURRENCY} orders are supported`);
+    }
+    if (reasons.length > 0 || !this.submissions || !result.computed_total) {
+      return { ...result, orderable: false, not_orderable_reasons: reasons };
+    }
+
+    try {
+      const saved = await this.submissions.createQuote({
+        vendorId: context.restaurantId,
+        cartId: cart.id as number,
+        feeId: context.feeId as number,
+        addressId: context.addressId,
+        cartFingerprint: cartFingerprint(cart),
+        computedTotal: result.computed_total.amount,
+      });
+      return {
+        ...result,
+        orderable: true,
+        quote_ref: saved.id,
+        quote_valid_until: saved.quoteExpiresAt.toISOString(),
+      };
+    } catch (error) {
+      logger.error(
+        "Saving an orderable checkout quote failed:",
+        error instanceof Error ? error.name : typeof error,
+      );
+      return {
+        ...result,
+        orderable: false,
+        not_orderable_reasons: ["the quote could not be saved for ordering"],
+      };
+    }
   }
 
   /*
@@ -321,6 +395,38 @@ class CheckoutService {
     return { cart, raw: snapshot.raw ?? {}, vendor, restaurant };
   }
 
+  /*
+   * For order placement: exactly the checks a quote applies, without
+   * requesting a quote. Only GET requests.
+   */
+  validateForOrder(restaurantId: number, addressId: number) {
+    return this.validateCheckout(restaurantId, addressId);
+  }
+
+  /*
+   * The pre-order validation gate the website sends before creating an
+   * order: one fresh delivery-fee quote, never retried. Its fee id is
+   * discarded; the order uses the quote the user confirmed. A 4xx is
+   * rethrown as Chowdeck's rejection; anything else comes back as an
+   * uncertain-outcome error.
+   */
+  async requestGateQuote(
+    restaurantId: number,
+    addressId: number,
+    cartId: unknown,
+    sourceId: number,
+  ) {
+    await this.requestQuote({
+      destination_id: addressId,
+      order_class: ORDER_CLASS,
+      source_id: sourceId,
+      vendor_id: restaurantId,
+      currency: CHECKOUT_CURRENCY,
+      country_code: CHECKOUT_COUNTRY_CODE,
+      cart_id: cartId,
+    });
+  }
+
   private async buildQuoteResult(
     cart: CartDetail,
     restaurant: Record<string, ScalarValue>,
@@ -365,6 +471,7 @@ class CheckoutService {
       restaurant,
       cart,
       quote,
+      orderable: false,
       computed_total: computedTotal,
       payment_methods: null,
     };

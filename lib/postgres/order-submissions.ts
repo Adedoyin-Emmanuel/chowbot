@@ -1,0 +1,382 @@
+import { timingSafeEqual } from "node:crypto";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+
+import type { Database } from "./database";
+import type { Keyring } from "../encryption";
+import { LOCKING_SUBMISSION_STATES, orderSubmissions } from "./schema";
+import {
+  QUOTE_LIFETIME_SECONDS,
+  UNSENT_RECOVERY_GRACE_SECONDS,
+  type NewQuote,
+  type LinkResult,
+  type OrderEvidence,
+  type ClaimResult,
+  type GateFailure,
+  type OrderSubmission,
+  type SubmissionOutcome,
+  type ConfirmationRequest,
+  type OrderSubmissionStore,
+} from "../order-submissions";
+
+const USER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type Row = typeof orderSubmissions.$inferSelect;
+
+const toSubmission = (row: Row): OrderSubmission => ({
+  id: row.id,
+  vendorId: row.vendorId,
+  cartId: row.cartId,
+  cartFingerprint: row.cartFingerprint,
+  computedTotal: row.computedTotal,
+  state: row.state,
+  quoteExpiresAt: row.quoteExpiresAt,
+  paymentMethodId: row.paymentMethodId,
+  paymentChannelName: row.paymentChannelName,
+  chowdeckOrderId: row.chowdeckOrderId,
+  claimedAt: row.confirmationConsumedAt,
+  orderRequestStartedAt: row.orderRequestStartedAt,
+  failureReason: row.failureReason,
+  resolution: row.resolution,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
+
+const sameHash = (a: string | null, b: string) => {
+  if (a === null) return false;
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+
+const isUniqueViolation = (error: unknown) => {
+  const cause = (error as { cause?: { errno?: unknown } } | undefined)?.cause;
+  return cause?.errno === "23505";
+};
+
+const owned = (userId: string, id: string) =>
+  and(eq(orderSubmissions.id, id), eq(orderSubmissions.userId, userId));
+
+/*
+ * Every expiry is compared with the database clock (now()), so server
+ * instances with skewed clocks cannot disagree about a quote or a
+ * confirmation. Records of a malformed user or record id simply do not exist.
+ */
+export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
+  constructor(
+    private readonly db: Database,
+    private readonly keyring: Keyring,
+  ) {}
+
+  private valid(userId: string, id: string) {
+    return USER_ID_PATTERN.test(userId) && USER_ID_PATTERN.test(id);
+  }
+
+  async createQuote(userId: string, quote: NewQuote) {
+    const [row] = await this.db
+      .insert(orderSubmissions)
+      .values({
+        userId,
+        vendorId: quote.vendorId,
+        cartId: quote.cartId,
+        feeId: quote.feeId,
+        addressBinding: this.keyring.bindAddress(userId, quote.addressId),
+        cartFingerprint: quote.cartFingerprint,
+        computedTotal: quote.computedTotal,
+        quoteExpiresAt: sql`now() + make_interval(secs => ${QUOTE_LIFETIME_SECONDS})`,
+        state: "quoted",
+      })
+      .returning({ id: orderSubmissions.id, quoteExpiresAt: orderSubmissions.quoteExpiresAt });
+    return row!;
+  }
+
+  async get(userId: string, id: string) {
+    if (!this.valid(userId, id)) return undefined;
+    const [row] = await this.db.select().from(orderSubmissions).where(owned(userId, id));
+    return row ? toSubmission(row) : undefined;
+  }
+
+  async issueConfirmation(userId: string, id: string, request: ConfirmationRequest) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({
+        paymentMethodId: request.paymentMethodId,
+        paymentChannelName: request.paymentChannelName,
+        confirmationNonceHash: request.nonceHash,
+        confirmationExpiresAt: sql`least(now() + make_interval(secs => ${request.ttlSeconds}), ${orderSubmissions.quoteExpiresAt})`,
+        state: "confirmation_pending",
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          owned(userId, id),
+          inArray(orderSubmissions.state, ["quoted", "confirmation_pending"]),
+          isNull(orderSubmissions.confirmationConsumedAt),
+          sql`${orderSubmissions.quoteExpiresAt} > now()`,
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * The atomic claim, committed before any order request is sent:
+   *   1. lock the target row and check its state, expiry, nonce, address
+   *      binding and cart fingerprint;
+   *   2. lock any row already holding this cart's lock. A paid order on a
+   *      cart that has since changed gives its lock up; any other holder
+   *      refuses the claim;
+   *   3. move the target to submitting and consume the nonce.
+   * Two claims racing on different quotes for one cart cannot both commit:
+   * the partial unique index rejects the second, which is reported as
+   * cart_locked. Nothing here ever releases a submitting, created or unknown
+   * lock.
+   */
+  async claim(
+    userId: string,
+    id: string,
+    check: { nonceHash: string; addressId: number; cartFingerprint: string },
+  ): Promise<ClaimResult> {
+    if (!this.valid(userId, id)) return { ok: false, reason: "not_found" };
+    try {
+      return await this.db.transaction(async (tx): Promise<ClaimResult> => {
+        const [target] = await tx
+          .select({
+            ...getTableColumns(orderSubmissions),
+            quoteLive: sql<boolean>`${orderSubmissions.quoteExpiresAt} > now()`,
+            confirmationLive: sql<boolean>`coalesce(${orderSubmissions.confirmationExpiresAt} > now(), false)`,
+          })
+          .from(orderSubmissions)
+          .where(owned(userId, id))
+          .for("update");
+
+        if (!target) return { ok: false, reason: "not_found" };
+        if (target.state !== "confirmation_pending") return { ok: false, reason: "not_confirmable" };
+        if (target.confirmationConsumedAt !== null) return { ok: false, reason: "confirmation_invalid" };
+        if (!target.quoteLive || !target.confirmationLive) return { ok: false, reason: "expired" };
+        if (!sameHash(target.confirmationNonceHash, check.nonceHash)) {
+          return { ok: false, reason: "confirmation_invalid" };
+        }
+        if (!sameHash(target.addressBinding, this.keyring.bindAddress(userId, check.addressId))) {
+          return { ok: false, reason: "address_changed" };
+        }
+        if (target.cartFingerprint !== check.cartFingerprint) return { ok: false, reason: "cart_changed" };
+
+        const holders = await tx
+          .select({
+            id: orderSubmissions.id,
+            state: orderSubmissions.state,
+            cartFingerprint: orderSubmissions.cartFingerprint,
+          })
+          .from(orderSubmissions)
+          .where(
+            and(
+              eq(orderSubmissions.userId, userId),
+              eq(orderSubmissions.cartId, target.cartId),
+              ne(orderSubmissions.id, id),
+              isNull(orderSubmissions.lockReleasedAt),
+              inArray(orderSubmissions.state, [...LOCKING_SUBMISSION_STATES]),
+            ),
+          )
+          .for("update");
+
+        for (const holder of holders) {
+          if (holder.state === "paid" && holder.cartFingerprint !== check.cartFingerprint) {
+            await tx
+              .update(orderSubmissions)
+              .set({ lockReleasedAt: sql`now()`, lockReleaseReason: "cart_changed", updatedAt: sql`now()` })
+              .where(eq(orderSubmissions.id, holder.id));
+          } else {
+            return { ok: false, reason: "cart_locked", lockedBy: holder.state };
+          }
+        }
+
+        const [claimed] = await tx
+          .update(orderSubmissions)
+          .set({ state: "submitting", confirmationConsumedAt: sql`now()`, updatedAt: sql`now()` })
+          .where(
+            and(
+              owned(userId, id),
+              eq(orderSubmissions.state, "confirmation_pending"),
+              isNull(orderSubmissions.confirmationConsumedAt),
+            ),
+          )
+          .returning();
+        if (!claimed) return { ok: false, reason: "not_confirmable" };
+        return { ok: true, submission: toSubmission(claimed), feeId: claimed.feeId };
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) return { ok: false, reason: "cart_locked" };
+      throw error;
+    }
+  }
+
+  /*
+   * Only valid while the row is still submitting and no order request was
+   * started: a row carrying the marker can never be released this way.
+   */
+  async recordGateFailure(userId: string, id: string, reason: GateFailure) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ state: "failed", failureReason: reason, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "submitting"),
+          isNull(orderSubmissions.orderRequestStartedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * The order-request marker (R1). The caller may send the order request
+   * only if this returns true, i.e. the update matched and committed. It
+   * and recoverUnsent are conditional updates on the same row, so at most
+   * one of them can ever succeed. A thrown error means the outcome is
+   * unknown and the request must not be sent.
+   */
+  async markOrderRequestStarted(userId: string, id: string) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ orderRequestStartedAt: sql`now()`, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "submitting"),
+          isNull(orderSubmissions.orderRequestStartedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * R1: releases this user's claimed submissions on this cart whose order
+   * request provably never started (no marker), once the grace period has
+   * passed since the claim. Never touches a row carrying the marker.
+   */
+  async recoverUnsent(userId: string, cartId: number) {
+    if (!USER_ID_PATTERN.test(userId)) return 0;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ state: "failed", failureReason: "not_sent", updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(orderSubmissions.userId, userId),
+          eq(orderSubmissions.cartId, cartId),
+          eq(orderSubmissions.state, "submitting"),
+          isNull(orderSubmissions.orderRequestStartedAt),
+          sql`${orderSubmissions.confirmationConsumedAt} <= now() - make_interval(secs => ${UNSENT_RECOVERY_GRACE_SECONDS})`,
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length;
+  }
+
+  async recordOutcome(userId: string, id: string, outcome: SubmissionOutcome) {
+    if (!this.valid(userId, id)) return false;
+    const set =
+      outcome.kind === "created"
+        ? { state: "created" as const, chowdeckOrderId: outcome.chowdeckOrderId }
+        : outcome.kind === "rejected"
+          ? { state: "failed" as const, failureReason: "order_rejected" as const }
+          : { state: "unknown" as const };
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ ...set, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "submitting"),
+          isNotNull(orderSubmissions.orderRequestStartedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * Records verified payment. The cart lock is kept: it is released only by
+   * a later claim that finds the cart changed.
+   */
+  async recordPaid(userId: string, id: string, evidence: OrderEvidence) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({
+        state: "paid",
+        resolution: "paid_verified",
+        resolvedAt: sql`now()`,
+        updatedAt: sql`now()`,
+        evidenceOrderStatus: evidence.orderStatus,
+        evidencePaymentStatus: evidence.paymentStatus,
+        evidenceCheckedAt: sql`now()`,
+      })
+      .where(and(owned(userId, id), eq(orderSubmissions.state, "created")))
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * R3: links an order the user found in Chowdeck to an attempt whose
+   * request was sent but whose outcome is unknown. The caller has already
+   * verified the order through Chowdeck; the lock is kept (created). One
+   * Chowdeck order can be linked to only one attempt.
+   */
+  async linkOrder(userId: string, id: string, chowdeckOrderId: number, evidence: OrderEvidence): Promise<LinkResult> {
+    if (!this.valid(userId, id)) return "not_linkable";
+    try {
+      const rows = await this.db
+        .update(orderSubmissions)
+        .set({
+          state: "created",
+          chowdeckOrderId,
+          resolution: "linked_user_supplied_order",
+          resolvedAt: sql`now()`,
+          updatedAt: sql`now()`,
+          evidenceOrderStatus: evidence.orderStatus,
+          evidencePaymentStatus: evidence.paymentStatus,
+          evidenceCheckedAt: sql`now()`,
+        })
+        .where(
+          and(
+            owned(userId, id),
+            inArray(orderSubmissions.state, ["unknown", "submitting"]),
+            isNotNull(orderSubmissions.orderRequestStartedAt),
+            isNull(orderSubmissions.chowdeckOrderId),
+          ),
+        )
+        .returning({ id: orderSubmissions.id });
+      return rows.length === 1 ? "linked" : "not_linkable";
+    } catch (error) {
+      if (isUniqueViolation(error)) return "order_already_linked";
+      throw error;
+    }
+  }
+
+  /*
+   * This user's attempts at a restaurant that still hold a cart lock
+   * (submitting, unknown, created or paid), newest first.
+   */
+  async listOpen(userId: string, vendorId: number) {
+    if (!USER_ID_PATTERN.test(userId)) return [];
+    const rows = await this.db
+      .select()
+      .from(orderSubmissions)
+      .where(
+        and(
+          eq(orderSubmissions.userId, userId),
+          eq(orderSubmissions.vendorId, vendorId),
+          isNull(orderSubmissions.lockReleasedAt),
+          inArray(orderSubmissions.state, [...LOCKING_SUBMISSION_STATES]),
+        ),
+      )
+      .orderBy(desc(orderSubmissions.createdAt));
+    return rows.map(toSubmission);
+  }
+}

@@ -117,4 +117,20 @@ export const deleteExpiredRecords = async (sql: SQL) => {
   await db
     .delete(oauthRefreshTokenFamilies)
     .where(lte(oauthRefreshTokenFamilies.expiresAt, raw`now()`));
+
+  /*
+   * Order submissions: quotes never claimed go one day after they expire;
+   * failed and released records after 30 days. Anything submitting, created,
+   * unknown or paid is never swept, whatever its age.
+   */
+  const { orderSubmissions } = schema;
+  await db.delete(orderSubmissions).where(
+    raw`${orderSubmissions.state} IN ('quoted', 'confirmation_pending')
+        AND ${orderSubmissions.confirmationConsumedAt} IS NULL
+        AND ${orderSubmissions.quoteExpiresAt} <= now() - interval '1 day'`,
+  );
+  await db.delete(orderSubmissions).where(
+    raw`${orderSubmissions.state} IN ('failed', 'released')
+        AND ${orderSubmissions.updatedAt} <= now() - interval '30 days'`,
+  );
 };

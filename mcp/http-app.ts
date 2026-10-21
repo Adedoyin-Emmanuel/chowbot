@@ -10,6 +10,7 @@ import {
   bearerAuthChallengeResponse,
   buildOAuthProtectedResourceMetadata,
   getOAuthProtectedResourceMetadataUrl,
+  type RequestStateCodec,
 } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 
@@ -26,7 +27,12 @@ import { createTokenRouter } from "./token-router";
 import type { ChowdeckClient } from "../lib/client";
 import type { ClientStore } from "../lib/oauth-clients";
 import { createServer, type ServerOptions } from "./server";
+import type { PaymentChannelQuery } from "../features/order-placement/channels";
 import { bindSession, type SessionStore } from "../lib/session";
+import {
+  bindOrderSubmissions,
+  type OrderSubmissionStore,
+} from "../lib/order-submissions";
 import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
 import { AccessTokenVerifier, type AccessTokenStore } from "../lib/oauth";
 import {
@@ -57,6 +63,9 @@ export type HttpAppOptions = {
   exchange?: AuthorizationCodeExchange;
   authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
+  orderSubmissions?: OrderSubmissionStore;
+  requestStateCodec?: RequestStateCodec;
+  paymentChannelQuery?: PaymentChannelQuery;
 };
 
 type AuthenticatedRequest = { auth?: AuthInfo };
@@ -104,6 +113,9 @@ export const createHttpApp = ({
   exchange = createInProcessCodeExchange(codes, tokens, refreshTokens),
   authorizeLimits,
   serverFactory = createServer,
+  orderSubmissions,
+  requestStateCodec,
+  paymentChannelQuery,
 }: HttpAppOptions) => {
   assertIssuerHostedBy(issuerUrl, serverUrl);
 
@@ -137,7 +149,14 @@ export const createHttpApp = ({
       if (!userId) {
         throw new Error("Refusing to serve /mcp without an authenticated user");
       }
-      return serverFactory({ session: bindSession(sessions, userId) });
+      return serverFactory({
+        session: bindSession(sessions, userId),
+        ...(orderSubmissions && {
+          submissions: bindOrderSubmissions(orderSubmissions, userId),
+        }),
+        ...(requestStateCodec && { requestStateCodec }),
+        ...(paymentChannelQuery && { paymentChannelQuery }),
+      });
     }),
   );
 

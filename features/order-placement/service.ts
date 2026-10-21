@@ -1,0 +1,713 @@
+import { z } from "zod";
+import {
+  inputRequired,
+  acceptedContent,
+  type ServerContext,
+  type CallToolResult,
+  type RequestStateCodec,
+} from "@modelcontextprotocol/server";
+import { randomBytes } from "node:crypto";
+
+import {
+  resolvePaymentChannel,
+  type PaymentChannelQuery,
+  type SupportedPaymentChannel,
+} from "./channels";
+import type {
+  ClaimRefusal,
+  OrderEvidence,
+  OrderSubmission,
+  UserOrderSubmissions,
+} from "../../lib/order-submissions";
+import { logger } from "../../utils/logger";
+import OrderService from "../orders/service";
+import { isRecord } from "../../utils/object";
+import CheckoutService from "../checkout/service";
+import { cartFingerprint } from "../carts/service";
+import { REQUEST_STATE_TTL_SECONDS } from "../../lib/request-state";
+import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
+import AddressService, { NotSignedInError } from "../addresses/service";
+import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
+
+const ORDER_PATH = "/customer/order";
+const CHECKOUT_CURRENCY = "NGN";
+const CHECKOUT_COUNTRY_CODE = "NG";
+
+/*
+ * R3: an order created before the claim cannot belong to this attempt;
+ * allow a little clock difference between ChowBot and Chowdeck.
+ */
+const LINK_CLOCK_TOLERANCE_MS = 5 * 60 * 1000;
+
+/*
+ * R2: only the local database write is retried, never the order request.
+ */
+const PERSIST_ATTEMPTS = 3;
+const PERSIST_BACKOFF_MS = [100, 400];
+
+const UNRESOLVED_STATES = new Set(["submitting", "unknown", "created"]);
+
+type PlacementState = {
+  v: 1;
+  submissionId: string;
+  nonce: string;
+  addressId: number;
+  channel: SupportedPaymentChannel;
+  acknowledgementRequired: boolean;
+};
+
+export type PlaceOrderArgs = {
+  quote_ref: string;
+  address_id: number;
+  payment_channel: SupportedPaymentChannel;
+};
+
+const answerSchema = z.object({
+  confirm: z.boolean(),
+  acknowledge_unresolved_attempts: z.boolean().optional(),
+});
+
+const text = (message: string, isError = false): CallToolResult => ({
+  content: [{ type: "text", text: message }],
+  ...(isError && { isError }),
+});
+
+const json = (value: unknown): CallToolResult => text(JSON.stringify(value));
+
+const sha256 = (value: string) =>
+  new Bun.CryptoHasher("sha256").update(value).digest("hex");
+
+const isPositiveId = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) > 0;
+
+const isDefiniteRejection = (error: unknown): error is ChowdeckApiError =>
+  error instanceof ChowdeckApiError &&
+  error.kind === "http" &&
+  error.status !== undefined &&
+  error.status < 500;
+
+/*
+ * For the order request only, a 401 is not a definite rejection: the
+ * website treats it as an expired token and re-sends the same order, so it
+ * cannot be taken as proof that no order was created.
+ */
+const isDefiniteOrderRejection = (error: unknown): error is ChowdeckApiError =>
+  isDefiniteRejection(error) && error.status !== 401;
+
+const describeError = (error: unknown) =>
+  error instanceof ChowdeckApiError ? error.message : "unexpected error";
+
+const logFailure = (what: string, error: unknown) =>
+  logger.error(what, error instanceof Error ? error.name : typeof error);
+
+const CLAIM_REFUSALS: Record<ClaimRefusal, string> = {
+  not_found: "that quote_ref does not exist for your account",
+  not_confirmable:
+    "this confirmation was already used or the quote is no longer awaiting confirmation; call get_checkout_quote again",
+  confirmation_invalid:
+    "this confirmation is no longer valid; call get_checkout_quote again",
+  expired:
+    "the quote or its confirmation expired; call get_checkout_quote again and confirm the new total",
+  address_changed:
+    "the delivery address differs from the one quoted; call get_checkout_quote again",
+  cart_changed:
+    "the cart changed since the quote; call get_checkout_quote again",
+  cart_locked:
+    "an earlier order attempt from this cart is unpaid, paid on an unchanged cart, or has an unknown outcome; check it with get_order_submission",
+};
+
+/*
+ * The only code path that sends POST /customer/order. A confirmed attempt is
+ * claimed atomically, gated by one fresh delivery-fee quote, marked as
+ * started (committed), and only then sent, exactly once. Nothing here
+ * retries or replays an order request.
+ */
+class OrderPlacementService {
+  private readonly orders: OrderService;
+  private readonly checkout: CheckoutService;
+  private readonly addresses: AddressService;
+
+  constructor(
+    private readonly session: UserSession,
+    private readonly submissions: UserOrderSubmissions,
+    private readonly client = new ChowdeckClient(),
+    private readonly requestStateCodec?: RequestStateCodec,
+    private readonly channelQuery?: PaymentChannelQuery,
+  ) {
+    this.checkout = new CheckoutService(session, client);
+    this.addresses = new AddressService(session, client);
+    this.orders = new OrderService(session, client);
+  }
+
+  private async authHeaders() {
+    const headers = await chowdeckAuthHeaders(this.session);
+    if (!headers.authorization) throw new NotSignedInError();
+    return headers;
+  }
+
+  private canElicit(ctx: ServerContext) {
+    const envelope = ctx.mcpReq.envelope as Record<string, unknown> | undefined;
+    const caps = envelope?.["io.modelcontextprotocol/clientCapabilities"] as
+      { elicitation?: { form?: unknown } } | undefined;
+    return Boolean(envelope && caps?.elicitation?.form);
+  }
+
+  private async unresolvedAttempts(vendorId: number, excludeId: string) {
+    return (await this.submissions.listOpen(vendorId)).filter(
+      (attempt) =>
+        attempt.id !== excludeId && UNRESOLVED_STATES.has(attempt.state),
+    );
+  }
+
+  /*
+   * Re-reads the user's cart, address and restaurant exactly as a quote
+   * would, and refuses if the cart is no longer the one quoted.
+   */
+  private async revalidate(submission: OrderSubmission, addressId: number) {
+    const checked = await this.checkout.validateForOrder(
+      submission.vendorId,
+      addressId,
+    );
+    if (cartFingerprint(checked.cart) !== submission.cartFingerprint)
+      return undefined;
+    return checked;
+  }
+
+  async placeOrder(args: PlaceOrderArgs, ctx: ServerContext) {
+    await this.authHeaders();
+    if (!this.canElicit(ctx)) {
+      return text(
+        "Order not placed: this client cannot show ChowBot's order confirmation. Use preview_order to review the order, and place it in the Chowdeck app.",
+        true,
+      );
+    }
+    const state = ctx.mcpReq.requestState<PlacementState>();
+    return state === undefined
+      ? this.askForConfirmation(args, ctx)
+      : this.submit(args, ctx, state);
+  }
+
+  private async askForConfirmation(args: PlaceOrderArgs, ctx: ServerContext) {
+    if (!this.requestStateCodec || !this.channelQuery) {
+      return text(
+        "Order not placed: order placement is not available on this server.",
+        true,
+      );
+    }
+    const submission = await this.submissions.get(args.quote_ref);
+    if (!submission)
+      return text(
+        "Order not placed: that quote_ref does not exist for your account.",
+        true,
+      );
+    if (
+      submission.state !== "quoted" &&
+      submission.state !== "confirmation_pending"
+    ) {
+      return text(
+        "Order not placed: this quote was already used. Call get_checkout_quote again.",
+        true,
+      );
+    }
+    if (submission.quoteExpiresAt.getTime() <= Date.now()) {
+      return text(
+        "Order not placed: the quote expired. Call get_checkout_quote again and confirm the new total.",
+        true,
+      );
+    }
+
+    const checked = await this.revalidate(submission, args.address_id);
+    if (!checked)
+      return text(
+        "Order not placed: the cart changed since the quote. Call get_checkout_quote again.",
+        true,
+      );
+
+    const channel = await resolvePaymentChannel(
+      this.client,
+      await this.authHeaders(),
+      this.channelQuery,
+      args.payment_channel,
+    );
+    if (!channel) {
+      return text(
+        `Order not placed: the ${args.payment_channel} payment channel is not available right now.`,
+        true,
+      );
+    }
+
+    const unresolved = await this.unresolvedAttempts(
+      submission.vendorId,
+      submission.id,
+    );
+    const nonce = randomBytes(32).toString("base64url");
+    const issued = await this.submissions.issueConfirmation(submission.id, {
+      paymentMethodId: channel.id,
+      paymentChannelName: channel.name,
+      nonceHash: sha256(nonce),
+      ttlSeconds: REQUEST_STATE_TTL_SECONDS,
+    });
+    if (!issued) {
+      return text(
+        "Order not placed: the quote is no longer valid. Call get_checkout_quote again.",
+        true,
+      );
+    }
+
+    const { addresses } = await this.addresses.list();
+    const address = addresses.find((entry) => entry.id === args.address_id);
+    const addressLabel =
+      typeof address?.pretty_name === "string"
+        ? address.pretty_name
+        : "your selected saved address";
+    const restaurantFields = checked.restaurant as Record<string, unknown>;
+    const restaurantName =
+      typeof restaurantFields.name === "string"
+        ? restaurantFields.name
+        : `restaurant ${submission.vendorId}`;
+    const items = checked.cart.packs
+      .flatMap((pack) => pack.rows.filter((row) => row.type === "menu"))
+      .map((row) => `${row.quantity ?? 1} × ${row.name ?? "item"}`)
+      .join(", ");
+
+    const message = [
+      `Place this order at ${restaurantName}?`,
+      `Items: ${items}.`,
+      `Deliver to: ${addressLabel}.`,
+      `Total: ${submission.computedTotal} (raw Chowdeck amount: cart total plus delivery and service fees, computed by ChowBot).`,
+      `Payment: ${channel.name}. The order is created unpaid; payment is completed separately.`,
+      ...(unresolved.length > 0
+        ? [
+            `Warning: you have ${unresolved.length} earlier order attempt(s) at this restaurant that are unpaid or have an unknown outcome. Placing this order may result in more than one order. Confirm acknowledge_unresolved_attempts to continue.`,
+          ]
+        : []),
+    ].join(" ");
+
+    const requestedSchema =
+      unresolved.length > 0
+        ? z.object({
+            confirm: z.boolean(),
+            acknowledge_unresolved_attempts: z.boolean(),
+          })
+        : z.object({ confirm: z.boolean() });
+
+    return inputRequired({
+      inputRequests: {
+        confirm: inputRequired.elicit({ message, requestedSchema }),
+      },
+      requestState: await this.requestStateCodec.mint(
+        {
+          v: 1,
+          submissionId: submission.id,
+          nonce,
+          addressId: args.address_id,
+          channel: args.payment_channel,
+          acknowledgementRequired: unresolved.length > 0,
+        } satisfies PlacementState,
+        ctx,
+      ),
+    });
+  }
+
+  private async submit(
+    args: PlaceOrderArgs,
+    ctx: ServerContext,
+    state: PlacementState,
+  ) {
+    if (
+      state.submissionId !== args.quote_ref ||
+      state.addressId !== args.address_id ||
+      state.channel !== args.payment_channel
+    ) {
+      return text(
+        "Order not placed: the order details changed after confirmation was requested. Start again.",
+        true,
+      );
+    }
+    const answer = acceptedContent(
+      ctx.mcpReq.inputResponses,
+      "confirm",
+      answerSchema,
+    );
+    if (answer?.confirm !== true)
+      return text("Order not placed: it was not confirmed.");
+    if (
+      state.acknowledgementRequired &&
+      answer.acknowledge_unresolved_attempts !== true
+    ) {
+      return text(
+        "Order not placed: the earlier unresolved order attempts were not acknowledged.",
+      );
+    }
+
+    const submission = await this.submissions.get(args.quote_ref);
+    if (!submission)
+      return text(
+        "Order not placed: that quote_ref does not exist for your account.",
+        true,
+      );
+    const checked = await this.revalidate(submission, args.address_id);
+    if (!checked)
+      return text(
+        "Order not placed: the cart changed since the quote. Call get_checkout_quote again.",
+        true,
+      );
+    if (
+      !state.acknowledgementRequired &&
+      (await this.unresolvedAttempts(submission.vendorId, submission.id))
+        .length > 0
+    ) {
+      return text(
+        "Order not placed: another order attempt at this restaurant became unresolved after confirmation. Start again.",
+        true,
+      );
+    }
+
+    await this.submissions.recoverUnsent(submission.cartId);
+    const claim = await this.submissions.claim(submission.id, {
+      nonceHash: sha256(state.nonce),
+      addressId: args.address_id,
+      cartFingerprint: submission.cartFingerprint,
+    });
+    if (!claim.ok)
+      return text(`Order not placed: ${CLAIM_REFUSALS[claim.reason]}.`, true);
+
+    try {
+      await this.checkout.requestGateQuote(
+        submission.vendorId,
+        args.address_id,
+        checked.cart.id,
+        checked.vendor.sourceId,
+      );
+    } catch (error) {
+      const definite = isDefiniteRejection(error);
+      try {
+        await this.submissions.recordGateFailure(
+          submission.id,
+          definite ? "gate_rejected" : "gate_uncertain",
+        );
+      } catch (recordError) {
+        logFailure("Recording a gate failure failed:", recordError);
+      }
+      return text(
+        definite
+          ? `Order not placed: Chowdeck rejected the order check: ${describeError(error)}. No order was sent.`
+          : `Order not placed: the delivery-fee check could not be confirmed (${describeError(error)}). A fee record may exist on Chowdeck, but no order was sent.`,
+        true,
+      );
+    }
+
+    let marked: boolean;
+    try {
+      marked = await this.submissions.markOrderRequestStarted(submission.id);
+    } catch (error) {
+      logFailure("Marking an order request as started failed:", error);
+      return text(
+        "Order not placed: ChowBot could not confirm it was safe to send the order, so nothing was sent. This attempt stays locked until it can be checked with get_order_submission.",
+        true,
+      );
+    }
+    if (!marked) {
+      return text(
+        "Order not placed: this attempt was recovered or changed before sending. Nothing was sent.",
+        true,
+      );
+    }
+
+    return this.sendOrderOnce(submission, args, checked, claim.feeId);
+  }
+
+  private async sendOrderOnce(
+    submission: OrderSubmission,
+    args: PlaceOrderArgs,
+    checked: Awaited<ReturnType<CheckoutService["validateForOrder"]>>,
+    feeId: number,
+  ) {
+    const raw = checked.raw;
+    const body = {
+      source: "web",
+      vendor_id: submission.vendorId,
+      cart_id: submission.cartId,
+      checkout_from_cart: true,
+      class:
+        checked.vendor.fields.self_delivery === true
+          ? "vendor_delivery"
+          : "delivery",
+      fee_id: feeId,
+      address_id: args.address_id,
+      payment_method_id: submission.paymentMethodId,
+      split_payment_with_wallet: false,
+      requires_delivery_pin: true,
+      bag_quantity: raw.bag_quantity,
+      promo_codes: [],
+      currency: CHECKOUT_CURRENCY,
+      country_code: CHECKOUT_COUNTRY_CODE,
+      customer_vendor_note: raw.customer_vendor_note ?? null,
+      customer_delivery_note: raw.customer_delivery_note ?? null,
+      gift_recipient: null,
+    };
+
+    let response: unknown;
+    try {
+      response = await this.client.request(ORDER_PATH, {
+        method: "POST",
+        headers: await this.authHeaders(),
+        body,
+      });
+    } catch (error) {
+      if (isDefiniteOrderRejection(error)) {
+        await this.persist(() =>
+          this.submissions.recordOutcome(submission.id, { kind: "rejected" }),
+        );
+        return text(
+          `Order not placed: Chowdeck rejected the order: ${error.message}. No order was created.`,
+          true,
+        );
+      }
+      return this.unknownOutcome(submission, describeError(error));
+    }
+
+    const data =
+      isRecord(response) &&
+      response.status === "success" &&
+      isRecord(response.data)
+        ? response.data
+        : undefined;
+    if (!data || !isPositiveId(data.id)) {
+      return this.unknownOutcome(
+        submission,
+        `POST ${ORDER_PATH} returned an unexpected response`,
+      );
+    }
+    const orderId = data.id;
+
+    const saved = await this.persist(() =>
+      this.submissions.recordOutcome(submission.id, {
+        kind: "created",
+        chowdeckOrderId: orderId,
+      }),
+    );
+    const result = {
+      order_id: orderId,
+      quote_ref: submission.id,
+      restaurant_id: submission.vendorId,
+      payment_channel: submission.paymentChannelName,
+      computed_total: submission.computedTotal,
+      status:
+        data.made_payment === true
+          ? "created; Chowdeck reports it paid"
+          : "created; awaiting payment",
+      next_step:
+        "ChowBot does not start payments yet. Check this order with get_order_submission; payment status is confirmed only from Chowdeck's order record.",
+    };
+    if (!saved) {
+      return json({
+        ...result,
+        warning: `ChowBot could not save this order. Keep order id ${orderId} and run resolve_order_submission with outcome link_order and order_id ${orderId}. Do not place the order again.`,
+      });
+    }
+    return json(result);
+  }
+
+  private async unknownOutcome(submission: OrderSubmission, detail: string) {
+    await this.persist(() =>
+      this.submissions.recordOutcome(submission.id, { kind: "unknown" }),
+    );
+    return text(
+      `The order's outcome is unknown (${detail}). An order may or may not have been created on Chowdeck. Do not place it again. Check the Chowdeck app; if you find the order, link it with resolve_order_submission (outcome link_order).`,
+      true,
+    );
+  }
+
+  /*
+   * R2: retries only a local database write. Returns false when every
+   * attempt failed, leaving the attempt locked.
+   */
+  private async persist(write: () => Promise<boolean>) {
+    for (let attempt = 0; attempt < PERSIST_ATTEMPTS; attempt++) {
+      try {
+        return await write();
+      } catch (error) {
+        logFailure("Saving an order outcome failed:", error);
+        const delay = PERSIST_BACKOFF_MS[attempt];
+        if (delay !== undefined) await Bun.sleep(delay);
+      }
+    }
+    return false;
+  }
+
+  /*
+   * Order evidence from Chowdeck for a known order id: paid only when the
+   * payment status is success or the timeline shows MADE_PAYMENT.
+   */
+  private async paymentEvidence(
+    orderId: number,
+  ): Promise<{ paid: boolean; evidence: OrderEvidence }> {
+    const { order } = await this.orders.getOrder(String(orderId));
+    const evidence = {
+      orderStatus: typeof order.status === "string" ? order.status : null,
+      paymentStatus:
+        typeof order.payment?.status === "string" ? order.payment.status : null,
+    };
+    if (evidence.paymentStatus === "success") return { paid: true, evidence };
+    const { timeline } = await this.orders.getOrderTimeline(String(orderId));
+    return {
+      paid: timeline.some((entry) => entry.action === "MADE_PAYMENT"),
+      evidence,
+    };
+  }
+
+  /*
+   * R1 and R4 for one restaurant: releases provably unsent claims after
+   * the grace period, records payment from Chowdeck evidence, and reports
+   * every attempt that still holds a lock. Unknown attempts are never
+   * released here.
+   */
+  async getStatus(restaurantId: number) {
+    await this.authHeaders();
+    const before = await this.submissions.listOpen(restaurantId);
+    for (const cartId of new Set(
+      before
+        .filter((a) => a.state === "submitting" && !a.orderRequestStartedAt)
+        .map((a) => a.cartId),
+    )) {
+      await this.submissions.recoverUnsent(cartId);
+    }
+
+    const checks = new Map<string, string>();
+    for (const attempt of before.filter(
+      (a) => a.state === "created" && a.chowdeckOrderId,
+    )) {
+      try {
+        const { paid, evidence } = await this.paymentEvidence(
+          attempt.chowdeckOrderId!,
+        );
+        if (paid) {
+          await this.submissions.recordPaid(attempt.id, evidence);
+          checks.set(attempt.id, "payment confirmed by Chowdeck");
+        } else {
+          checks.set(
+            attempt.id,
+            `not paid yet (Chowdeck payment status: ${evidence.paymentStatus ?? "unknown"})`,
+          );
+        }
+      } catch (error) {
+        checks.set(
+          attempt.id,
+          `payment could not be checked (${describeError(error)})`,
+        );
+      }
+    }
+
+    const open = await this.submissions.listOpen(restaurantId);
+    return json({
+      restaurant_id: restaurantId,
+      attempts: open.map((attempt) => ({
+        quote_ref: attempt.id,
+        state: attempt.state,
+        ...(attempt.chowdeckOrderId && { order_id: attempt.chowdeckOrderId }),
+        claimed_at: attempt.claimedAt?.toISOString() ?? null,
+        order_request_started: attempt.orderRequestStartedAt !== null,
+        ...(checks.has(attempt.id) && {
+          payment_check: checks.get(attempt.id),
+        }),
+        guidance: guidanceFor(attempt),
+      })),
+    });
+  }
+
+  /*
+   * R3: links an order the user found in Chowdeck to an attempt whose order
+   * request was sent but whose outcome is unknown. The order must be
+   * readable with the user's token, belong to the same restaurant and not
+   * predate the claim. If it cannot be verified, the lock is kept.
+   */
+  async linkOrder(quoteRef: string, orderId: number) {
+    await this.authHeaders();
+    const attempt = await this.submissions.get(quoteRef);
+    if (!attempt)
+      return text(
+        "Not linked: that quote_ref does not exist for your account.",
+        true,
+      );
+    if (!(
+      attempt.state === "unknown" ||
+      (attempt.state === "submitting" && attempt.orderRequestStartedAt)
+    )) {
+      return text(
+        "Not linked: only an attempt whose order request was sent and whose outcome is unknown can be linked.",
+        true,
+      );
+    }
+
+    let order: Record<string, unknown>;
+    try {
+      ({ order } = await this.orders.getOrder(String(orderId)));
+    } catch (error) {
+      return text(
+        `Not linked: Chowdeck could not confirm that order (${describeError(error)}). The attempt stays locked.`,
+        true,
+      );
+    }
+    if (order.vendor_id !== attempt.vendorId) {
+      return text(
+        "Not linked: that order is from a different restaurant. The attempt stays locked.",
+        true,
+      );
+    }
+    const createdAt =
+      typeof order.created_at === "string"
+        ? Date.parse(order.created_at)
+        : Number.NaN;
+    if (
+      !attempt.claimedAt ||
+      Number.isNaN(createdAt) ||
+      createdAt < attempt.claimedAt.getTime() - LINK_CLOCK_TOLERANCE_MS
+    ) {
+      return text(
+        "Not linked: that order could not be shown to come after this attempt. The attempt stays locked.",
+        true,
+      );
+    }
+
+    const payment = isRecord(order.payment) ? order.payment : undefined;
+    const outcome = await this.submissions.linkOrder(attempt.id, orderId, {
+      orderStatus: typeof order.status === "string" ? order.status : null,
+      paymentStatus:
+        typeof payment?.status === "string" ? payment.status : null,
+    });
+    if (outcome === "order_already_linked") {
+      return text(
+        "Not linked: that order is already linked to another attempt. The attempt stays locked.",
+        true,
+      );
+    }
+    if (outcome !== "linked")
+      return text("Not linked: the attempt changed in the meantime.", true);
+    return json({
+      quote_ref: attempt.id,
+      order_id: orderId,
+      state: "created",
+      lock: "kept until payment is confirmed and the cart changes",
+    });
+  }
+}
+
+const guidanceFor = (attempt: OrderSubmission) => {
+  switch (attempt.state) {
+    case "submitting":
+      return attempt.orderRequestStartedAt
+        ? "The order request was sent but its outcome was not recorded. Check the Chowdeck app and link the order if you find it."
+        : "The order request was never sent; this attempt is released automatically after two minutes.";
+    case "unknown":
+      return "An order may or may not exist. Check the Chowdeck app and link the order if you find it. The cart stays locked.";
+    case "created":
+      return "The order exists and is awaiting payment. The cart stays locked.";
+    case "paid":
+      return "Paid. The cart stays locked until it changes.";
+    default:
+      return "";
+  }
+};
+
+export default OrderPlacementService;

@@ -18,6 +18,7 @@ import { callTool, rpc } from "../../helpers/mcp";
 import { createServer } from "../../../mcp/server";
 import { ChowdeckClient } from "../../../lib/client";
 import { registerCheckoutTools } from "../../../features/checkout/tools";
+import type { NewQuote, UserOrderSubmissions } from "../../../lib/order-submissions";
 
 type ReceivedRequest = {
   method: string;
@@ -80,12 +81,19 @@ const sessionWith = async (fields: { token?: string; guestId?: string }) => {
 const signedIn = () => sessionWith({ token: "secret-token-alice" });
 
 const serverFor =
-  (session?: UserSession, timeoutMs = 1000, baseUrl?: string) => () => {
+  (
+    session?: UserSession,
+    timeoutMs = 1000,
+    baseUrl?: string,
+    submissions?: UserOrderSubmissions,
+  ) =>
+  () => {
     const server = new McpServer({ name: "ChowBot", version: "test" });
     registerCheckoutTools(
       server,
       session,
       new ChowdeckClient({ baseUrl: baseUrl ?? upstream.url.origin, timeoutMs }),
+      submissions,
     );
     return server;
   };
@@ -869,5 +877,118 @@ describe("preview_order (dry run)", () => {
     expect(received.map((r) => r.method)).not.toContain("DELETE");
     expect(quotePosts()).toHaveLength(0);
     expectOnlyReads();
+  });
+});
+
+describe("get_checkout_quote orderable quotes", () => {
+  /*
+   * A test double for the per-user store: it records what would be saved,
+   * or fails like an unavailable database.
+   */
+  const recordingStore = (failWith?: Error) => {
+    const saved: NewQuote[] = [];
+    const store = {
+      createQuote: async (quote: NewQuote) => {
+        if (failWith) throw failWith;
+        saved.push(quote);
+        return { id: "0f6c1d2e-3b4a-4c5d-8e9f-a0b1c2d3e4f5", quoteExpiresAt: new Date("2026-10-21T10:05:00Z") };
+      },
+    } as unknown as UserOrderSubmissions;
+    return { store, saved };
+  };
+
+  const quoteWith = async (store?: UserOrderSubmissions) =>
+    callTool(serverFor(await signedIn(), 1000, undefined, store), "get_checkout_quote", {
+      restaurant_id: 102555,
+      address_id: ADDRESS_ID,
+    });
+
+  const orderableCart = (overrides: Record<string, unknown> = {}) => cartResponse({ bag_quantity: 0, ...overrides });
+
+  test("issues a quote_ref only after saving every submission input", async () => {
+    scriptCheckout({ cart: orderableCart() });
+    const { store, saved } = recordingStore();
+
+    const parsed = JSON.parse(textOf(await quoteWith(store)));
+
+    expect(parsed.orderable).toBe(true);
+    expect(parsed.quote_ref).toBe("0f6c1d2e-3b4a-4c5d-8e9f-a0b1c2d3e4f5");
+    expect(parsed.quote_valid_until).toBe("2026-10-21T10:05:00.000Z");
+    expect(parsed.not_orderable_reasons).toBeUndefined();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toEqual({
+      vendorId: 102555,
+      cartId: 30742921,
+      feeId: FEE_ID,
+      addressId: ADDRESS_ID,
+      cartFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      computedTotal: 554000,
+    });
+  });
+
+  test("still never returns the fee id or address id with a quote_ref", async () => {
+    scriptCheckout({ cart: orderableCart() });
+
+    const text = textOf(await quoteWith(recordingStore().store));
+
+    expect(text).not.toContain(String(FEE_ID));
+    expect(text).not.toContain(String(ADDRESS_ID));
+    expect(text).not.toContain(String(VENDOR_ADDRESS_ID));
+  });
+
+  test("stays informational without a durable store (stdio)", async () => {
+    scriptCheckout({ cart: orderableCart() });
+
+    const parsed = JSON.parse(textOf(await quoteWith()));
+
+    expect(parsed.orderable).toBe(false);
+    expect(parsed.quote_ref).toBeUndefined();
+    expect(parsed.not_orderable_reasons).toEqual(["ordering is only available on the hosted ChowBot server"]);
+    expect(parsed.computed_total.amount).toBe(554000);
+  });
+
+  test.each([
+    ["no confident total", { quote: quoteResponse({ small_order_amount: 15000 }) }, "no total could be computed confidently"],
+    ["no fee record", { quote: quoteResponse({ id: undefined }) }, "Chowdeck returned no usable delivery-fee record"],
+    ["no bag_quantity on the cart", { cart: cartResponse() }, "the cart has no numeric bag_quantity"],
+    ["a non-NGN restaurant", { vendor: vendorResponse({ currency: "GHS" }) }, "only NGN orders are supported"],
+  ])("is not orderable with %s", async (_, handlers, reason) => {
+    scriptCheckout({ cart: orderableCart(), ...handlers });
+    const { store, saved } = recordingStore();
+
+    const parsed = JSON.parse(textOf(await quoteWith(store)));
+
+    expect(parsed.orderable).toBe(false);
+    expect(parsed.quote_ref).toBeUndefined();
+    expect(parsed.not_orderable_reasons).toContain(reason);
+    expect(saved).toHaveLength(0);
+  });
+
+  test("degrades to informational when saving fails, without retrying the quote", async () => {
+    scriptCheckout({ cart: orderableCart() });
+
+    const result = await quoteWith(recordingStore(new Error("connection refused")).store);
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.orderable).toBe(false);
+    expect(parsed.quote_ref).toBeUndefined();
+    expect(parsed.not_orderable_reasons).toEqual(["the quote could not be saved for ordering"]);
+    expect(parsed.quote.final_delivery_amount).toBe(70000);
+    expect(quotePosts()).toHaveLength(1);
+    expect(textOf(result)).not.toContain("connection refused");
+  });
+
+  test("never saves anything when the quote itself is rejected", async () => {
+    scriptCheckout({
+      cart: orderableCart(),
+      quote: () => Response.json({ status: "failed", message: "Minimum order not met" }, { status: 400 }),
+    });
+    const { store, saved } = recordingStore();
+
+    const result = await quoteWith(store);
+
+    expect(result.isError).toBe(true);
+    expect(saved).toHaveLength(0);
   });
 });

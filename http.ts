@@ -11,6 +11,7 @@ import { migrate } from "./lib/postgres/migrations";
 import { createPostgresStores } from "./lib/postgres";
 import { MCP_SERVER_URL, OAUTH_ISSUER_URL } from "./constants/oauth";
 import { createKeyring, parseEncryptionKey } from "./lib/encryption";
+import { createChowbotRequestStateCodec } from "./lib/request-state";
 
 const EXPIRED_RECORD_SWEEP_MS = 60 * 60 * 1000;
 
@@ -41,6 +42,7 @@ const start = async () => {
     serverUrl: MCP_SERVER_URL,
     issuerUrl: OAUTH_ISSUER_URL,
     ...createPostgresStores(sql, keyring),
+    requestStateCodec: createChowbotRequestStateCodec(keyring.requestStateKey),
   });
 
   app.listen(Number(PORT), () => {

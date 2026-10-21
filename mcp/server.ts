@@ -1,13 +1,16 @@
-import { McpServer } from "@modelcontextprotocol/server";
+import { McpServer, type RequestStateCodec } from "@modelcontextprotocol/server";
 
 import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
 
 import type { UserSession } from "../lib/session";
+import type { UserOrderSubmissions } from "../lib/order-submissions";
 import { registerAuthTools } from "../features/auth/tools";
 import { registerMenuTools } from "../features/menus/tools";
 import { registerCartTools } from "../features/carts/tools";
 import { registerCheckoutTools } from "../features/checkout/tools";
 import { registerOrderTools } from "../features/orders/tools";
+import { registerOrderPlacementTools } from "../features/order-placement/tools";
+import type { PaymentChannelQuery } from "../features/order-placement/channels";
 import { registerAddressTools } from "../features/addresses/tools";
 import { registerArithmeticTool } from "../features/arithmetic/tools";
 import { registerRestaurantTools } from "../features/restaurants/tools";
@@ -33,25 +36,45 @@ const SERVER_ICON = {
 export type ServerOptions = {
   session?: UserSession;
   enableChatLogin?: boolean;
+  submissions?: UserOrderSubmissions;
+  requestStateCodec?: RequestStateCodec;
+  paymentChannelQuery?: PaymentChannelQuery;
 };
 
+/*
+ * With a requestStateCodec (hosted HTTP), every multi-round-trip
+ * requestState is verified before any handler runs; state that fails the
+ * HMAC, expiry or user binding is rejected by the SDK.
+ */
 export const createServer = ({
   session,
   enableChatLogin = false,
+  submissions,
+  requestStateCodec,
+  paymentChannelQuery,
 }: ServerOptions = {}) => {
-  const server = new McpServer({
-    name: "ChowBot",
-    version: "1.0.0",
-    icons: [SERVER_ICON],
-  });
+  const server = new McpServer(
+    {
+      name: "ChowBot",
+      version: "1.0.0",
+      icons: [SERVER_ICON],
+    },
+    requestStateCodec && { requestState: { verify: requestStateCodec.verify } },
+  );
 
   registerArithmeticTool(server);
   registerRestaurantTools(server, session);
   registerMenuTools(server, session);
   registerAddressTools(server, session);
   registerCartTools(server, session);
-  registerCheckoutTools(server, session);
+  registerCheckoutTools(server, session, undefined, submissions);
   registerOrderTools(server, session);
+  registerOrderPlacementTools(server, {
+    session,
+    submissions,
+    requestStateCodec,
+    paymentChannelQuery,
+  });
 
   if (enableChatLogin) registerAuthTools(server, session);
 

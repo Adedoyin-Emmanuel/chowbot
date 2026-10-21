@@ -5,6 +5,7 @@ import {
   check,
   index,
   bigint,
+  integer,
   pgTable,
   timestamp,
   customType,
@@ -175,5 +176,129 @@ export const oauthRefreshTokens = pgTable(
     uniqueIndex("oauth_refresh_tokens_one_active_per_family_idx")
       .on(table.familyId)
       .where(sql`${table.rotatedAt} IS NULL`),
+  ],
+);
+
+export const ORDER_SUBMISSION_STATES = [
+  "quoted",
+  "confirmation_pending",
+  "submitting",
+  "created",
+  "unknown",
+  "failed",
+  "paid",
+  "released",
+] as const;
+
+/*
+ * States that hold a cart's submission lock. A paid order keeps it until a
+ * later claim sees the cart has changed.
+ */
+export const LOCKING_SUBMISSION_STATES = ["submitting", "created", "unknown", "paid"] as const;
+
+const inList = (values: readonly string[]) =>
+  sql.raw(values.map((value) => `'${value}'`).join(", "));
+
+/*
+ * One row per orderable checkout quote and, later, its submission. fee_id is
+ * internal and never returned; the address is stored only as an HMAC; the
+ * confirmation nonce only as a hash. The partial unique index allows at most
+ * one lock-holding submission per user and cart, across every server
+ * instance.
+ */
+export const orderSubmissions = pgTable(
+  "order_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    vendorId: integer("vendor_id").notNull(),
+    cartId: bigint("cart_id", { mode: "number" }).notNull(),
+    feeId: bigint("fee_id", { mode: "number" }).notNull(),
+    addressBinding: text("address_binding").notNull(),
+    cartFingerprint: text("cart_fingerprint").notNull(),
+    computedTotal: bigint("computed_total", { mode: "number" }).notNull(),
+    quoteExpiresAt: timestamp("quote_expires_at", { withTimezone: true }).notNull(),
+    paymentMethodId: bigint("payment_method_id", { mode: "number" }),
+    paymentChannelName: text("payment_channel_name"),
+    confirmationNonceHash: text("confirmation_nonce_hash"),
+    confirmationExpiresAt: timestamp("confirmation_expires_at", { withTimezone: true }),
+    confirmationConsumedAt: timestamp("confirmation_consumed_at", { withTimezone: true }),
+    state: text("state", { enum: ORDER_SUBMISSION_STATES }).notNull(),
+    failureReason: text("failure_reason", {
+      enum: ["gate_rejected", "gate_uncertain", "order_rejected", "not_sent"],
+    }),
+    resolution: text("resolution", {
+      enum: ["paid_verified", "linked_user_supplied_order"],
+    }),
+    orderRequestStartedAt: timestamp("order_request_started_at", { withTimezone: true }),
+    evidenceOrderStatus: text("evidence_order_status"),
+    evidencePaymentStatus: text("evidence_payment_status"),
+    evidenceCheckedAt: timestamp("evidence_checked_at", { withTimezone: true }),
+    chowdeckOrderId: bigint("chowdeck_order_id", { mode: "number" }),
+    lockReleasedAt: timestamp("lock_released_at", { withTimezone: true }),
+    lockReleaseReason: text("lock_release_reason", { enum: ["cart_changed"] }),
+    paymentStartedAt: timestamp("payment_started_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (table) => [
+    check("order_submissions_state_check", sql`${table.state} IN (${inList(ORDER_SUBMISSION_STATES)})`),
+    check(
+      "order_submissions_ids_check",
+      sql`${table.vendorId} > 0 AND ${table.cartId} > 0 AND ${table.feeId} > 0`,
+    ),
+    check("order_submissions_computed_total_check", sql`${table.computedTotal} > 0`),
+    check(
+      "order_submissions_failure_reason_check",
+      sql`(${table.state} = 'failed') = (${table.failureReason} IS NOT NULL) AND (${table.failureReason} IS NULL OR ${table.failureReason} IN ('gate_rejected', 'gate_uncertain', 'order_rejected', 'not_sent'))`,
+    ),
+    check(
+      "order_submissions_resolution_check",
+      sql`${table.resolution} IS NULL OR ${table.resolution} IN ('paid_verified', 'linked_user_supplied_order')`,
+    ),
+    check(
+      "order_submissions_lock_release_check",
+      sql`(${table.lockReleasedAt} IS NULL) = (${table.lockReleaseReason} IS NULL) AND (${table.lockReleaseReason} IS NULL OR ${table.lockReleaseReason} IN ('cart_changed'))`,
+    ),
+    check(
+      "order_submissions_confirmation_pending_check",
+      sql`${table.state} <> 'confirmation_pending' OR (${table.paymentMethodId} IS NOT NULL AND ${table.confirmationNonceHash} IS NOT NULL AND ${table.confirmationExpiresAt} IS NOT NULL)`,
+    ),
+    check(
+      "order_submissions_confirmation_expiry_check",
+      sql`${table.confirmationExpiresAt} IS NULL OR ${table.confirmationExpiresAt} <= ${table.quoteExpiresAt}`,
+    ),
+    check(
+      "order_submissions_consumed_check",
+      sql`${table.state} NOT IN (${inList(LOCKING_SUBMISSION_STATES)}) OR ${table.confirmationConsumedAt} IS NOT NULL`,
+    ),
+    check(
+      "order_submissions_order_id_check",
+      sql`${table.state} NOT IN ('created', 'paid') OR ${table.chowdeckOrderId} IS NOT NULL`,
+    ),
+    /*
+     * The order-request marker: committed before an order request may be
+     * sent. A row without it provably never had a request sent; rows that
+     * report a request outcome must have it; gate and never-sent failures
+     * must not.
+     */
+    check(
+      "order_submissions_marker_check",
+      sql`(${table.state} NOT IN ('quoted', 'confirmation_pending') OR ${table.orderRequestStartedAt} IS NULL)
+        AND (${table.state} NOT IN ('created', 'unknown', 'paid') OR ${table.orderRequestStartedAt} IS NOT NULL)
+        AND (${table.failureReason} IS NULL OR ${table.failureReason} NOT IN ('gate_rejected', 'gate_uncertain', 'not_sent') OR ${table.orderRequestStartedAt} IS NULL)
+        AND (${table.failureReason} IS NULL OR ${table.failureReason} <> 'order_rejected' OR ${table.orderRequestStartedAt} IS NOT NULL)`,
+    ),
+    uniqueIndex("order_submissions_one_lock_per_cart_idx")
+      .on(table.userId, table.cartId)
+      .where(sql`${table.lockReleasedAt} IS NULL AND ${table.state} IN (${inList(LOCKING_SUBMISSION_STATES)})`),
+    index("order_submissions_user_id_idx").on(table.userId),
+    index("order_submissions_quote_expires_at_idx").on(table.quoteExpiresAt),
+    uniqueIndex("order_submissions_chowdeck_order_id_idx")
+      .on(table.chowdeckOrderId)
+      .where(sql`${table.chowdeckOrderId} IS NOT NULL`),
   ],
 );
