@@ -203,7 +203,8 @@ ORDER BY created_at;
    id; report that, as it decides how payment must work. Whether the user can find and pay the
    order in the Chowdeck app instead is **unknown**.
 2. `get_order_submission` checks Chowdeck for payment and records it only on authoritative
-   evidence (payment status `success` or a `MADE_PAYMENT` timeline step).
+   evidence (the order's payment status `success`; a `MADE_PAYMENT` timeline step is not
+   evidence, as Chowdeck lists it on unpaid orders).
 3. If the user will not pay: `abandon <attempt-id> --reason user_reported_abandoned`. If the
    order cannot be read from Chowdeck: `--reason order_not_retrievable` (accepted only when
    the read-only lookup actually fails). If Chowdeck shows it paid, `abandon` refuses and

@@ -208,8 +208,10 @@ class OrderService {
 
 /*
  * Payment evidence from Chowdeck for a known order id: paid only when the
- * payment status is success or the timeline shows MADE_PAYMENT. Lookup
- * failures are thrown, never read as unpaid.
+ * order's payment status is success. The timeline is not evidence: Chowdeck lists a MADE_PAYMENT step on orders that
+ * were never paid (observed 2026-10-22, orders 43584305 and 43591071, whose
+ * status was "abandoned" seconds after creation while awaiting payment).
+ * Lookup failures are thrown, never read as unpaid.
  */
 export const readPaymentEvidence = async (orders: OrderService, orderId: number) => {
   const { order } = await orders.getOrder(String(orderId));
@@ -218,12 +220,7 @@ export const readPaymentEvidence = async (orders: OrderService, orderId: number)
     paymentStatus:
       typeof order.payment?.status === "string" ? order.payment.status : null,
   };
-  if (evidence.paymentStatus === "success") return { paid: true, evidence };
-  const { timeline } = await orders.getOrderTimeline(String(orderId));
-  return {
-    paid: timeline.some((entry) => entry.action === "MADE_PAYMENT"),
-    evidence,
-  };
+  return { paid: evidence.paymentStatus === "success", evidence };
 };
 
 export default OrderService;

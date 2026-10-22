@@ -283,7 +283,6 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
         `GET /customer/order/${ORDER_ID}`,
-        `GET /customer/order/${ORDER_ID}/timeline`,
         `POST ${START_PATH}`,
       ]);
       const [start] = posts();
@@ -347,6 +346,27 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
     });
   });
 
+  /*
+   * Observed 2026-10-22: Chowdeck reports a freshly created, unpaid order as
+   * "abandoned" and lists a MADE_PAYMENT timeline step on it. Neither means
+   * it was paid; such an order must still get its payment link.
+   */
+  test("starts the payment for an unpaid order Chowdeck reports as abandoned with a MADE_PAYMENT step", async () => {
+    scriptUnpaidOrder();
+    route(`GET /customer/order/${ORDER_ID}`, orderDetail({ status: "abandoned", payment: { status: "pending" } }));
+    route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED", "MADE_PAYMENT"]));
+    const baseUrl = await startApp();
+    const quoteRef = await seedCreated();
+
+    const result = startedResult(await call({ baseUrl, quoteRef }));
+
+    expect(result.payment_link).toBe(PAYMENT_LINK);
+    expect(posts()).toHaveLength(1);
+    const after = await row(quoteRef);
+    expect(after.state).toBe("created");
+    expect(after.resolution).toBeNull();
+  });
+
   describe("refusals before anything is sent", () => {
     test("refuses another user's attempt", async () => {
       scriptUnpaidOrder();
@@ -388,7 +408,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
     test("records the payment and starts nothing when Chowdeck shows the order paid", async () => {
       scriptUnpaidOrder();
-      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED", "MADE_PAYMENT"]));
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: { status: "success" } }));
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 

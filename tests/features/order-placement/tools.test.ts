@@ -855,7 +855,8 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
     test.each([
       ["the order detail shows payment success", orderDetail({ payment: { status: "success" } }), timeline([]), "paid"],
-      ["the timeline shows MADE_PAYMENT", orderDetail(), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), "paid"],
+      ["the timeline shows MADE_PAYMENT (not evidence)", orderDetail(), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), "created"],
+      ["an abandoned, unpaid order's timeline shows MADE_PAYMENT", orderDetail({ status: "abandoned", payment: { status: "pending" } }), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), "created"],
       ["there is no payment evidence", orderDetail(), timeline(["ORDER_CREATED"]), "created"],
     ])("records payment only when %s", async (_, detail, steps, expected) => {
       scriptHappyPath();
@@ -911,36 +912,34 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       ["omits payment", orderDetail({ payment: undefined })],
       ["sends a null payment", orderDetail({ payment: null })],
       ["sends a payment without a status", orderDetail({ payment: { amount: 554000 } })],
-    ])("treats an order that %s as unpaid unless the timeline shows MADE_PAYMENT", async (_, detail) => {
+    ])("treats an order that %s as unpaid, even when the timeline shows MADE_PAYMENT", async (_, detail) => {
       scriptHappyPath();
       const baseUrl = await startApp();
       const { quoteRef } = await placeOrder(baseUrl);
       route(`GET /customer/order/${ORDER_ID}`, detail);
-      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED"]));
+      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED", "MADE_PAYMENT"]));
 
       const unpaid = await status(baseUrl);
 
       expect(JSON.parse(textOf(unpaid)).attempts[0].payment_check).toBe("not paid yet (Chowdeck payment status: unknown)");
-      expect((await row(quoteRef)).state).toBe("created");
-
-      route(`GET /customer/order/${ORDER_ID}/timeline`, timeline(["ORDER_CREATED", "MADE_PAYMENT"]));
-      await status(baseUrl);
-
-      const paid = await row(quoteRef);
-      expect(paid.state).toBe("paid");
-      expect(paid.evidence_payment_status).toBeNull();
+      const attempt = await row(quoteRef);
+      expect(attempt.state).toBe("created");
+      expect(attempt.resolution).toBeNull();
+      expect(attempt.lock_released_at).toBeNull();
     });
 
-    test("keeps the order created when the payment status is missing and the timeline cannot be read", async () => {
+    test("does not read the timeline for payment evidence", async () => {
       scriptHappyPath();
       const baseUrl = await startApp();
       const { quoteRef } = await placeOrder(baseUrl);
       route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: undefined }));
       route(`GET /customer/order/${ORDER_ID}/timeline`, () => Response.json({ message: "Order not found" }, { status: 404 }));
+      received = [];
 
       const body = await status(baseUrl);
 
-      expect(JSON.parse(textOf(body)).attempts[0].payment_check).toContain("payment could not be checked");
+      expect(JSON.parse(textOf(body)).attempts[0].payment_check).toBe("not paid yet (Chowdeck payment status: unknown)");
+      expect(received.some((r) => r.path.endsWith("/timeline"))).toBe(false);
       expect((await row(quoteRef)).state).toBe("created");
     });
 
@@ -1123,7 +1122,6 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
     test.each([
       ["the payment status is success", orderDetail({ payment: { status: "success" } }), timeline([]), "success"],
-      ["the timeline shows MADE_PAYMENT", orderDetail({ payment: undefined }), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), null],
     ])("records a payment found after abandonment when %s, changing nothing else", async (_, detail, steps, paymentStatus) => {
       scriptHappyPath();
       const baseUrl = await startApp();
@@ -1173,9 +1171,9 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
     test.each([
       ["Chowdeck shows it unpaid", orderDetail(), timeline(["ORDER_CREATED"]), "not paid yet (Chowdeck payment status: pending)"],
+      ["only the timeline shows MADE_PAYMENT", orderDetail({ payment: undefined }), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), "not paid yet (Chowdeck payment status: unknown)"],
       ["the order lookup returns 404", () => Response.json({ message: "Order not found" }, { status: 404 }), timeline([]), "payment could not be checked"],
       ["the order lookup fails upstream", () => Response.json({ message: "Server Error" }, { status: 500 }), timeline([]), "payment could not be checked"],
-      ["the timeline cannot be read", orderDetail({ payment: undefined }), () => Response.json({ message: "nope" }, { status: 404 }), "payment could not be checked"],
     ])("records nothing and keeps the uncertainty when %s", async (_, detail, steps, check) => {
       scriptHappyPath();
       const baseUrl = await startApp();

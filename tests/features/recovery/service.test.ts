@@ -192,7 +192,6 @@ describePostgres("operator recovery (PostgreSQL)", () => {
   describe("the read-only Chowdeck lookup", () => {
     test.each([
       ["the payment status is success", (id: number) => orderDetail(id, { payment: { status: "success" } }), timeline([])],
-      ["the timeline shows MADE_PAYMENT", (id: number) => orderDetail(id), timeline(["ORDER_CREATED", "MADE_PAYMENT"])],
     ])("refuses the release and records the payment when %s", async (_, detail, steps) => {
       const attempt = await seed("created");
       route(`GET /customer/order/${attempt.chowdeck_order_id}`, detail(attempt.chowdeck_order_id!));
@@ -206,6 +205,19 @@ describePostgres("operator recovery (PostgreSQL)", () => {
       expect(after.resolution).toBe("paid_verified");
       expect(after.lock_released_at).toBeNull();
       expect(await audits(attempt.id)).toHaveLength(0);
+    });
+
+    test("does not count a MADE_PAYMENT timeline step as payment: Chowdeck lists it on unpaid, abandoned orders", async () => {
+      const attempt = await seed("created");
+      route(`GET /customer/order/${attempt.chowdeck_order_id}`, orderDetail(attempt.chowdeck_order_id!, { status: "abandoned", payment: { status: "pending" } }));
+      route(`GET /customer/order/${attempt.chowdeck_order_id}/timeline`, timeline(["ORDER_CREATED", "MADE_PAYMENT"]));
+
+      const outcome = await release(attempt.id);
+
+      expect(outcome).toMatchObject({ released: true, lookup: { outcome: "unpaid" } });
+      const after = await row(attempt.id);
+      expect(after.state).toBe("created");
+      expect(after.resolution).toBeNull();
     });
 
     test.each([
