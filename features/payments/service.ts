@@ -1,9 +1,4 @@
-import {
-  inputRequired,
-  type ServerContext,
-  type CallToolResult,
-  type RequestStateCodec,
-} from "@modelcontextprotocol/server";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 
 import type {
   OrderSubmission,
@@ -52,14 +47,22 @@ const isHttpsUrl = (value: unknown): value is string => {
   }
 };
 
+/*
+ * The payment link is shown to the user only if it is an https URL without
+ * embedded credentials; anything else is an unexpected response.
+ */
+const isPaymentLink = (value: unknown): value is string => {
+  if (!isHttpsUrl(value)) return false;
+  const url = new URL(value);
+  return !url.username && !url.password;
+};
+
 export const createPaymentStartConfig = (origin: string = CHOWDECK_WEBSITE_ORIGIN): PaymentStartConfig => {
   if (!isHttpsUrl(origin) || new URL(origin).origin !== origin) {
     throw new Error("The payment-start origin must be an https origin such as https://chowdeck.com");
   }
   return { origin };
 };
-
-type PaymentState = { v: 1; purpose: "start_payment"; submissionId: string };
 
 export type StartPaymentArgs = { quote_ref: string };
 
@@ -105,11 +108,11 @@ const PAYMENT_START_GUIDANCE: Record<PaymentStartState | "in_flight", string> =
 
 /*
  * The only code path that sends POST /customer/payment/start/v2. For one
- * created, unpaid order it checks that the client can show a URL, confirms
- * with Chowdeck that the order is unpaid, commits the payment-start marker,
- * and only then sends the request, exactly once. The payment link is handed
- * to the client only through a URL-mode elicitation: it never appears in a
- * tool result, the database or the logs.
+ * created, unpaid order it confirms with Chowdeck that the order is unpaid,
+ * commits the payment-start marker, and only then sends the request, exactly
+ * once. The payment link is returned in the tool result, for every client,
+ * only after a successful response with a valid https link; it never appears
+ * in the database or the logs.
  */
 class PaymentStartService {
   private readonly orders: OrderService;
@@ -117,7 +120,6 @@ class PaymentStartService {
   constructor(
     private readonly session: UserSession,
     private readonly submissions: UserOrderSubmissions,
-    private readonly requestStateCodec: RequestStateCodec,
     private readonly config: PaymentStartConfig,
     private readonly client = new ChowdeckClient(),
   ) {
@@ -131,27 +133,12 @@ class PaymentStartService {
   }
 
   /*
-   * The SDK refuses a URL elicitation for a client without the url
-   * capability only after the handler returns, so this check must come
-   * before anything is started upstream.
+   * The link is never offered through a URL elicitation: a declared
+   * capability does not prove the client can show the prompt, and a link lost
+   * after the payment started cannot be recovered, as ChowBot never starts a
+   * second payment for an order.
    */
-  private canShowUrl(ctx: ServerContext) {
-    const envelope = ctx.mcpReq.envelope as Record<string, unknown> | undefined;
-    const caps = envelope?.["io.modelcontextprotocol/clientCapabilities"] as
-      { elicitation?: { url?: unknown } } | undefined;
-    return Boolean(envelope && caps?.elicitation?.url);
-  }
-
-  async startPayment(args: StartPaymentArgs, ctx: ServerContext) {
-    if (!this.canShowUrl(ctx)) {
-      return text(
-        "Payment not started: this client cannot open ChowBot's payment link. Pay for the order in the Chowdeck app.",
-        true,
-      );
-    }
-    const state = ctx.mcpReq.requestState<PaymentState>();
-    if (state !== undefined) return this.afterLink(args, ctx, state);
-
+  async startPayment(args: StartPaymentArgs) {
     await this.authHeaders();
     const submission = await this.submissions.get(args.quote_ref);
     if (!submission)
@@ -204,7 +191,7 @@ class PaymentStartService {
       );
     }
 
-    return this.sendPaymentStartOnce(submission, orderId, headers, ctx);
+    return this.sendPaymentStartOnce(submission, orderId, headers);
   }
 
   private refusalFor(submission: OrderSubmission) {
@@ -230,7 +217,6 @@ class PaymentStartService {
     submission: OrderSubmission,
     orderId: number,
     headers: Record<string, string>,
-    ctx: ServerContext,
   ) {
     let response: unknown;
     try {
@@ -263,7 +249,7 @@ class PaymentStartService {
         ? response.data
         : undefined;
     const link = data?.authorization_url;
-    if (!isHttpsUrl(link)) {
+    if (!isPaymentLink(link)) {
       return this.unknownOutcome(
         submission,
         `POST ${PAYMENT_START_PATH} returned an unexpected response`,
@@ -274,50 +260,15 @@ class PaymentStartService {
       this.submissions.recordPaymentStart(submission.id, "started"),
     );
 
-    return inputRequired({
-      inputRequests: {
-        pay: inputRequired.elicitUrl({
-          message: `Pay ${submission.computedTotal} for Chowdeck order ${orderId} with ${submission.paymentChannelName} in your browser. Payment is confirmed only from Chowdeck's order record.`,
-          url: link,
-        }),
-      },
-      requestState: await this.requestStateCodec.mint(
-        {
-          v: 1,
-          purpose: "start_payment",
-          submissionId: submission.id,
-        } satisfies PaymentState,
-        ctx,
-      ),
-    });
-  }
-
-  /*
-   * The client's answer to the payment link. Nothing is sent to Chowdeck:
-   * the payment already started, and only Chowdeck's order record shows
-   * whether it was paid.
-   */
-  private afterLink(
-    args: StartPaymentArgs,
-    ctx: ServerContext,
-    state: PaymentState,
-  ) {
-    if (
-      state.purpose !== "start_payment" ||
-      state.submissionId !== args.quote_ref
-    ) {
-      return text(
-        "Payment not started: the request changed after the payment link was issued.",
-        true,
-      );
-    }
-    const pay = ctx.mcpReq.inputResponses?.pay as
-      { action?: unknown } | undefined;
-    const opened = pay?.action === "accept";
     return text(
-      opened
-        ? "The payment page was opened. ChowBot does not know whether payment completed; check with get_order_submission, which reads Chowdeck's order record."
-        : "The payment link was not opened. The payment session was started, and ChowBot will not start another; pay in the Chowdeck app.",
+      JSON.stringify({
+        status: "payment_started",
+        order_id: orderId,
+        payment_link: link,
+        message: `Open this link to pay for Chowdeck order ${orderId} with ${submission.paymentChannelName}: ${link}`,
+        next_step:
+          "Give the user this link as a clickable link to open and pay in their browser; the amount is shown on the payment page. ChowBot will not start another payment for this order. After they pay, check the order with get_order_submission: payment is confirmed only from Chowdeck's order record, never from this link.",
+      }),
     );
   }
 

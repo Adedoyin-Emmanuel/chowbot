@@ -196,7 +196,9 @@ ORDER BY created_at;
   ```
 
 ### 7.3 Unpaid order (`created`)
-1. Pay with `start_payment` (it needs a client that supports URL-mode elicitation). If it
+1. Pay with `start_payment`. Every client gets the OPay link in the tool result, only after
+   Chowdeck answers the start with a valid https link; it is never offered through URL
+   elicitation. If it
    refuses because Chowdeck cannot confirm the order is unpaid, the order could not be read by
    id; report that, as it decides how payment must work. Whether the user can find and pay the
    order in the Chowdeck app instead is **unknown**.

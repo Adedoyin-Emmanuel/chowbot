@@ -687,7 +687,7 @@ class OrderPlacementService {
           ? "created; Chowdeck reports it paid"
           : "created; awaiting payment",
       next_step:
-        "ChowBot does not start payments yet. Check this order with get_order_submission; payment status is confirmed only from Chowdeck's order record.",
+        "To pay, call start_payment with this quote_ref: it returns a payment link for the user to open. If start_payment is not available, the user pays in the Chowdeck app. Afterwards check this order with get_order_submission; payment status is confirmed only from Chowdeck's order record.",
     };
     if (!saved) {
       return json({

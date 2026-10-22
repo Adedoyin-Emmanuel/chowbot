@@ -22,12 +22,12 @@ import { createPaymentStartConfig } from "../../../features/payments/service";
 
 /*
  * start_payment over the real hosted stack (createHttpApp, PostgreSQL
- * stores, the production requestState codec, modern 2026-07-28 rounds).
- * Only Chowdeck is mocked. The request keys (method, order_id, return_url,
- * cancel_url) and the response keys (authorization_url among them) follow
- * the observed OPay payment start; the redirect URLs are the website's own
- * (storefront source, read 2026-10-21), and the payment link is a marker
- * that must never leave the URL elicitation.
+ * stores, legacy and modern 2026-07-28 requests). Only Chowdeck is mocked.
+ * The request keys (method, order_id, return_url, cancel_url) and the
+ * response keys (authorization_url among them) follow the observed OPay
+ * payment start; the redirect URLs are the website's own (storefront source,
+ * read 2026-10-21), and the payment link is a marker that may appear only in
+ * a successful start's result, never in the database or the logs.
  */
 
 type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
@@ -43,7 +43,7 @@ const ORDER_ID = 7001326;
 const VENDOR_ID = 102555;
 const PAYMENT_LINK = "https://pay.example/checkout/PRIVATE-PAYMENT-LINK";
 const START_PATH = "/customer/payment/start/v2";
-const URL_CAPS = { elicitation: { form: {}, url: {} } };
+const NO_CAPS = {};
 
 let database: TestDatabase;
 let sql: ReturnType<TestDatabase["connect"]>;
@@ -133,12 +133,10 @@ type Call = {
   quoteRef: string;
   token?: string;
   capabilities?: Record<string, unknown>;
-  inputResponses?: Record<string, unknown>;
-  requestState?: string;
   legacy?: boolean;
 };
 
-const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = URL_CAPS, inputResponses, requestState, legacy }: Call) => {
+const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = NO_CAPS, legacy }: Call) => {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: {
@@ -156,8 +154,6 @@ const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = URL
       params: {
         name: "start_payment",
         arguments: { quote_ref: quoteRef },
-        ...(inputResponses && { inputResponses }),
-        ...(requestState !== undefined && { requestState }),
         ...(!legacy && {
           _meta: {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -175,14 +171,20 @@ const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = URL
 
 const textOf = (body: { result?: { content?: { text: string }[] } }) => body.result?.content?.[0]?.text ?? "";
 
-const firstRound = async (baseUrl: string, quoteRef: string) => {
-  const body = await call({ baseUrl, quoteRef });
-  expect(body.result.resultType).toBe("input_required");
-  return body.result as { requestState: string; inputRequests: { pay: { method: string; params: { mode: string; url: string; message: string } } } };
+/*
+ * A successful start: the link in the result, nothing else from Chowdeck's
+ * response.
+ */
+const startedResult = (body: { result: { isError?: boolean; resultType?: string; content?: { text: string }[] } }) => {
+  expect(body.result.isError).toBeUndefined();
+  expect(body.result.resultType).not.toBe("input_required");
+  expect(textOf(body)).not.toContain("PRIVATE-reference");
+  expect(textOf(body)).not.toContain("PRIVATE-status");
+  return JSON.parse(textOf(body)) as { status: string; order_id: number; payment_link: string; message: string; next_step: string };
 };
 
 /*
- * The link may appear only as the URL of the URL-mode elicitation request.
+ * Anything but a successful start must not carry the link.
  */
 const expectNoLink = (value: unknown) => {
   const text = JSON.stringify(value);
@@ -250,11 +252,10 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
     const session = { get: async () => undefined, save: async () => {}, clear: async () => {} };
     const submissions = {} as never;
 
-    test("start_payment exists only with a store, the codec and the payment-start URLs", () => {
+    test("start_payment exists only with a store and the payment-start URLs", () => {
       expect(names({ session, submissions, requestStateCodec: codec })).not.toContain("start_payment");
-      expect(names({ session, submissions, paymentStartConfig: TEST_CONFIG })).not.toContain("start_payment");
-      expect(names({ session, requestStateCodec: codec, paymentStartConfig: TEST_CONFIG })).not.toContain("start_payment");
-      expect(names({ session, submissions, requestStateCodec: codec, paymentStartConfig: TEST_CONFIG })).toContain("start_payment");
+      expect(names({ session, paymentStartConfig: TEST_CONFIG })).not.toContain("start_payment");
+      expect(names({ session, submissions, paymentStartConfig: TEST_CONFIG })).toContain("start_payment");
     });
 
     test("defaults to the Chowdeck website's origin", () => {
@@ -266,39 +267,19 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
     });
   });
 
-  describe("URL-elicitation preflight", () => {
-    test.each([
-      ["a client declaring only form elicitation", { capabilities: { elicitation: { form: {} } } }],
-      ["a client without elicitation", { capabilities: {} }],
-      ["a legacy client", { legacy: true }],
-    ])("refuses %s before any Chowdeck request", async (_, variant) => {
-      scriptUnpaidOrder();
-      const baseUrl = await startApp();
-      const quoteRef = await seedCreated();
-
-      const body = await call({ baseUrl, quoteRef, ...variant });
-
-      expect(body.result.isError).toBe(true);
-      expect(textOf(body)).toContain("this client cannot open ChowBot's payment link");
-      expect(received).toHaveLength(0);
-      expect((await row(quoteRef)).payment_started_at).toBeNull();
-    });
-  });
-
   describe("a payment start", () => {
-    test("confirms the order is unpaid, marks, sends the observed keys once, and offers the link only by URL elicitation", async () => {
+    test("confirms the order is unpaid, marks, sends the observed keys once, and returns the link", async () => {
       scriptUnpaidOrder();
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 
-      const first = await firstRound(baseUrl, quoteRef);
+      const result = startedResult(await call({ baseUrl, quoteRef }));
 
-      expect(first.inputRequests.pay.method).toBe("elicitation/create");
-      expect(first.inputRequests.pay.params.mode).toBe("url");
-      expect(first.inputRequests.pay.params.url).toBe(PAYMENT_LINK);
-      expect(first.inputRequests.pay.params.message).toContain(`order ${ORDER_ID}`);
-      expect(first.requestState).not.toContain("PRIVATE-PAYMENT-LINK");
-      expect(Buffer.from(first.requestState, "base64url").toString()).not.toContain("PRIVATE-PAYMENT-LINK");
+      expect(result).toMatchObject({ status: "payment_started", order_id: ORDER_ID, payment_link: PAYMENT_LINK });
+      expect(result.message).toBe(`Open this link to pay for Chowdeck order ${ORDER_ID} with opay: ${PAYMENT_LINK}`);
+      expect(result.next_step).toContain("clickable link");
+      expect(result.next_step).toContain("get_order_submission");
+      expect(result.next_step).toContain("ChowBot will not start another payment for this order");
 
       expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
         `GET /customer/order/${ORDER_ID}`,
@@ -320,45 +301,32 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       expect(marked.state).toBe("created");
     });
 
+    /*
+     * A declared link prompt is not trusted: every client gets the link in
+     * the result, so it cannot be lost after the payment started.
+     */
     test.each([
-      ["opens", "accept", "The payment page was opened"],
-      ["declines", "decline", "The payment link was not opened"],
-      ["cancels", "cancel", "The payment link was not opened"],
-    ])("when the user %s the link, reports it without the link or another Chowdeck request", async (_, action, expected) => {
+      ["a client declaring URL elicitation", { capabilities: { elicitation: { form: {}, url: {} } } }],
+      ["a client declaring only form elicitation", { capabilities: { elicitation: { form: {} } } }],
+      ["a client without elicitation (the Claude app)", { capabilities: {} }],
+      ["a legacy client", { legacy: true }],
+    ])("%s gets the link in the result, after one payment start", async (_, variant) => {
       scriptUnpaidOrder();
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
-      const first = await firstRound(baseUrl, quoteRef);
-      received = [];
 
-      const second = await call({ baseUrl, quoteRef, inputResponses: { pay: { action } }, requestState: first.requestState });
+      const result = startedResult(await call({ baseUrl, quoteRef, ...variant }));
 
-      expect(textOf(second)).toContain(expected);
-      expectNoLink(second);
-      expect(received).toHaveLength(0);
+      expect(result.payment_link).toBe(PAYMENT_LINK);
+      expect(posts()).toHaveLength(1);
       expect((await row(quoteRef)).payment_start_state).toBe("started");
     });
 
-    test("refuses a second-round state carried over to another attempt", async () => {
+    test("is never started twice for an order, and the second call shows no link", async () => {
       scriptUnpaidOrder();
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
-      const other = await seedCreated(alice.userId, { cart_id: 555, chowdeck_order_id: ORDER_ID + 1 });
-      const first = await firstRound(baseUrl, quoteRef);
-      received = [];
-
-      const body = await call({ baseUrl, quoteRef: other, inputResponses: { pay: { action: "accept" } }, requestState: first.requestState });
-
-      expect(textOf(body)).toContain("the request changed after the payment link was issued");
-      expect(received).toHaveLength(0);
-      expect((await row(other)).payment_started_at).toBeNull();
-    });
-
-    test("is never started twice for an order, even when called again from scratch", async () => {
-      scriptUnpaidOrder();
-      const baseUrl = await startApp();
-      const quoteRef = await seedCreated();
-      await firstRound(baseUrl, quoteRef);
+      startedResult(await call({ baseUrl, quoteRef }));
 
       const again = await call({ baseUrl, quoteRef });
 
@@ -367,7 +335,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       expect(posts()).toHaveLength(1);
     });
 
-    test("sends exactly one payment start when two calls race", async () => {
+    test("sends exactly one payment start when two calls race, and only one gets the link", async () => {
       scriptUnpaidOrder();
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
@@ -375,7 +343,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const results = await Promise.all([call({ baseUrl, quoteRef }), call({ baseUrl, quoteRef })]);
 
       expect(posts()).toHaveLength(1);
-      expect(results.filter((r) => r.result?.resultType === "input_required")).toHaveLength(1);
+      expect(results.filter((r) => textOf(r).includes("PRIVATE-PAYMENT-LINK"))).toHaveLength(1);
     });
   });
 
@@ -471,6 +439,8 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const body = await call({ baseUrl, quoteRef });
 
       expect(textOf(body)).toBe("Payment not started: Chowdeck refused to start the payment (status 422). ChowBot will not try again; pay in the Chowdeck app.");
+      expect(body.result.isError).toBe(true);
+      expectNoLink(body);
       expect((await row(quoteRef)).payment_start_state).toBe("rejected");
 
       const again = await call({ baseUrl, quoteRef });
@@ -486,6 +456,9 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       ["a success without a payment link", started({ authorization_url: undefined })],
       ["a success with a non-https payment link", started({ authorization_url: "http://pay.example/PRIVATE-PAYMENT-LINK" })],
       ["a success with a malformed payment link", started({ authorization_url: "PRIVATE-PAYMENT-LINK" })],
+      ["a success with a javascript: payment link", started({ authorization_url: "javascript:alert('PRIVATE-PAYMENT-LINK')" })],
+      ["a success with credentials in the payment link", started({ authorization_url: "https://user:pass@pay.example/PRIVATE-PAYMENT-LINK" })],
+      ["a success with a non-string payment link", started({ authorization_url: { href: PAYMENT_LINK } })],
     ])("treats %s as an unknown outcome, never retries, and never shows a link", async (_, reply) => {
       scriptUnpaidOrder();
       route(`POST ${START_PATH}`, reply);
@@ -516,8 +489,14 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const body = await call({ baseUrl, quoteRef });
 
       expect(textOf(body)).toContain("timed out after 200ms");
+      expect(textOf(body)).toContain("The payment start's outcome is unknown");
+      expectNoLink(body);
       expect(posts()).toHaveLength(1);
       expect((await row(quoteRef)).payment_start_state).toBe("unknown");
+
+      const again = await call({ baseUrl, quoteRef });
+      expect(textOf(again)).toContain("an earlier payment start for this order has an unknown outcome");
+      expect(posts()).toHaveLength(1);
     });
 
     test("still offers the link when its outcome cannot be saved, and blocks any later start", async () => {
@@ -525,9 +504,9 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp({ store: storeWith({ recordPaymentStart: async () => { throw new Error("down"); } }) });
       const quoteRef = await seedCreated();
 
-      const first = await firstRound(baseUrl, quoteRef);
+      const result = startedResult(await call({ baseUrl, quoteRef }));
 
-      expect(first.inputRequests.pay.params.url).toBe(PAYMENT_LINK);
+      expect(result.payment_link).toBe(PAYMENT_LINK);
       const inFlight = await row(quoteRef);
       expect(inFlight.payment_started_at).toBeInstanceOf(Date);
       expect(inFlight.payment_start_state).toBeNull();
