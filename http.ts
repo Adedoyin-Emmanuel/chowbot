@@ -11,7 +11,6 @@ import { migrate } from "./lib/postgres/migrations";
 import { createPostgresStores } from "./lib/postgres";
 import { MCP_SERVER_URL, OAUTH_ISSUER_URL } from "./constants/oauth";
 import { createKeyring, parseEncryptionKey } from "./lib/encryption";
-import { createChowbotRequestStateCodec } from "./lib/request-state";
 import { readOrderPlacementConfig } from "./features/order-placement/config";
 import { createPaymentStartConfig } from "./features/payments/service";
 import { CHOWDECK_REQUEST_TIMEOUT_MS } from "./constants/chowdeck";
@@ -66,7 +65,6 @@ const start = async () => {
     serverUrl: MCP_SERVER_URL,
     issuerUrl: OAUTH_ISSUER_URL,
     ...createPostgresStores(sql, keyring),
-    requestStateCodec: createChowbotRequestStateCodec(keyring.requestStateKey),
     placeOrderEnabled,
     ...(paymentChannelQuery && { paymentChannelQuery }),
     // start_payment follows the same switch, with the website's redirect pages.

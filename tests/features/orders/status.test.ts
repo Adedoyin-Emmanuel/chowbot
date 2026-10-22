@@ -4,9 +4,8 @@ import type { OrderDetail } from "../../../features/orders/service";
 import { classifyOrder, orderAmounts, stateFromChowdeck, stateUnavailable } from "../../../features/orders/status";
 
 /*
- * The unpaid order observed on 2026-10-22 (43609160), as get_order's
- * allowlist keeps it: status "abandoned" seconds after creation, payment {}
- * and no payment confirmation time.
+ * An unpaid order as get_order keeps it: status "abandoned", payment {} and
+ * no payment confirmation time.
  */
 const observed = {
   id: 43609160,
@@ -54,28 +53,24 @@ describe("classifyOrder", () => {
 });
 
 describe("stateFromChowdeck", () => {
-  const unpaid = classifyOrder(observedUnpaid);
-
   test.each([
-    ["no payment start", undefined, "order_created"],
-    ["a payment link", { paymentStartedAt: new Date(), paymentStartState: "started" as const }, "payment_link_generated"],
-    ["a payment start with an unknown outcome", { paymentStartedAt: new Date(), paymentStartState: "unknown" as const }, "payment_pending"],
-    ["a payment start whose outcome was never recorded", { paymentStartedAt: new Date(), paymentStartState: null }, "payment_pending"],
-    ["a refused payment start", { paymentStartedAt: new Date(), paymentStartState: "rejected" as const }, "order_created"],
-  ] as const)("an unpaid order with %s is %s", (_, local, state) => {
-    const report = stateFromChowdeck(43609160, unpaid, local);
+    ["no payment record", {}, "awaiting_payment"],
+    ["a failed payment", { payment: { status: "failed" } }, "awaiting_payment"],
+    ["a pending payment", { payment: { status: "pending" } }, "payment_pending"],
+    ["an initialised payment", { payment: { status: "initialised" } }, "payment_pending"],
+    ["a successful payment", { payment: { status: "success" } }, "payment_confirmed"],
+    ["a cancelled status", { status: "cancelled" }, "cancelled"],
+    ["a payment status ChowBot does not understand", { payment: { status: "reversed" } }, "unknown"],
+  ] as const)("an order with %s is %s, read from Chowdeck's record only", (_, fields, state) => {
+    const report = stateFromChowdeck(43609160, classifyOrder(order(fields)));
     expect(report.order_state).toBe(state);
     expect(report.source).toStartWith("Chowdeck's order record, read ");
+    expect(report).not.toHaveProperty("last_recorded_by_chowbot");
   });
 
-  test("Chowdeck's payment confirmation wins over any local payment-start record", () => {
-    const paid = classifyOrder(order({ payment: { status: "success" } }));
-    expect(stateFromChowdeck(1, paid, { paymentStartedAt: null, paymentStartState: null }).order_state).toBe("payment_confirmed");
-  });
-
-  test("an unreadable order is unknown, never unpaid, with ChowBot's record shown as its own", () => {
-    const report = stateUnavailable(1, "GET /customer/order/1 timed out", "created (ChowBot's record)");
-    expect(report).toMatchObject({ order_state: "unknown", last_recorded_by_chowbot: "created (ChowBot's record)" });
+  test("an unreadable order is unknown, never unpaid", () => {
+    const report = stateUnavailable(1, "GET /customer/order/1 timed out");
+    expect(report).toMatchObject({ order_state: "unknown", source: "none: Chowdeck's order record could not be read" });
     expect(report.detail).toContain("does not mean it is unpaid, paid or cancelled");
   });
 });

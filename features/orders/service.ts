@@ -13,9 +13,7 @@ const orderPath = (orderId: string) =>
   `/customer/order/${encodeURIComponent(orderId)}`;
 
 /*
- * The two list filters observed: completed (order history) and active
- * (2026-10-22: orders in progress, which also returned an unpaid order with
- * status "abandoned").
+ * completed is order history; active is orders in progress, unpaid ones included.
  */
 export const ORDER_LIST_STATUSES = ["completed", "active"] as const;
 export type OrderListStatus = (typeof ORDER_LIST_STATUSES)[number];
@@ -23,11 +21,8 @@ export type OrderListStatus = (typeof ORDER_LIST_STATUSES)[number];
 type Fields = Record<string, ScalarValue>;
 
 /*
- * Explicit allowlists of observed fields. Nested objects (customer, address,
- * driver, vendorAddress) are never copied, and fee_id, order_pin, code,
- * references and user/customer/address IDs are never listed. tracking_url
- * and pay_for_me_url are listed only in the form Chowdeck was seen to send
- * (see trackingLinkOf and payForMeLinkOf).
+ * Allowlists: nested objects, fee_id, order_pin, code, references and
+ * user/customer/address IDs are never listed.
  */
 const SUMMARY_FIELDS = [
   "id",
@@ -117,12 +112,8 @@ export type OrderListResult = {
 export type OrderDetail = Fields & { payment?: Fields; items?: Fields[] };
 
 /*
- * Observed 2026-10-22 from GET /customer/order/{id}/live-tracking, on an
- * unpaid order where every delivery field was null. user_id, delivery_id,
- * customer_location, vendor_location, route, socket_room and pusher_channel
- * are left out. The rider and rider_location objects were only seen as null,
- * so their fields below are an allowlist of likely names, kept only when
- * they are scalars.
+ * Rider and rider_location fields are likely names, not confirmed ones; only
+ * scalars are kept.
  */
 const LIVE_FIELDS = [
   "order_status",
@@ -138,11 +129,8 @@ const RIDER_LOCATION_FIELDS = ["latitude", "longitude", "lat", "lng", "heading",
 export type LiveTracking = Fields & { rider?: Fields; rider_location?: Fields };
 
 /*
- * Every order Chowdeck created carried a tracking_url of the form
- * https://chowdeck.com/store/track/<token> (2026-10-22). Only that form is
- * passed on, as a clickable link for the user; anything else is dropped.
- * Anyone with the link can follow the order, so it is shown only to the
- * order's owner.
+ * Only https://chowdeck.com/store/track/<token> is passed on. Anyone with the
+ * link can follow the order, so it is shown only to its owner.
  */
 export const trackingLinkOf = (value: unknown): string | undefined => {
   if (typeof value !== "string") return undefined;
@@ -163,9 +151,7 @@ export const trackingLinkOf = (value: unknown): string | undefined => {
 };
 
 /*
- * A pay-for-me order carried pay_for_me_url
- * https://chowdeck.com/store/pay/<token> (2026-10-22): a page where anyone
- * with the link can pay the order. Only that form is passed on.
+ * Only https://chowdeck.com/store/pay/<token> is passed on.
  */
 export const payForMeLinkOf = (value: unknown): string | undefined => {
   if (typeof value !== "string") return undefined;
@@ -203,10 +189,6 @@ const unexpectedShape = (path: string) =>
     `GET ${path} returned an unexpected response shape`,
   );
 
-/*
- * Read-only lookups of the signed-in user's own orders. Requests are sent
- * once with the client's existing behaviour; nothing here writes.
- */
 class OrderService {
   constructor(
     private readonly session: UserSession,
@@ -286,10 +268,7 @@ class OrderService {
   }
 
   /*
-   * The storefront's edit of a placed order's rider note (storefront code,
-   * read 2026-10-21): PUT /customer/order/{id}/delivery with
-   * {customer_delivery_note}. Never observed on the wire. Sent once; the
-   * caller confirms the change by reading the order again.
+   * Sent once; the caller confirms the change by reading the order again.
    */
   async sendDeliveryNote(orderId: string, note: string) {
     return this.client.request(`${orderPath(orderId)}/delivery`, {
@@ -319,22 +298,6 @@ class OrderService {
   }
 }
 
-/*
- * Payment evidence from Chowdeck for a known order id: paid only when the
- * order's payment status is success (see ./status.ts). The timeline is not
- * evidence: Chowdeck lists a MADE_PAYMENT step on orders that were never
- * paid (observed 2026-10-22, orders 43584305 and 43591071, whose status was
- * "abandoned" seconds after creation while awaiting payment). Lookup
- * failures are thrown, never read as unpaid.
- */
-export const readPaymentEvidence = async (orders: OrderService, orderId: number) => {
-  const { paid, evidence } = (await readOrderState(orders, orderId)).classification;
-  return { paid, evidence };
-};
-
-/*
- * One fresh read of an order's record, with its classification.
- */
 export const readOrderState = async (orders: OrderService, orderId: number) => {
   const { order } = await orders.getOrder(String(orderId));
   return { order, classification: classifyOrder(order) };

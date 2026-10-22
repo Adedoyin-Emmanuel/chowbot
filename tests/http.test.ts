@@ -26,7 +26,7 @@ import { createTestDatabase, describePostgres } from "./helpers/postgres";
 
 const ROOT = join(import.meta.dir, "..");
 /*
- * The captured website values: methods set but empty, country NG.
+ * The website's channel query: methods empty, country NG.
  */
 const CHANNEL = {
   CHOWBOT_PAYMENT_CHANNEL_METHODS: "",
@@ -174,10 +174,13 @@ describePostgres.each(ENTRIES)("the production HTTP server: %s", (_, resolveEntr
     await database.drop();
   });
 
-  test("registers place_order and start_payment by default, alongside the recovery tools", async () => {
+  test("registers place_order and start_payment by default, without any order-workflow tools", async () => {
     const { names, log } = await toolsWith(entry, {});
 
-    expect(names).toEqual(expect.arrayContaining(["place_order", "start_payment", "get_order_submission", "resolve_order_submission", "preview_order"]));
+    expect(names).toEqual(expect.arrayContaining(["get_checkout_quote", "place_order", "start_payment", "get_order", "clear_cart"]));
+    for (const removed of ["get_order_submission", "resolve_order_submission", "cancel_order", "preview_order", "check_promo_code"]) {
+      expect(names).not.toContain(removed);
+    }
     expect(log).not.toContain("live ordering is off");
   }, 30_000);
 
@@ -198,7 +201,7 @@ describePostgres.each(ENTRIES)("the production HTTP server: %s", (_, resolveEntr
 
     expect(names).not.toContain("place_order");
     expect(names).not.toContain("start_payment");
-    expect(names).toContain("get_order_submission");
+    expect(names).toContain("get_order");
     if (warning) expect(log).toContain(warning);
   }, 30_000);
 

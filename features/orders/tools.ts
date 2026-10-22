@@ -18,8 +18,7 @@ const AMOUNTS_NOTE =
   "Amounts are Chowdeck's raw values, passed through without unit conversion.";
 
 /*
- * Order IDs are redacted in the capture, so both a positive integer and a
- * short path-safe string are accepted and normalized to a string.
+ * A positive integer or a short path-safe string, normalized to a string.
  */
 const orderIdSchema = {
   order_id: z
@@ -95,7 +94,7 @@ export const registerOrderTools = (
         const { order } = await service.getOrder(String(order_id));
         const classification = classifyOrder(order);
         const amounts = orderAmounts(order);
-        // The order's notes are used internally (to verify an order ChowBot placed) but not listed.
+        // Notes are used internally to verify placed orders, not listed.
         const { customer_vendor_note: _vendorNote, customer_delivery_note: _deliveryNote, ...listed } = order;
         return textResult(
           JSON.stringify({
@@ -198,8 +197,7 @@ const quoted = (note: string) => (note ? `"${note}"` : "none");
 const noteOf = (order: OrderDetail) => (typeof order.customer_delivery_note === "string" ? order.customer_delivery_note : "");
 
 /*
- * Reads the order, refuses a cancelled one, sends the change once and reads
- * the order again: only that second reading confirms the note.
+ * Only a re-read of the order after the change confirms the note.
  */
 const updateDeliveryNote = async (service: OrderService, orderId: string, input: string | null) => {
   const checked = validateNote(input);
@@ -303,11 +301,8 @@ const updateDeliveryNote = async (service: OrderService, orderId: string, input:
 };
 
 /*
- * What track_order reports. Statuses are Chowdeck's; ChowBot adds only the
- * payment reading (paid only on payment status success) and the next step.
- * The timeline lists Chowdeck's stages: on an unpaid order every stage,
- * MADE_PAYMENT included, was listed with time null (2026-10-22), so a listed
- * stage is never reported as reached.
+ * Chowdeck lists every timeline stage before it happens, so a listed stage is
+ * never reported as reached.
  */
 const trackingReport = (
   orderId: string | number,
@@ -325,7 +320,7 @@ const trackingReport = (
     : classification.state === "payment_confirmed"
       ? `Tell the user the order's status and delivery details as Chowdeck reports them${link ? ", and give them the tracking link as a clickable link" : ""}.`
       : classification.state === "awaiting_payment"
-        ? "Chowdeck shows no payment for this order yet. Tell the user it is unpaid; pay with start_payment (for an order ChowBot placed) or in the Chowdeck app."
+        ? "Chowdeck shows no payment for this order yet. Tell the user it is unpaid; they can pay with start_payment or in the Chowdeck app, or leave it unpaid."
         : classification.state === "cancelled"
           ? "Tell the user Chowdeck shows the order cancelled."
           : "Chowdeck's record is inconclusive about payment. Tell the user so, and suggest checking the Chowdeck app.";

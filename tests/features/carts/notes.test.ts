@@ -149,9 +149,7 @@ describe("set_cart_notes", () => {
   });
 
   /*
-   * Observed 2026-10-22: the note write answers {"status":"success","message":
-   * "Cart updated successfully"} and the website then re-reads the cart. A
-   * success alone is never reported as saved.
+   * A successful write alone is never reported as saved; the re-read decides.
    */
   test("never reports a note saved when the re-read cart holds something else, or cannot be read", async () => {
     routes[`GET /customer/cart/vendor/${RESTAURANT}`] = [cart(), cart({ customer_vendor_note: "I want extra pepper (edited)" })];

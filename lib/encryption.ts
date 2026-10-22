@@ -93,21 +93,7 @@ export const createKeyring = (masterKey: Buffer) => {
   const hashPhone = (phone: string) =>
     createHmac("sha256", phoneHashKey).update(phone).digest("hex");
 
-  /*
-   * Binds a quote to the delivery address without storing the address id.
-   * The user id is part of the input so equal ids never collide across users.
-   */
-  const addressBindingKey = deriveKey(masterKey, "chowbot:address-binding:v1");
-  const bindAddress = (userId: string, addressId: number) =>
-    createHmac("sha256", addressBindingKey)
-      .update(`${userId}\0${addressId}`)
-      .digest("hex");
-
-  const requestStateKey = new Uint8Array(
-    deriveKey(masterKey, "chowbot:request-state:v1"),
-  );
-
-  return { encrypt, decrypt, hashPhone, bindAddress, requestStateKey };
+  return { encrypt, decrypt, hashPhone };
 };
 
 export type Keyring = ReturnType<typeof createKeyring>;

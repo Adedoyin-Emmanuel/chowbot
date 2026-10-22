@@ -1,7 +1,4 @@
-import {
-  McpServer,
-  type RequestStateCodec,
-} from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
 
 import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
 
@@ -13,7 +10,6 @@ import { registerOrderTools } from "../features/orders/tools";
 import { registerPaymentTools } from "../features/payments/tools";
 import { registerAddressTools } from "../features/addresses/tools";
 import { registerCheckoutTools } from "../features/checkout/tools";
-import type { UserOrderSubmissions } from "../lib/order-submissions";
 import type { PaymentStartConfig } from "../features/payments/service";
 import { registerRestaurantTools } from "../features/restaurants/tools";
 import type { PaymentChannelQuery } from "../features/order-placement/channels";
@@ -36,8 +32,6 @@ export type ServerOptions = {
   session?: UserSession;
   enableChatLogin?: boolean;
   placeOrderEnabled?: boolean;
-  submissions?: UserOrderSubmissions;
-  requestStateCodec?: RequestStateCodec;
   paymentStartConfig?: PaymentStartConfig;
   paymentChannelQuery?: PaymentChannelQuery;
 };
@@ -45,39 +39,29 @@ export type ServerOptions = {
 export const createServer = ({
   session,
   enableChatLogin = false,
-  submissions,
-  requestStateCodec,
   paymentChannelQuery,
   paymentStartConfig,
   placeOrderEnabled,
 }: ServerOptions = {}) => {
-  const server = new McpServer(
-    {
-      name: "ChowBot",
-      version: "1.0.0",
-      icons: [SERVER_ICON],
-    },
-    requestStateCodec && { requestState: { verify: requestStateCodec.verify } },
-  );
+  const server = new McpServer({
+    name: "ChowBot",
+    version: "1.0.0",
+    icons: [SERVER_ICON],
+  });
 
   registerRestaurantTools(server, session);
   registerMenuTools(server, session);
   registerAddressTools(server, session);
-  registerCartTools(server, session, undefined, submissions);
-  registerCheckoutTools(server, session, undefined, submissions);
+  registerCartTools(server, session);
+  registerCheckoutTools(server, session);
   registerOrderTools(server, session);
   registerOrderPlacementTools(server, {
     session,
-    submissions,
-    requestStateCodec,
     paymentChannelQuery,
+    paymentStartConfig,
     placeOrderEnabled,
   });
-  registerPaymentTools(server, {
-    session,
-    submissions,
-    paymentStartConfig,
-  });
+  registerPaymentTools(server, { session, paymentStartConfig });
 
   if (enableChatLogin) registerAuthTools(server, session);
 

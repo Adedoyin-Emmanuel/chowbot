@@ -38,16 +38,8 @@ export type PlaceSearchResult = {
   suggestions: PlaceSuggestion[];
 };
 
-/*
- * What add_address reports. The address exists once address_id is set;
- * activation and verification are reported separately and never imply the
- * address was not created.
- */
-/*
- * add_address found saved addresses that may be the same place and created
- * nothing. Repeating the call with confirm_duplicate set to this token
- * creates the address anyway, as long as the place and matches are unchanged.
- */
+// The address exists once address_id is set, whatever activation reports.
+// Nothing was created; retry with confirm_duplicate set to this token.
 export type AddressDuplicateResult = {
   status: "possible_duplicate";
   created: false;
@@ -70,17 +62,9 @@ export type AddressCreateResult = {
     | { status: "not_listed" | "unavailable"; detail: string };
 };
 
-/*
- * Fields of the created address worth echoing back; coordinates are left
- * out, as list_addresses leaves them out.
- */
 const CREATED_FIELDS = ["pretty_name", "street", "city", "state", "country", "is_active", "is_current"] as const;
 
-/*
- * For a write, only a 4xx other than 401 proves nothing happened. A 401, a
- * 5xx, a timeout, a dropped connection or an unexpected 2xx leave the outcome
- * unknown, as for order creation.
- */
+// For a write, only a 4xx other than 401 proves nothing happened.
 const isDefiniteRejection = (error: unknown): error is ChowdeckApiError =>
   error instanceof ChowdeckApiError &&
   error.kind === "http" &&
@@ -91,10 +75,6 @@ const isDefiniteRejection = (error: unknown): error is ChowdeckApiError =>
 const isSuccessEnvelope = (body: unknown): body is Record<string, unknown> =>
   isRecord(body) && body.status === "success";
 
-/*
- * Only fields that help choose a delivery location. Coordinates and place
- * IDs are left out; an address's id is what search_restaurants needs.
- */
 const SUMMARY_FIELDS = [
   "id",
   "pretty_name",
@@ -124,10 +104,6 @@ class AddressService {
     return { authorization: `Bearer ${token}` };
   }
 
-  /*
-   * Place suggestions from Chowdeck's Google Places proxy, as the website's
-   * address search requests them (at three characters or more).
-   */
   async searchPlaces(query: string): Promise<PlaceSearchResult> {
     const input = query.trim();
     if (input.length < MIN_PLACE_QUERY_LENGTH) {
@@ -141,13 +117,7 @@ class AddressService {
     return { returned: suggestions.length, suggestions };
   }
 
-  /*
-   * Creates a saved address from a place the user picked. The place is
-   * resolved through Chowdeck's place details first, and nothing is created
-   * unless that yields a complete location. The create request is sent once
-   * and never retried; the address is activated only when asked, and the
-   * saved-address list is re-read to confirm the new id.
-   */
+  // The create request is sent once and never retried.
   async create(
     placeId: string,
     activate: boolean,
@@ -164,11 +134,7 @@ class AddressService {
       throw new ChowdeckApiError(error.kind, `${error.message}; no address was created`, error.status);
     }
 
-    /*
-     * Plausible duplicates stop creation unless the caller confirms these
-     * exact matches for this exact place. If the saved addresses cannot be
-     * read, nothing is created: an unchecked list is never treated as empty.
-     */
+    // If the saved addresses cannot be read, nothing is created.
     let saved: Record<string, unknown>[];
     try {
       saved = await this.fetchSavedAddresses(headers);
@@ -236,10 +202,7 @@ class AddressService {
     );
   }
 
-  /*
-   * set-active with the website's body, {addressId}. A failure here never
-   * undoes or hides the address that was already created.
-   */
+  // A failure here never hides the address that was already created.
   private async activate(id: number, headers: Record<string, string>): Promise<AddressCreateResult["activation"]> {
     try {
       const body = await this.client.request(ADDRESS_SET_ACTIVE_PATH, {
@@ -257,10 +220,6 @@ class AddressService {
     }
   }
 
-  /*
-   * Re-reads the saved addresses. Verified only if the new id is listed; a
-   * failed refresh is reported as such, never as verified.
-   */
   private async verifyListed(id: number): Promise<AddressCreateResult["verification"]> {
     try {
       const { addresses } = await this.list();
@@ -275,10 +234,6 @@ class AddressService {
     }
   }
 
-  /*
-   * The signed-in user's saved addresses as Chowdeck returns them (entries
-   * without a usable id dropped). Shared by list() and the duplicate check.
-   */
   private async fetchSavedAddresses(headers: Record<string, string>) {
     const body = await this.client.request(ADDRESS_LIST_PATH, { headers });
 

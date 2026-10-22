@@ -32,14 +32,8 @@ export type SupportedPaymentChannel =
   (typeof SUPPORTED_PAYMENT_CHANNELS)[number];
 
 /*
- * How an order can be paid, as place_order offers it: every online channel
- * above (created unpaid, then paid through start_payment), plus
- *   pay_for_me  observed 2026-10-22: the order carries payment_method
- *               "pay_for_me" and has_external_payment: true, and Chowdeck
- *               returns a pay_for_me_url for someone else to pay
- *   wallet      the website sends payment_method "wallet" and no channel id
- *               (storefront code); the wallet balance pays at creation.
- *               Never observed on the wire.
+ * Besides the online channels: pay_for_me returns a pay_for_me_url for
+ * someone else to pay; wallet sends no channel id and pays at creation.
  */
 export const ID_LESS_PAYMENT_CHOICES = ["wallet", "pay_for_me"] as const;
 export type IdLessPaymentChoice = (typeof ID_LESS_PAYMENT_CHOICES)[number];
@@ -50,16 +44,13 @@ export const isIdLessChoice = (value: unknown): value is IdLessPaymentChoice =>
   (ID_LESS_PAYMENT_CHOICES as readonly unknown[]).includes(value);
 
 /*
- * Every observed channel carried is_active: 1. A channel that does not say
- * it is active is treated as unavailable.
+ * A channel that does not say it is active is treated as unavailable.
  */
 const isActive = (value: unknown) => value === true || value === 1;
 
 /*
- * Resolves a channel name to the id the order sends as payment_method_id,
- * from the observed response: data[] of { id, name, processor, is_active }.
- * Returns undefined when the channel is absent or not active. methods is
- * always sent, even empty, as the website sends it.
+ * Resolves a channel name to its payment_method_id, or undefined when absent
+ * or inactive. methods is always sent, even empty.
  */
 export const resolvePaymentChannel = async (
   client: ChowdeckClient,

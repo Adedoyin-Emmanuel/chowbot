@@ -3,12 +3,9 @@ import { createHash } from "node:crypto";
 import type { AddressCreatePayload } from "./places";
 
 /*
- * Plausible-duplicate detection for add_address. A shared street alone is
- * not treated as proof: a saved address counts as a plausible duplicate when
- * it has the same formatted address, the same street and city, a street
- * equal to this place's description (the website's own quick-picker rule,
- * address report §1.1), or coordinates within DUPLICATE_DISTANCE_METRES.
- * Matches are only reported; nothing is created, changed or activated.
+ * A saved address is a plausible duplicate when it has the same formatted
+ * address, the same street and city, a street equal to this place's
+ * description, or coordinates within DUPLICATE_DISTANCE_METRES.
  */
 
 export const DUPLICATE_DISTANCE_METRES = 50;
@@ -33,11 +30,8 @@ const isLatitude = (v: unknown): v is number => typeof v === "number" && Number.
 const isLongitude = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 180;
 
 /*
- * The storefront reads a saved address's `coordinate` as {x: longitude,
- * y: latitude} (chunk 3488, read 2026-10-21), so that shape comes first. The
- * other common shapes are also accepted: {latitude, longitude}, {lat, lng},
- * and GeoJSON {coordinates: [lng, lat]}. Anything else gives no coordinate,
- * and the text rules still apply.
+ * Chowdeck stores `coordinate` as {x: longitude, y: latitude}; other common
+ * shapes are accepted too.
  */
 export const savedCoordinate = (coordinate: unknown): { latitude: number; longitude: number } | undefined => {
   if (typeof coordinate !== "object" || coordinate === null) return undefined;
@@ -106,12 +100,8 @@ export const findPlausibleDuplicates = (
 };
 
 /*
- * A confirmation token for creating this place despite these matches. It is
- * a digest of the resolved place (id, formatted address, coordinates) and
- * the sorted ids of the matching saved addresses, so it cannot authorize a
- * different place, a changed set of matches, or another account's addresses
- * (whose ids differ). It holds no secret and is recomputed on every call;
- * nothing is stored.
+ * A digest of the place and the matching address ids, so the confirmation
+ * cannot authorize a different place or a changed set of matches.
  */
 export const duplicateConfirmationToken = (place: AddressCreatePayload, matches: DuplicateMatch[]) => {
   const ids = matches.map((match) => match.address_id).sort((a, b) => a - b);

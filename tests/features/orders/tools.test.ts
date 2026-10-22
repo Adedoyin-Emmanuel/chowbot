@@ -91,11 +91,7 @@ const textOf = (result: { content: { text: string }[] }) =>
   result.content[0]!.text;
 
 /*
- * Field names and shapes follow the sanitized order report (2026-10-20):
- * the order detail's money fields reconcile as observed, items follow the
- * cart report's past-order rows, and timeline level/action pairs are the
- * observed ones. Every ID and personal value here is an invented test value,
- * and each private field carries a "PRIVATE-" marker so leaks are detectable.
+ * Private fields carry a "PRIVATE-" marker so leaks are detectable.
  */
 const ORDER_ID = 7001001;
 const ORDER_PATH = `/customer/order/${ORDER_ID}`;
@@ -917,14 +913,6 @@ describe("order tools never mutate", () => {
   });
 });
 
-/*
- * The tracking link and live tracking, with the shapes observed on
- * 2026-10-22: orders carry tracking_url https://chowdeck.com/store/track/
- * <token>, GET /customer/order?status=active lists orders in progress, and
- * GET /customer/order/{id}/live-tracking answered for an unpaid order with
- * every delivery field null. A rider during delivery was never observed, so
- * the rider values below are invented.
- */
 const TRACKING_LINK = "https://chowdeck.com/store/track/Y3B4SkhTQ3dXL3E2S3VnU3hwMktKUT09Ojo6OmFMY3FUcmlrOG42TW51ek5Ic2tEY2c9PQ";
 const LIVE_PATH = `${ORDER_PATH}/live-tracking`;
 
@@ -1048,7 +1036,7 @@ describe("track_order", () => {
 
     const parsed = JSON.parse(textOf(await track()));
 
-    expect(parsed.status.order_state).toBe("order_created");
+    expect(parsed.status.order_state).toBe("awaiting_payment");
     expect(parsed.live_tracking).toEqual({
       order_status: "abandoned",
       order_class: "delivery",
@@ -1119,9 +1107,7 @@ describe("track_order", () => {
 });
 
 /*
- * Changing a placed order's rider note: PUT /customer/order/{id}/delivery
- * with {customer_delivery_note}, from the storefront code; never observed
- * on the wire. The order record is read before and after.
+ * The order record is read before and after the rider note change.
  */
 describe("update_order_delivery_note", () => {
   const DELIVERY_PATH = `${ORDER_PATH}/delivery`;

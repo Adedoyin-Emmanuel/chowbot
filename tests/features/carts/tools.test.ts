@@ -88,12 +88,6 @@ const serverFor =
 const textOf = (result: { content: { text: string }[] }) => result.content[0]!.text;
 const writes = () => received.filter((r) => r.method === "POST");
 
-/*
- * Fixtures copied from the sanitized Chowdeck capture (2026-10-20): vendor
- * 102555, Fried Rice 880557 and its Size/Packaging groups, and the cart rows
- * and pack references observed after the two approved adds. The address ID
- * was redacted in the capture, so 555 is a test value.
- */
 const ADDRESS_ID = 555;
 
 const addressList = () =>
@@ -595,8 +589,7 @@ describe("add_to_cart", () => {
 
 describe("duplicate_cart_pack", () => {
   /*
-   * From the capture's duplicate step: pack B was copied into pack C with
-   * new row IDs, and total_price went from 220000 to 440000.
+   * Pack B is copied into pack C with new row IDs; total_price doubles.
    */
   const PACK_C = "pack-47d71e72-3fac-5da6-a42f-e01cf5e3fd01";
   const DUPLICATE_PATH = `/customer/cart/30725140/pack/${PACK_B}/duplicate`;
@@ -811,9 +804,7 @@ const slow = (response: () => Response) => async () => {
 
 describe("remove_cart_pack", () => {
   /*
-   * From the capture's single-pack removal: cart 30742921 held Pack 1 and
-   * Pack 2; deleting Pack 2 left Pack 1 byte-identical and total_price at
-   * 220000.
+   * Deleting Pack 2 leaves Pack 1 byte-identical.
    */
   const CART_ID = 30742921;
   const PACK_1 = "pack-2a74396b-8d91-54d8-97ae-912b71e15ec5";
@@ -1015,7 +1006,7 @@ describe("remove_cart_pack", () => {
     const result = await remove({}, await sessionWith({ token: "secret-token-bob" }));
 
     expect(textOf(result)).toContain("pack_reference is not in your current cart");
-    expect(received.map((r) => r.authorization)).toEqual(["Bearer secret-token-bob"]);
+    expect(new Set(received.map((r) => r.authorization))).toEqual(new Set(["Bearer secret-token-bob"]));
     expect(deletes()).toHaveLength(0);
   });
 
@@ -1032,9 +1023,7 @@ describe("remove_cart_pack", () => {
 
 describe("clear_cart", () => {
   /*
-   * From the capture's Clear Cart step: DELETE /customer/cart/30725140, after
-   * which vendor 102555 had no cart and vendor 102556's cart 26876618 was
-   * untouched.
+   * Clearing one restaurant's cart leaves another restaurant's cart untouched.
    */
   const CLEAR_PATH = "/customer/cart/30725140";
   const OTHER_CART_PATH = "/customer/cart/26876618";
@@ -1045,9 +1034,11 @@ describe("clear_cart", () => {
     440000,
   );
 
+  const noActiveOrders = () => Response.json({ status: "success", data: [] });
   const scriptClear = (write: Handler, after: Handler) => {
     route("GET /customer/cart/vendor/102555", twoPacks, after);
     route(`DELETE ${CLEAR_PATH}`, write);
+    route("GET /customer/order", noActiveOrders);
   };
 
   const clear = async (
@@ -1070,6 +1061,7 @@ describe("clear_cart", () => {
       "GET /customer/cart/vendor/102555",
       `DELETE ${CLEAR_PATH}`,
       "GET /customer/cart/vendor/102555",
+      "GET /customer/order",
     ]);
     expect(deletes()[0]!.body).toBeUndefined();
     expect(deletes()[0]!.contentType).toBeNull();
@@ -1079,6 +1071,8 @@ describe("clear_cart", () => {
       cart_existed: true,
       cleared: true,
       removed_packs: 2,
+      active_orders_at_restaurant: [],
+      active_orders_note: "Chowdeck lists no active orders at this restaurant.",
     });
   });
 
@@ -1092,11 +1086,12 @@ describe("clear_cart", () => {
 
   test("does nothing when there is no cart for the restaurant", async () => {
     route("GET /customer/cart/vendor/102555", noCart);
+    route("GET /customer/order", noActiveOrders);
 
     const result = await clear();
 
     expect(result.isError).toBeUndefined();
-    expect(JSON.parse(textOf(result))).toEqual({
+    expect(JSON.parse(textOf(result))).toMatchObject({
       restaurant_id: 102555,
       cart_existed: false,
       cleared: false,
@@ -1116,6 +1111,7 @@ describe("clear_cart", () => {
       noCart,
     );
     route(`DELETE ${OTHER_CART_PATH}`, cleared);
+    route("GET /customer/order", noActiveOrders);
 
     await clear({ restaurant_id: 102556 });
 
@@ -1196,7 +1192,7 @@ describe("clear_cart", () => {
 
     await clear({}, await sessionWith({ token: "secret-token-bob" }));
 
-    expect(received.map((r) => r.authorization)).toEqual(["Bearer secret-token-bob"]);
+    expect(new Set(received.map((r) => r.authorization))).toEqual(new Set(["Bearer secret-token-bob"]));
     expect(deletes()).toHaveLength(0);
   });
 
@@ -1335,27 +1331,13 @@ describe("add_to_cart uncertain outcomes", () => {
 });
 
 /*
- * Observed 2026-10-22: cart 31006911 stayed active with order_id null while
- * six unpaid orders were created from it, so an order is a copy of the cart
- * and later cart edits never reach it. A cart Chowdeck links to an order
- * (order_id set) or reports as not active was not observed; ChowBot leaves
- * it alone. Values other than the shapes are fictional.
+ * An order is a copy of the cart, so later cart edits never reach it. A cart
+ * linked to an order or reported as not active is left alone.
  */
 describe("cart editability and orders already placed", () => {
   const twoPacks = [...packRows(PACK_A, [1, 2, 3]), ...packRows(PACK_B, [4, 5, 6])];
   const cartWithFields = (fields: Record<string, unknown>) => () =>
     Response.json({ status: "success", data: { ...cartData(twoPacks, 440000), ...fields } });
-
-  const serverWithOrders = (session: UserSession, listOpen: () => Promise<unknown[]>) => () => {
-    const server = new McpServer({ name: "ChowBot", version: "test" });
-    registerCartTools(
-      server,
-      session,
-      new ChowdeckClient({ baseUrl: upstream.url.origin, timeoutMs: 1000 }),
-      { listOpen } as never,
-    );
-    return server;
-  };
 
   test("a cart with order_id null is editable as usual and carries no editability fields", async () => {
     route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }));
@@ -1394,45 +1376,50 @@ describe("cart editability and orders already placed", () => {
     expect(received.filter((r) => r.method !== "GET")).toHaveLength(0);
   });
 
-  test("cart results say that editing or clearing the cart does not change or cancel an order already placed", async () => {
-    const session = await signedIn();
-    const listOpen = async () => [
-      { id: "a", state: "created", chowdeckOrderId: 43606940 },
-      { id: "b", state: "paid", chowdeckOrderId: 43605309 },
-      { id: "c", state: "unknown", chowdeckOrderId: null },
-    ];
+  /*
+   * Observed: Chowdeck lists an unpaid order among active orders with status
+   * "abandoned", and the cart stays active after it.
+   */
+  test("clear_cart reports the restaurant's active orders from Chowdeck and never claims they were cancelled", async () => {
     route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }), noCart);
     route("DELETE /customer/cart/30725140", () => Response.json({ status: "success", data: {} }));
+    route("GET /customer/order", () =>
+      Response.json({
+        status: "success",
+        data: [
+          { id: 43606940, vendor_id: 102555, status: "abandoned", total_price: 554000, customer: { phone: "PRIVATE" } },
+          { id: 43605309, vendor_id: 999, status: "pending" },
+        ],
+      }),
+    );
 
-    const cleared = JSON.parse(textOf(await callTool(serverWithOrders(session, listOpen), "clear_cart", { restaurant_id: 102555 })));
+    const result = await callTool(serverFor(await signedIn()), "clear_cart", { restaurant_id: 102555 });
+    const cleared = JSON.parse(textOf(result));
 
     expect(cleared.cleared).toBe(true);
-    expect(cleared.existing_orders).toEqual([
-      { order_id: 43606940, recorded_state: "created", note: expect.stringContaining("not changed or cancelled by editing or clearing the cart. To cancel it while it is unpaid, use cancel_order") },
-      { order_id: 43605309, recorded_state: "paid", note: expect.stringContaining("ChowBot cannot change or cancel a paid order") },
+    expect(cleared.active_orders_at_restaurant).toEqual([
+      { id: 43606940, vendor_id: 102555, status: "abandoned", total_price: 554000 },
     ]);
-    expect(cleared.existing_orders_source).toContain("check their current state with get_order_submission");
+    expect(cleared.active_orders_note).toContain("Clearing the cart did not change or cancel them");
+    expect(textOf(result)).not.toContain("PRIVATE");
+    expect(received.filter((r) => r.method !== "GET").map((r) => r.path)).toEqual(["/customer/cart/30725140"]);
   });
 
-  test("adds nothing when ChowBot placed no order there, or its records cannot be read", async () => {
-    const session = await signedIn();
-    route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }));
+  test("clear_cart still succeeds, saying so, when Chowdeck's order list cannot be read", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }), noCart);
+    route("DELETE /customer/cart/30725140", () => Response.json({ status: "success", data: {} }));
+    route("GET /customer/order", () => Response.json({ message: "Server Error" }, { status: 500 }));
 
-    const none = JSON.parse(textOf(await callTool(serverWithOrders(session, async () => []), "get_cart", { restaurant_id: 102555 })));
-    expect(none).not.toHaveProperty("existing_orders");
+    const result = await callTool(serverFor(await signedIn()), "clear_cart", { restaurant_id: 102555 });
+    const cleared = JSON.parse(textOf(result));
 
-    const failing = await callTool(serverWithOrders(session, async () => { throw new Error("db down"); }), "get_cart", { restaurant_id: 102555 });
-    expect(failing.isError).toBeUndefined();
-    expect(JSON.parse(textOf(failing))).not.toHaveProperty("existing_orders");
+    expect(result.isError).toBeUndefined();
+    expect(cleared.cleared).toBe(true);
+    expect(cleared).not.toHaveProperty("active_orders_at_restaurant");
+    expect(cleared.active_orders_note).toContain("could not read your active orders");
   });
 });
 
-/*
- * Brown bags as observed on 2026-10-22: POST /customer/cart/vendor/{id}
- * with {"bag_quantity":1} answered "Cart updated successfully", and the
- * re-read cart showed bag_quantity 1, bag_information {amount_per_bag:
- * 20000, total_amount: 20000, quantity: 1} and total_price 570000.
- */
 describe("set_cart_bags", () => {
   const rows = packRows(PACK_A, [1, 2, 3]);
   const cartWithBags = (bags: number, extra: Record<string, unknown> = {}) => () =>

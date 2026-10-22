@@ -10,9 +10,7 @@ import {
 } from "../../../features/checkout/discounts";
 
 /*
- * The website's discount/apply request, reproduced from cart rows as the
- * storefront code builds it. Rows are
- * fictional.
+ * The website's discount/apply request, built from cart rows. Rows are fictional.
  */
 
 const row = (fields: Record<string, unknown>) => ({ id: Math.floor(Math.random() * 1e6), name: "Item", quantity: 1, price_per_quantity: 1000, ...fields });
@@ -96,8 +94,7 @@ describe("discountRequestBody", () => {
   });
 
   /*
-   * The request the website sent on 2026-10-22 when 5FOR5 was chosen, with
-   * the fee quote's id and final delivery amount; key order included.
+   * The website's request for 5FOR5, key order included.
    */
   test("sends the fee quote's id and delivery fee exactly as observed on the wire", () => {
     const observed = {
@@ -139,8 +136,7 @@ describe("parseAppliedDiscounts and totalOff", () => {
   });
 
   /*
-   * The response observed 2026-10-22 for promo code 5FOR5 (free delivery),
-   * trimmed to the fields ChowBot reads.
+   * The 5FOR5 (free delivery) response, trimmed to the fields ChowBot reads.
    */
   test("keeps the promo code, title, description and terms Chowdeck returns, and matches discounts to a code", () => {
     const discounts = parseAppliedDiscounts({

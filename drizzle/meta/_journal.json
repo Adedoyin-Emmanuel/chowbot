@@ -64,6 +64,13 @@
       "when": 1792680957664,
       "tag": "0008_wallet_and_pay_for_me",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792694776152,
+      "tag": "0009_drop_order_workflow",
+      "breakpoints": true
     }
   ]
 }

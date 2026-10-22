@@ -10,7 +10,6 @@ import {
   bearerAuthChallengeResponse,
   buildOAuthProtectedResourceMetadata,
   getOAuthProtectedResourceMetadataUrl,
-  type RequestStateCodec,
 } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 
@@ -22,10 +21,6 @@ import {
   createAuthorizeRouter,
   type AuthorizeLimits,
 } from "./authorize-router";
-import {
-  bindOrderSubmissions,
-  type OrderSubmissionStore,
-} from "../lib/order-submissions";
 import {
   createInProcessCodeExchange,
   type AuthorizationCodeStore,
@@ -64,9 +59,7 @@ export type HttpAppOptions = {
   codes: AuthorizationCodeStore;
   refreshTokens?: RefreshTokenStore;
   exchange?: AuthorizationCodeExchange;
-  requestStateCodec?: RequestStateCodec;
   paymentStartConfig?: PaymentStartConfig;
-  orderSubmissions?: OrderSubmissionStore;
   paymentChannelQuery?: PaymentChannelQuery;
   authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
@@ -125,8 +118,6 @@ export const createHttpApp = ({
   exchange = createInProcessCodeExchange(codes, tokens, refreshTokens),
   authorizeLimits,
   serverFactory = createServer,
-  orderSubmissions,
-  requestStateCodec,
   paymentChannelQuery,
   paymentStartConfig,
   placeOrderEnabled,
@@ -166,10 +157,6 @@ export const createHttpApp = ({
       }
       return serverFactory({
         session: bindSession(sessions, userId),
-        ...(orderSubmissions && {
-          submissions: bindOrderSubmissions(orderSubmissions, userId),
-        }),
-        ...(requestStateCodec && { requestStateCodec }),
         ...(paymentChannelQuery && { paymentChannelQuery }),
         ...(paymentStartConfig && { paymentStartConfig }),
         ...(placeOrderEnabled === true && { placeOrderEnabled }),

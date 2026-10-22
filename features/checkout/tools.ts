@@ -3,13 +3,9 @@ import { McpServer } from "@modelcontextprotocol/server";
 
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
-import type { UserOrderSubmissions } from "../../lib/order-submissions";
 import { textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
-import CheckoutService, {
-  CheckoutRefusedError,
-  PREVIEW_PAYMENT_METHODS,
-} from "./service";
+import CheckoutService, { CheckoutRefusedError } from "./service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
 const SESSION_UNAVAILABLE =
@@ -28,11 +24,7 @@ const getCheckoutQuoteSchema = {
     .describe("Delivery address ID, as returned by list_addresses"),
 };
 
-/*
- * The order options shared by preview_order and place_order, so both accept
- * and validate exactly the same values. A promo code is applied in the quote
- * (get_checkout_quote), never at placement.
- */
+// The order options place_order accepts beside the quote's own inputs.
 export const orderOptionsSchema = {
   tip: z
     .union([
@@ -58,23 +50,6 @@ export const orderOptionsSchema = {
 
 const promoCodeInput = z.string().max(100);
 
-export const checkoutDraftSchema = {
-  promo_code: promoCodeInput
-    .optional()
-    .describe("A promo code the user wants to try. Preview only: to order with it, use get_checkout_quote with promo_code."),
-  ...orderOptionsSchema,
-};
-
-const previewOrderSchema = {
-  ...getCheckoutQuoteSchema,
-  payment_method: z
-    .enum(PREVIEW_PAYMENT_METHODS)
-    .describe(
-      "wallet, or pay_for_me (someone else pays through a share link). Pay online is not supported yet.",
-    ),
-  ...checkoutDraftSchema,
-};
-
 const failure = (action: string, tool: string, error: unknown) => {
   if (error instanceof NotSignedInError) {
     return textResult(
@@ -96,16 +71,15 @@ export const registerCheckoutTools = (
   server: McpServer,
   session?: UserSession,
   client?: ChowdeckClient,
-  submissions?: UserOrderSubmissions,
 ) => {
-  const service = session && new CheckoutService(session, client, submissions);
+  const service = session && new CheckoutService(session, client);
 
   server.registerTool(
     "get_checkout_quote",
     {
       title: "Get checkout quote",
       description:
-        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly; a new quote replaces any earlier unconfirmed quote for the cart. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. A promo code cannot be added to an order that already exists. Amounts are Chowdeck's raw values without unit conversion; computed_total and estimated_total_after_discount are calculated by ChowBot, not returned by Chowdeck.",
+        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Show the user computed_total (and any promo discount and tip); place_order needs computed_total.amount as quoted_total. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. Amounts are Chowdeck's raw values without unit conversion; computed_total and estimated_total_after_discount are calculated by ChowBot, not returned by Chowdeck.",
       inputSchema: z.object({
         ...getCheckoutQuoteSchema,
         promo_code: promoCodeInput.optional().describe("A promo code on the user's account to apply in this quote"),
@@ -146,55 +120,6 @@ export const registerCheckoutTools = (
         return textResult(JSON.stringify(await service.listPromoCodes(restaurant_id)));
       } catch (error) {
         return failure("list promo codes", "list_promo_codes", error);
-      }
-    },
-  );
-
-  server.registerTool(
-    "check_promo_code",
-    {
-      title: "Check a promo code",
-      description:
-        "Ask Chowdeck's discount calculation what a promo code would take off the signed-in user's cart at a restaurant, without requesting a fee quote. Builds the request exactly as the Chowdeck website does; delivery-fee discounts (such as free delivery) are not included, so use get_checkout_quote with promo_code to apply a code. A result is Chowdeck's calculation, not a guarantee: the amount to pay is read from Chowdeck's order record before payment. Does not add the code to the account, change the cart or place an order.",
-      inputSchema: z.object({
-        ...getCheckoutQuoteSchema,
-        promo_code: z.string().max(100).describe("The promo code to check"),
-      }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    async ({ restaurant_id, address_id, promo_code }) => {
-      if (!service) return textResult(SESSION_UNAVAILABLE, true);
-      try {
-        return textResult(JSON.stringify(await service.checkPromoCode(restaurant_id, address_id, promo_code)));
-      } catch (error) {
-        return failure("check the promo code", "check_promo_code", error);
-      }
-    },
-  );
-
-  server.registerTool(
-    "preview_order",
-    {
-      title: "Preview order (dry run)",
-      description:
-        "Dry run only: checks the signed-in user's cart, address, restaurant and payment choice, and shows the delivery order ChowBot would send to Chowdeck, including the cart's notes and any promo code, tip or gift details given here. checkout_draft separates what Chowdeck confirmed from what the user provided and what is unconfirmed. It never places an order, requests a delivery-fee quote, starts a payment or changes the cart. Fee and address ids are withheld.",
-      inputSchema: z.object(previewOrderSchema),
-      annotations: { readOnlyHint: true, openWorldHint: true },
-    },
-    async ({ restaurant_id, address_id, payment_method, promo_code, tip, gift }) => {
-      if (!service) return textResult(SESSION_UNAVAILABLE, true);
-      try {
-        return textResult(
-          JSON.stringify(
-            await service.previewOrder(restaurant_id, address_id, payment_method, {
-              ...(promo_code !== undefined && { promo_code }),
-              ...(tip !== undefined && { tip }),
-              ...(gift !== undefined && { gift }),
-            }),
-          ),
-        );
-      } catch (error) {
-        return failure("preview order", "preview_order", error);
       }
     },
   );

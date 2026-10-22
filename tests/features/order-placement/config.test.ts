@@ -3,10 +3,8 @@ import { describe, expect, test } from "bun:test";
 import { readOrderPlacementConfig } from "../../../features/order-placement/config";
 
 /*
- * Live ordering is on by default in the hosted server;
- * CHOWBOT_PLACE_ORDER_ENABLED=false is the kill switch. The channel query
- * defaults to the captured website request (methods="", country NG) and
- * may only be overridden with exactly those values.
+ * Live ordering is on by default; CHOWBOT_PLACE_ORDER_ENABLED=false is the
+ * kill switch. The channel query may only be overridden with its defaults.
  */
 
 const CAPTURED = {

@@ -1,15 +1,8 @@
 import { isRecord } from "../../utils/object";
 
 /*
- * User-chosen checkout extras that the storefront keeps in local state and
- * sends only with the order (storefront chunk 3488 handleCheckout, read
- * 2026-10-21): promo codes, the rider tip and gift details. ChowBot keeps no
- * draft state: these are validated from tool arguments on every call.
- *
- * Evidence, from the website's code:
- *   promo_codes: [promo?.code, discount?.code].filter(Boolean), else []
- *   tip:         sent only when truthy, as Math.round(100 * naira) (raw x100)
- *   gift_recipient: the gift form's values (below), or null; null for pickup
+ * Checkout extras sent only with the order: promo codes, the rider tip and
+ * gift details. They are validated from tool arguments on every call.
  */
 
 export const CONFIG_PATH = "/customer/config";
@@ -21,11 +14,7 @@ const fail = (error: string) => ({ ok: false as const, error });
 const CONTROL = /[\u0000-\u001F\u007F]/;
 const codePoints = (value: string) => [...value].length;
 
-/*
- * Promo code. Chowdeck's own code format is unknown, so this is ChowBot's
- * conservative rule: 1-40 letters, digits, "_" or "-", trimmed, case kept as
- * entered (the website sends the code object's `code` unchanged).
- */
+// ChowBot's own rule; Chowdeck's code format is unknown.
 export const PROMO_CODE_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
 
 export const validatePromoCode = (input: string): Validation<string> => {
@@ -35,12 +24,7 @@ export const validatePromoCode = (input: string): Validation<string> => {
     : fail("must be 1-40 letters, digits, '_' or '-' (ChowBot's rule; Chowdeck's own format is unknown)");
 };
 
-/*
- * Tip limits from GET /customer/config: data.delivery_driver_tips_config
- * with minimum_tip_amount / maximum_tip_amount (raw x100) and
- * recommendation_percent. The website shows no tip control at all when
- * recommendation_percent is absent, so tips are then unavailable.
- */
+// Without recommendation_percent the website offers no tip, so neither do we.
 export type TipConfig = { available: boolean; minimum: number; maximum: number };
 
 export const parseTipConfig = (body: unknown): TipConfig | undefined => {
@@ -64,11 +48,8 @@ export const formatNaira = (raw: number) =>
   `₦${(raw / 100).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /*
- * A tip the user chose, in naira, converted to Chowdeck's raw x100 units
- * exactly once (the website's Math.round(100 * value)). Unlike the website,
- * more than two decimal places are refused rather than rounded. 0 is no tip,
- * as the website never sends tip: 0. The website's bounds are inclusive:
- * below the minimum, or above a positive maximum, is refused.
+ * Naira converted to raw x100 exactly once. More than two decimals are
+ * refused, not rounded. 0 is no tip. Bounds are inclusive.
  */
 export const tipFromNaira = (naira: number, config: TipConfig | undefined): Validation<TipChoice> => {
   if (!Number.isFinite(naira) || naira < 0) return fail("must be a number of naira, 0 or more");
@@ -85,16 +66,8 @@ export const tipFromNaira = (naira: number, config: TipConfig | undefined): Vali
 };
 
 /*
- * Gift recipient, in the website's gift form shape (storefront module
- * 64834): phone must match /^[0-9]+$/ (digits only; the country is chosen
- * separately as country_code, a two-letter code such as "NG"), donor_name,
- * name and country_code must be non-empty, email must be valid or blank,
- * message is optional, and the object sent is { country_code, phone
- * (trimmed), donor_name, name, email?, message (trimmed),
- * save_as_beneficiary }. The website then checks the phone with
- * POST /auth/phone/validate {phone, country_code} and reads
- * data.data.is_valid; ChowBot does not call it, so the phone is unverified.
- * The 7-15 digit range and the length limits are ChowBot's rules.
+ * The phone is not validated with Chowdeck, so it is unverified. The 7-15
+ * digit range and the length limits are ChowBot's rules.
  */
 export type GiftRecipientInput = {
   donor_name: string;
@@ -121,9 +94,7 @@ const MAX_GIFT_MESSAGE = 500;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE = /^[0-9]+$/;
 
-/*
- * Only the message may span lines (\n or \r\n); names are single-line.
- */
+// Only the message may span lines.
 const textField = (
   label: string,
   value: string | undefined,

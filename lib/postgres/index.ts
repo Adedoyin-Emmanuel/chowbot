@@ -8,7 +8,6 @@ import { PostgresSessionStore } from "./sessions";
 import { PostgresCodeExchange } from "./token-exchange";
 import { PostgresRefreshTokenStore } from "./refresh-tokens";
 import { PostgresAccessTokenStore } from "./access-tokens";
-import { PostgresOrderSubmissionStore } from "./order-submissions";
 import { PostgresAuthorizationCodeStore } from "./authorization-codes";
 
 export const createPostgresStores = (sql: SQL, keyring: Keyring) => {
@@ -21,6 +20,5 @@ export const createPostgresStores = (sql: SQL, keyring: Keyring) => {
     tokens: new PostgresAccessTokenStore(db),
     exchange: new PostgresCodeExchange(db),
     refreshTokens: new PostgresRefreshTokenStore(db),
-    orderSubmissions: new PostgresOrderSubmissionStore(db, keyring),
   };
 };

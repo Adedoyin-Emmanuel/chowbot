@@ -2,16 +2,8 @@ import { isRecord } from "../../utils/object";
 import { ChowdeckApiError } from "../../lib/client";
 
 /*
- * Chowdeck's discount calculation, built exactly as the storefront builds it
- * (chunk 6117 module 64269 `P` for the packs; chunk 3488 for the request;
- * read 2026-10-21). The website runs
- * it on every cart, fee or promo change and on window focus, which is why it
- * is treated as a calculation rather than a change to anything.
- *
- * Observed on the wire 2026-10-22 (promo code 5FOR5, free delivery): the
- * website sends the fee quote's id and final_delivery_amount, and each
- * returned discount carries discount_id, title, description, amount_off,
- * target ("deliveryfees"), discount_terms and the promo_code it came from.
+ * Chowdeck's discount calculation, built as the website builds it. It is a
+ * read-only calculation, not a change to anything.
  */
 
 export const DISCOUNT_APPLY_PATH = "/customer/discount/apply";
@@ -31,10 +23,7 @@ export type DiscountContainer = {
   pack_id: number;
 };
 
-/*
- * The website's H(price, discount): the discount price when it is
- * non-negative and below the price, otherwise the price (0 when absent).
- */
+// The discount price when non-negative and below the price, else the price.
 export const effectivePrice = (price: unknown, discount: unknown) => {
   const base = typeof price === "number" ? price : 0;
   return typeof discount === "number" && discount >= 0 && discount < base ? discount : base;
@@ -50,10 +39,8 @@ const objectKeyOrder = (keys: string[]) => {
 };
 
 /*
- * order_items and containers from the cart's rows, as the website derives
- * them: packs in order of their first row's pack_reference (pack_id is the
- * 1-based position); each menu row carries every group row of its pack,
- * grouped by menu_group_id; container rows are listed separately.
+ * Packs in order of first appearance (pack_id is the 1-based position); each
+ * menu row carries every group row of its pack.
  */
 export const discountOrderLines = (cartItems: unknown[]) => {
   const rows = cartItems.filter(isRecord) as Row[];
@@ -117,11 +104,7 @@ export type AppliedDiscount = {
   terms?: string;
 };
 
-/*
- * The website reads the response's data as a list of applied discounts and
- * totals amount_off + (bogof_amount_off || 0); it treats a missing list as
- * none. Anything else is refused rather than guessed at.
- */
+// A missing list is no discounts; any other shape is refused.
 export const parseAppliedDiscounts = (body: unknown): AppliedDiscount[] => {
   const unexpected = new ChowdeckApiError(
     "invalid_response",
@@ -152,18 +135,11 @@ export const parseAppliedDiscounts = (body: unknown): AppliedDiscount[] => {
 export const totalOff = (discounts: AppliedDiscount[]) =>
   discounts.reduce((sum, d) => sum + d.amount_off + d.bogof_amount_off, 0);
 
-/*
- * The discounts Chowdeck attributes to a code, matched by the promo_code each
- * returned discount carries (codes compared without regard to case).
- */
+// Codes are compared case-insensitively.
 export const discountsForCode = (discounts: AppliedDiscount[], code: string) =>
   discounts.filter((d) => d.promo_code !== null && d.promo_code.toUpperCase() === code.toUpperCase());
 
-/*
- * The website's request body. Without a fee quote, fee_id and delivery_fee
- * take the website's own fallbacks (|| 0), and discounts on delivery fees are
- * then not evaluated; get_checkout_quote passes its fresh quote's values.
- */
+// Without a fee quote, delivery-fee discounts are not evaluated.
 export const discountRequestBody = (input: {
   promoCode?: string;
   vendorId: number;

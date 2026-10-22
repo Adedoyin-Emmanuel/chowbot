@@ -287,9 +287,7 @@ describe("get_restaurant_menu authentication", () => {
 });
 
 /*
- * Shaped after the sanitized capture of GET /customer/vendor/{id}/menu/{menu_id}
- * (2026-10-20): ids, prices and selection limits are copied from it. Fields the
- * tool must drop (extras, discounts, images, menu_group_ids) are kept here.
+ * Includes fields the tool must drop (extras, discounts, images, menu_group_ids).
  */
 const menuItemDetail = (overrides: Record<string, unknown> = {}) => ({
   status: "success",

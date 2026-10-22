@@ -1,20 +1,11 @@
 import type { Server } from "bun";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 
-import { randomBytes } from "node:crypto";
-
 import { ChowdeckClient } from "../../../lib/client";
 import { createServer } from "../../../mcp/server";
 import { readOrderPlacementConfig } from "../../../features/order-placement/config";
-import { createKeyring } from "../../../lib/encryption";
-import { createChowbotRequestStateCodec } from "../../../lib/request-state";
 import { CAPTURED_PAYMENT_CHANNEL_QUERY, resolvePaymentChannel } from "../../../features/order-placement/channels";
 
-/*
- * The response shape follows the sanitized channel capture (id, name,
- * processor, is_active; eight channels including opay). The query is the
- * captured website request: methods present and empty, country_identifier NG.
- */
 const QUERY = CAPTURED_PAYMENT_CHANNEL_QUERY;
 const OBSERVED_CHANNELS = [
   { id: 1, name: "card", processor: "paystack", is_active: 1 },
@@ -129,10 +120,8 @@ describe("resolvePaymentChannel", () => {
 });
 
 /*
- * Guards for enablement: until the real channel query values and the
- * payment-start redirect values are captured, production must not supply
- * placeholder values (so place_order stays unregistered) and nothing may
- * start a payment.
+ * Production must not supply placeholder values, so place_order stays
+ * unregistered and nothing may start a payment.
  */
 describe("production configuration", () => {
   const ROOT = `${import.meta.dir}/../../..`;
@@ -184,15 +173,13 @@ describe("production configuration", () => {
     expect(readOrderPlacementConfig(example)).toMatchObject({ placeOrderEnabled: true, warnings: [] });
   });
 
-  test("the production server composition registers neither place_order nor start_payment", async () => {
+  test("the server composition registers neither place_order nor start_payment unless live ordering is configured", async () => {
     const server = createServer({
       session: { get: async () => undefined, save: async () => {}, clear: async () => {} },
-      submissions: {} as never,
-      requestStateCodec: createChowbotRequestStateCodec(createKeyring(randomBytes(32)).requestStateKey),
     });
     const names = Object.keys((server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
 
-    expect(names).toContain("get_order_submission");
+    expect(names).toContain("get_checkout_quote");
     expect(names).not.toContain("place_order");
     expect(names).not.toContain("start_payment");
   });

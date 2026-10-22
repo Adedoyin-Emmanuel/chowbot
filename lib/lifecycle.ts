@@ -5,9 +5,7 @@ import type { Server } from "node:http";
  * accepting connections, new requests on kept-alive connections are refused
  * (see createHttpApp's lifecycle option), and requests already running get
  * the grace period to finish, so an order request in flight can complete and
- * have its outcome recorded. Nothing is retried or replayed on shutdown or on
- * the next start: an attempt cut off by the grace deadline keeps its marker
- * and is reported as having an unknown outcome.
+ * report its outcome. Nothing is retried or replayed on shutdown or restart.
  */
 
 export const SHUTDOWN_GRACE_MARGIN_MS = 10_000;
@@ -55,7 +53,7 @@ export const createGracefulShutdown = ({
 
     const deadline = setTimeout(() => {
       log.error(
-        "Shutdown grace period expired with requests still running; exiting. Any order attempt cut off here keeps its marker and is reported as an unknown outcome; it is never retried.",
+        "Shutdown grace period expired with requests still running; exiting. An order request cut off here is never retried; its outcome must be checked on Chowdeck.",
       );
       exit(1);
     }, graceMs);

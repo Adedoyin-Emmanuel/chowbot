@@ -61,11 +61,7 @@ const summarizeItem = (item: Record<string, unknown>) => {
   return summary;
 };
 
-/*
- * Field lists for the menu-item detail follow the sanitized capture of
- * GET /customer/vendor/{id}/menu/{menu_id} (2026-10-20). description is not in
- * that capture and is passed through only when present. Amounts are raw.
- */
+// description is passed through only when present. Amounts are raw.
 const DETAIL_ITEM_FIELDS = [
   "id",
   "name",

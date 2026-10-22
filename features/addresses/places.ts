@@ -1,12 +1,7 @@
 import { isRecord } from "../../utils/object";
 import { ChowdeckApiError } from "../../lib/client";
 
-/*
- * Parsing for Chowdeck's Google Places proxy and the website's place-to-
- * address transform (address report §3.1, wire shapes §9.2). Responses use
- * the Google Places envelope: autocomplete {predictions, status}, details
- * {html_attributions, result, status}.
- */
+// Parsing for Chowdeck's Google Places proxy, which uses Google's envelopes.
 
 export const PLACE_AUTOCOMPLETE_PATH = "/place/autocomplete/json";
 export const PLACE_DETAILS_PATH = "/place/details/json";
@@ -21,10 +16,7 @@ export type PlaceSuggestion = {
   secondary_text?: string;
 };
 
-/*
- * The ten fields the website's quick picker sends to POST /customer/address,
- * observed on the wire with exactly these types.
- */
+// The fields the website sends to POST /customer/address.
 export type AddressCreatePayload = {
   place_id: string;
   house_no: string;
@@ -38,10 +30,6 @@ export type AddressCreatePayload = {
   area: string;
 };
 
-/*
- * Google status values are short upper-case codes; anything else is not
- * echoed back.
- */
 const statusOf = (body: Record<string, unknown>) =>
   typeof body.status === "string" && /^[A-Z_]{1,40}$/.test(body.status) ? body.status : undefined;
 
@@ -51,11 +39,7 @@ const unexpected = (path: string, detail = "an unexpected response shape") =>
 const nonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
 
-/*
- * OK yields the predictions; ZERO_RESULTS (Google's no-match status) yields
- * none; every other status is reported, as the website would show nothing.
- * Predictions without a usable place_id and description are dropped.
- */
+// ZERO_RESULTS yields no predictions; any other non-OK status is an error.
 export const parseAutocomplete = (body: unknown): PlaceSuggestion[] => {
   if (!isRecord(body)) throw unexpected(PLACE_AUTOCOMPLETE_PATH);
   const status = statusOf(body);
@@ -82,12 +66,8 @@ export const parseAutocomplete = (body: unknown): PlaceSuggestion[] => {
 };
 
 /*
- * The website's lookup (storefront chunk 6117, re-read 2026-10-21): it walks
- * every component and sets map[type] = component.long_name, so the LAST
- * component of a type wins, and a later component with an empty long_name
- * leaves that type empty (and the `||` chains fall through). Two deliberate
- * differences: malformed components are skipped rather than throwing, and a
- * whitespace-only name counts as empty.
+ * As the website does, the last component of a type wins, even when its
+ * long_name is empty. Malformed components are skipped.
  */
 const componentLookup = (components: unknown[]) => {
   const byType = new Map<string, unknown>();
@@ -107,11 +87,8 @@ const isCoordinate = (value: unknown, limit: number): value is number =>
   typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= limit;
 
 /*
- * The website's transform (address report §3.1), except that coordinates are
- * never defaulted: the website's `lng || 0` fallback would save an address at
- * 0,0, so missing, non-numeric, out-of-range or 0,0 coordinates are refused,
- * as are a missing place_id or formatted_address. Nothing here comes from the
- * caller; everything is read from Chowdeck's place details.
+ * Unlike the website, coordinates are never defaulted to 0,0: missing or
+ * invalid coordinates are refused.
  */
 export const parsePlaceDetails = (body: unknown): AddressCreatePayload => {
   if (!isRecord(body)) throw unexpected(PLACE_DETAILS_PATH);
