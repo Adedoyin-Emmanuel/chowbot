@@ -530,6 +530,20 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       expect(received).toHaveLength(0);
     });
 
+    test.each([
+      ["pay_for_me", "this is a pay-for-me order: whoever pays uses the link place_order returned"],
+      ["wallet", "this order was placed to be paid from the Chowdeck wallet"],
+    ])("refuses a %s order before any Chowdeck request", async (channel, message) => {
+      scriptUnpaidOrder();
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { payment_channel_name: channel, payment_method_id: null });
+
+      const body = await call({ baseUrl, quoteRef });
+
+      expect(messageOf(body)).toContain(message);
+      expect(received).toHaveLength(0);
+    });
+
     test("refuses an attempt an operator marked abandoned, before any Chowdeck request", async () => {
       scriptUnpaidOrder();
       const baseUrl = await startApp();

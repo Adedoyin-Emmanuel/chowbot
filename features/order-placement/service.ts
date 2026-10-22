@@ -9,9 +9,10 @@ import {
 import { randomBytes } from "node:crypto";
 
 import {
+  isIdLessChoice,
   resolvePaymentChannel,
+  type OrderPaymentChoice,
   type PaymentChannelQuery,
-  type SupportedPaymentChannel,
 } from "./channels";
 import {
   RELEASED_WARNING_DAYS,
@@ -31,7 +32,7 @@ import {
   type OrderStatusReport,
 } from "../orders/status";
 import { logger } from "../../utils/logger";
-import OrderService, { readOrderState, trackingLinkOf, type OrderDetail } from "../orders/service";
+import OrderService, { payForMeLinkOf, readOrderState, trackingLinkOf, type OrderDetail } from "../orders/service";
 import { isRecord } from "../../utils/object";
 import CheckoutService, { CheckoutRefusedError } from "../checkout/service";
 import {
@@ -76,7 +77,7 @@ type PlacementState = {
   submissionId: string;
   nonce: string;
   addressId: number;
-  channel: SupportedPaymentChannel;
+  channel: OrderPaymentChoice;
   acknowledgementRequired: boolean;
   /*
    * The cart notes the user saw in the confirmation; the order copies the
@@ -114,7 +115,7 @@ const notesDigestOf = (raw: Record<string, unknown>) =>
 export type PlaceOrderArgs = {
   quote_ref: string;
   address_id: number;
-  payment_channel: SupportedPaymentChannel;
+  payment_channel: OrderPaymentChoice;
   tip?: "none" | { amount_naira: number };
   gift?: GiftRecipientInput;
   /*
@@ -366,15 +367,13 @@ class OrderPlacementService {
     if (!checked)
       return placeRefused("Order not placed: the cart changed since the quote.", NEW_QUOTE);
 
-    const channel = await resolvePaymentChannel(
-      this.client,
-      await this.authHeaders(),
-      this.channelQuery,
-      args.payment_channel,
-    );
+    const choice = args.payment_channel;
+    const channel = isIdLessChoice(choice)
+      ? { id: null, name: choice }
+      : await resolvePaymentChannel(this.client, await this.authHeaders(), this.channelQuery, choice);
     if (!channel) {
       return placeRefused(
-        `Order not placed: the ${args.payment_channel} payment channel is not available right now.`,
+        `Order not placed: the ${choice} payment channel is not available right now.`,
         "Try again later, or order in the Chowdeck app.",
       );
     }
@@ -396,6 +395,31 @@ class OrderPlacementService {
         return placeRefused(`Order not placed: ${error.message}.`, "Correct the tip or gift details and call place_order again without confirmation.");
       }
       throw error;
+    }
+
+    const estimate = confirmedEstimate(submission, extras);
+
+    /*
+     * A wallet order is paid from the balance when Chowdeck creates it, so
+     * the balance is read first and must cover the estimated total.
+     */
+    let walletTotal: number | undefined;
+    if (choice === "wallet") {
+      try {
+        walletTotal = (await this.checkout.readWalletBalance()).total;
+      } catch (error) {
+        if (error instanceof NotSignedInError) throw error;
+        return placeRefused(
+          `Order not placed: ChowBot could not read your Chowdeck wallet balance (${describeError(error)}).`,
+          "Try again later, or choose another payment option.",
+        );
+      }
+      if (walletTotal < estimate) {
+        return placeRefused(
+          `Order not placed: your Chowdeck wallet balance (${formatNaira(walletTotal)}) is below the estimated total (${formatNaira(estimate)}).`,
+          "Top up the wallet in the Chowdeck app, or choose another payment option.",
+        );
+      }
     }
 
     const unresolved = await this.unresolvedAttempts(
@@ -428,14 +452,19 @@ class OrderPlacementService {
       .flatMap((pack) => pack.rows.filter((row) => row.type === "menu"))
       .map((row) => `${row.quantity ?? 1} × ${row.name ?? "item"}`)
       .join(", ");
-    const estimate = confirmedEstimate(submission, extras);
+    const paymentLine =
+      choice === "wallet"
+        ? `Payment: your Chowdeck wallet (balance ${formatNaira(walletTotal!)}). Chowdeck takes the payment from the wallet when it creates the order; ChowBot cannot undo that.`
+        : choice === "pay_for_me"
+          ? "Payment: pay for me. Chowdeck creates the order unpaid and returns a link to share with whoever will pay; anyone with the link can pay it."
+          : `Payment: ${channel.name}. The order is created unpaid; payment is completed separately, after Chowdeck's own order total is shown.`;
 
     const message = [
       `Place this order at ${restaurantName}?`,
       `Items: ${items}.`,
       `Deliver to: ${addressLabel}.`,
       `Total: ${submission.computedTotal} (raw Chowdeck amount: cart total plus delivery and service fees, computed by ChowBot).`,
-      `Payment: ${channel.name}. The order is created unpaid; payment is completed separately, after Chowdeck's own order total is shown.`,
+      paymentLine,
       extras.tipRaw !== undefined
         ? `Tip: ${formatNaira(extras.tipRaw)} for the rider.`
         : "Tip: none (ChowBot does not add a tip).",
@@ -493,7 +522,11 @@ class OrderPlacementService {
         message: "Nothing was ordered yet. The user must confirm the summary first.",
         chowdeck_confirmed: [
           "the cart, saved address and restaurant were re-checked with Chowdeck",
-          `the ${channel.name} payment channel is active on Chowdeck`,
+          choice === "wallet"
+            ? `your Chowdeck wallet balance is ${formatNaira(walletTotal!)}`
+            : choice === "pay_for_me"
+              ? "pay for me needs no payment channel"
+              : `the ${channel.name} payment channel is active on Chowdeck`,
           ...(extras.promoCode ? [`Chowdeck's discount calculation in the quote returned ${formatNaira(submission.promoDiscount ?? 0)} off for ${extras.promoCode}`] : []),
         ],
         status: null,
@@ -656,7 +689,12 @@ class OrderPlacementService {
           : "delivery",
       fee_id: feeId,
       address_id: args.address_id,
-      payment_method_id: submission.paymentMethodId,
+      // As the website: online channels send their id; wallet and pay for me send their type.
+      ...(submission.paymentChannelName === "wallet"
+        ? { payment_method: "wallet" }
+        : submission.paymentChannelName === "pay_for_me"
+          ? { payment_method: "pay_for_me", has_external_payment: true }
+          : { payment_method_id: submission.paymentMethodId }),
       split_payment_with_wallet: false,
       requires_delivery_pin: true,
       bag_quantity: raw.bag_quantity,
@@ -789,10 +827,32 @@ class OrderPlacementService {
       warnings.push("Chowdeck's order record could not be read, so its total is not confirmed yet.");
     }
 
+    const channel = submission.paymentChannelName;
+    const paid = status.order_state === "payment_confirmed";
+    const payForMeLink = payForMeLinkOf(data.pay_for_me_url);
+    if (channel === "pay_for_me" && !payForMeLink) {
+      warnings.push("Chowdeck returned no pay-for-me link in the expected form; the user can find the order in the Chowdeck app to share it.");
+    }
+    if (channel === "wallet" && !paid) {
+      warnings.push(
+        "Chowdeck's order record does not show the wallet payment as successful. Do not pay this order another way until get_order_submission shows its state.",
+      );
+    }
+    const nextStep =
+      channel === "pay_for_me"
+        ? "Give the user pay_for_me_link to share with the person who will pay (anyone with it can pay the order). start_payment is not used for this order. Check payment with get_order_submission: it is confirmed only from Chowdeck's order record. While unpaid, it can be cancelled with cancel_order. Do not place this order again."
+        : channel === "wallet"
+          ? paid
+            ? "Tell the user the order is paid from their wallet, as Chowdeck's order record shows. Follow it with track_order (tracking_link is Chowdeck's tracking page; it is private to the user). Do not place this order again."
+            : "Do not pay this order another way and do not place it again. Check it with get_order_submission until Chowdeck's order record shows whether the wallet payment went through."
+          : "To pay, call start_payment with this quote_ref: it first shows Chowdeck's own order total for the user to confirm, then returns a payment link. If start_payment is not available, the user pays in the Chowdeck app. To drop the unpaid order instead, use cancel_order; editing or clearing the cart does not cancel it. Once paid, follow it with track_order (tracking_link is Chowdeck's tracking page; it is private to the user). Do not place this order again.";
+
     const result = {
       action: "place_order",
       outcome: "order_created",
-      message: `Chowdeck order ${orderId} was created and is unpaid. Nothing has been paid yet.`,
+      message: paid
+        ? `Chowdeck order ${orderId} was created, and Chowdeck's order record shows it paid.`
+        : `Chowdeck order ${orderId} was created and is unpaid. Nothing has been paid yet.`,
       chowdeck_confirmed: confirmed,
       status,
       amount,
@@ -805,9 +865,9 @@ class OrderPlacementService {
       ...(extras.promoCode && { promo_code: extras.promoCode }),
       ...(extras.gift && { gift_for: extras.gift.name }),
       ...(trackingLinkOf(data.tracking_url) && { tracking_link: trackingLinkOf(data.tracking_url) }),
+      ...(payForMeLink && { pay_for_me_link: payForMeLink }),
       ...(warnings.length > 0 && { warnings }),
-      next_step:
-        "To pay, call start_payment with this quote_ref: it first shows Chowdeck's own order total for the user to confirm, then returns a payment link. If start_payment is not available, the user pays in the Chowdeck app. To drop the unpaid order instead, use cancel_order; editing or clearing the cart does not cancel it. Once paid, follow it with track_order (tracking_link is Chowdeck's tracking page; it is private to the user). Do not place this order again.",
+      next_step: nextStep,
       outcome_uncertain: false,
       safe_to_retry: false,
     };
@@ -1070,6 +1130,9 @@ class OrderPlacementService {
         ...(submission.paymentStartedAt
           ? ["A payment link was generated for this order: if the user has paid or is paying, do not cancel, as ChowBot does not handle refunds."]
           : []),
+        ...(submission.paymentChannelName === "pay_for_me"
+          ? ["This is a pay-for-me order: if the person paying may already be paying through the shared link, check with them first, as ChowBot does not handle refunds."]
+          : []),
         "The cart is not changed, and no payment can be started for this order afterwards.",
       ].join(" ");
       const confirmation = await this.requestStateCodec.mint(
@@ -1327,6 +1390,10 @@ const guidanceFor = (attempt: OrderSubmission, status?: OrderStatusReport) => {
     case "created":
       if (status?.order_state === "unknown")
         return "ChowBot cannot tell the order's current state right now. Do not pay or order again until it can be checked. The cart stays locked.";
+      if (attempt.paymentChannelName === "pay_for_me")
+        return "The order exists on Chowdeck and is not paid yet: it waits for someone to pay through the pay-for-me link. Check again later, or cancel it with cancel_order. Editing or clearing the cart does not change or cancel it. The cart stays locked.";
+      if (attempt.paymentChannelName === "wallet")
+        return "The order exists on Chowdeck, but its record does not show the wallet payment. Do not pay it another way; check again later or in the Chowdeck app. The cart stays locked.";
       return "The order exists on Chowdeck and is not paid. Pay it with start_payment (which shows Chowdeck's total first), or cancel it with cancel_order. Editing or clearing the cart does not change or cancel it. The cart stays locked.";
     case "paid":
       return "ChowBot recorded Chowdeck's payment confirmation earlier; see status for the current reading. The cart stays locked until it changes.";

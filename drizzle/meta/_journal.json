@@ -57,6 +57,13 @@
       "when": 1792674522099,
       "tag": "0007_promo_and_cancellation",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792680957664,
+      "tag": "0008_wallet_and_pay_for_me",
+      "breakpoints": true
     }
   ]
 }

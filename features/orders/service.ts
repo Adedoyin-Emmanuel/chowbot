@@ -25,9 +25,9 @@ type Fields = Record<string, ScalarValue>;
 /*
  * Explicit allowlists of observed fields. Nested objects (customer, address,
  * driver, vendorAddress) are never copied, and fee_id, order_pin, code,
- * pay_for_me_url, references and user/customer/address IDs are never listed.
- * tracking_url is listed only in the form Chowdeck was seen to send (see
- * trackingLinkOf).
+ * references and user/customer/address IDs are never listed. tracking_url
+ * and pay_for_me_url are listed only in the form Chowdeck was seen to send
+ * (see trackingLinkOf and payForMeLinkOf).
  */
 const SUMMARY_FIELDS = [
   "id",
@@ -162,6 +162,29 @@ export const trackingLinkOf = (value: unknown): string | undefined => {
   return ok ? url.href : undefined;
 };
 
+/*
+ * A pay-for-me order carried pay_for_me_url
+ * https://chowdeck.com/store/pay/<token> (2026-10-22): a page where anyone
+ * with the link can pay the order. Only that form is passed on.
+ */
+export const payForMeLinkOf = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  const ok =
+    url.protocol === "https:" &&
+    url.hostname === "chowdeck.com" &&
+    !url.port &&
+    !url.username &&
+    !url.password &&
+    /^\/store\/pay\/[A-Za-z0-9_=+%-]+$/.test(url.pathname);
+  return ok ? url.href : undefined;
+};
+
 export type OrderResult = { order: OrderDetail };
 
 export type OrderTimelineResult = {
@@ -237,6 +260,8 @@ class OrderService {
     }
     const tracking = trackingLinkOf(data.tracking_url);
     if (tracking) order.tracking_url = tracking;
+    const payForMe = payForMeLinkOf(data.pay_for_me_url);
+    if (payForMe) order.pay_for_me_url = payForMe;
     if (Array.isArray(data.items)) {
       order.items = data.items
         .filter(isRecord)
@@ -258,6 +283,20 @@ class OrderService {
     if (isRecord(data.rider)) live.rider = pickScalarFields(data.rider, RIDER_FIELDS);
     if (isRecord(data.rider_location)) live.rider_location = pickScalarFields(data.rider_location, RIDER_LOCATION_FIELDS);
     return live;
+  }
+
+  /*
+   * The storefront's edit of a placed order's rider note (storefront code,
+   * read 2026-10-21): PUT /customer/order/{id}/delivery with
+   * {customer_delivery_note}. Never observed on the wire. Sent once; the
+   * caller confirms the change by reading the order again.
+   */
+  async sendDeliveryNote(orderId: string, note: string) {
+    return this.client.request(`${orderPath(orderId)}/delivery`, {
+      method: "PUT",
+      headers: await this.authHeaders(),
+      body: { customer_delivery_note: note },
+    });
   }
 
   async getOrderTimeline(orderId: string): Promise<OrderTimelineResult> {

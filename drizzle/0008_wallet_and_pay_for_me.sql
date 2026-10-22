@@ -1,0 +1,2 @@
+ALTER TABLE "order_submissions" DROP CONSTRAINT "order_submissions_confirmation_pending_check";--> statement-breakpoint
+ALTER TABLE "order_submissions" ADD CONSTRAINT "order_submissions_confirmation_pending_check" CHECK ("order_submissions"."state" <> 'confirmation_pending' OR (("order_submissions"."payment_method_id" IS NOT NULL OR "order_submissions"."payment_channel_name" IN ('wallet', 'pay_for_me')) AND "order_submissions"."confirmation_nonce_hash" IS NOT NULL AND "order_submissions"."confirmation_expires_at" IS NOT NULL));

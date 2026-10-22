@@ -1117,3 +1117,113 @@ describe("track_order", () => {
     expectOnlyGets();
   });
 });
+
+/*
+ * Changing a placed order's rider note: PUT /customer/order/{id}/delivery
+ * with {customer_delivery_note}, from the storefront code; never observed
+ * on the wire. The order record is read before and after.
+ */
+describe("update_order_delivery_note", () => {
+  const DELIVERY_PATH = `${ORDER_PATH}/delivery`;
+  let detailQueue: Handler[];
+  const scriptOrder = (...replies: Handler[]) => {
+    detailQueue = replies;
+    route(`GET ${ORDER_PATH}`, () => (detailQueue.length > 1 ? detailQueue.shift()! : detailQueue[0]!)());
+  };
+  const withNote = (note: string | null, extra: Record<string, unknown> = {}) => orderResponse({ customer_delivery_note: note, ...extra });
+  const update = async (delivery_note: unknown) =>
+    callTool(serverFor(await signedIn()), "update_order_delivery_note", { order_id: ORDER_ID, delivery_note });
+  const puts = () => received.filter((r) => r.method === "PUT");
+
+  test("sends the note once and confirms it from the re-read order", async () => {
+    scriptOrder(withNote("Blue gate"), withNote("Call on arrival"));
+    route(`PUT ${DELIVERY_PATH}`, () => Response.json({ status: "success", message: "Order updated" }));
+
+    const result = await update("  Call on arrival ");
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(puts()).toHaveLength(1);
+    expect(parsed).toMatchObject({ action: "update_order_delivery_note", outcome: "note_changed", outcome_uncertain: false });
+    expect(parsed.chowdeck_confirmed).toEqual(['the rider note on Chowdeck\'s order record is "Call on arrival"']);
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([`GET ${ORDER_PATH}`, `PUT ${DELIVERY_PATH}`, `GET ${ORDER_PATH}`]);
+  });
+
+  test("clears the note with null, and sends nothing when the order already has that note", async () => {
+    scriptOrder(withNote(""));
+    const parsed = JSON.parse(textOf(await update(null)));
+
+    expect(parsed.outcome).toBe("unchanged");
+    expect(puts()).toHaveLength(0);
+  });
+
+  test("refuses a cancelled order before sending", async () => {
+    scriptOrder(withNote("Blue gate", { status: "cancelled" }));
+
+    const parsed = JSON.parse(textOf(await update("Call on arrival")));
+
+    expect(parsed.outcome).toBe("not_sent");
+    expect(parsed.message).toContain("shows this order cancelled");
+    expect(puts()).toHaveLength(0);
+  });
+
+  test("reports Chowdeck's refusal without retrying", async () => {
+    scriptOrder(withNote("Blue gate"));
+    route(`PUT ${DELIVERY_PATH}`, () => Response.json({ message: "Order can no longer be updated" }, { status: 422 }));
+
+    const result = await update("Call on arrival");
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBe(true);
+    expect(parsed.outcome).toBe("rejected_by_chowdeck");
+    expect(parsed.message).toContain("Order can no longer be updated");
+    expect(puts()).toHaveLength(1);
+  });
+
+  test.each([
+    ["a server error", () => Response.json({ message: "Server Error" }, { status: 500 })],
+    ["an expired token", () => Response.json({ message: "Unauthenticated" }, { status: 401 })],
+    ["a failed envelope", () => Response.json({ status: "failed" })],
+  ])("after %s, trusts only the re-read order", async (_, reply) => {
+    scriptOrder(withNote("Blue gate"), withNote("Blue gate"));
+    route(`PUT ${DELIVERY_PATH}`, reply);
+
+    const parsed = JSON.parse(textOf(await update("Call on arrival")));
+
+    expect(parsed).toMatchObject({ outcome: "unconfirmed", outcome_uncertain: true, safe_to_retry: false });
+    expect(parsed.message).toContain('still shows "Blue gate"');
+    expect(puts()).toHaveLength(1);
+  });
+
+  test("reports the change when the re-read order shows it, even after an unclear answer", async () => {
+    scriptOrder(withNote("Blue gate"), withNote("Call on arrival"));
+    route(`PUT ${DELIVERY_PATH}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+
+    expect(JSON.parse(textOf(await update("Call on arrival"))).outcome).toBe("note_changed");
+  });
+
+  test("sends nothing when the order cannot be read, or the note is too long", async () => {
+    scriptOrder(() => Response.json({ message: "Server Error" }, { status: 503 }));
+    expect(JSON.parse(textOf(await update("Call on arrival"))).outcome).toBe("not_sent");
+
+    received = [];
+    expect(JSON.parse(textOf(await update("a".repeat(501)))).message).toContain("longer than 500 characters");
+    expect(received).toHaveLength(0);
+  });
+});
+
+describe("pay-for-me link in get_order", () => {
+  const LINK = "https://chowdeck.com/store/pay/T3R1ZzdSZ0VUejhJd2xFK0FhNXVHQT09Ojo6OmhVOThnYmVBVk4vQm02OUthT2NET2c9PQ";
+
+  test.each([
+    [LINK, LINK],
+    ["https://pay.example/store/pay/abc", undefined],
+    ["https://chowdeck.com/store/track/abc", undefined],
+  ])("passes on %p only in Chowdeck's form", async (value, expected) => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ pay_for_me_url: value }));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+
+    expect(parsed.order.pay_for_me_url).toBe(expected);
+  });
+});

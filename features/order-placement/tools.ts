@@ -10,7 +10,7 @@ import { CheckoutRefusedError } from "../checkout/service";
 import { orderOptionsSchema } from "../checkout/tools";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import type { UserOrderSubmissions } from "../../lib/order-submissions";
-import { SUPPORTED_PAYMENT_CHANNELS, type PaymentChannelQuery } from "./channels";
+import { ORDER_PAYMENT_CHOICES, type PaymentChannelQuery } from "./channels";
 
 const quoteRef = z.string().uuid().describe("quote_ref from get_checkout_quote");
 
@@ -22,9 +22,9 @@ const placeOrderSchema = {
     .positive()
     .describe("The delivery address used for the quote, from list_addresses"),
   payment_channel: z
-    .enum(SUPPORTED_PAYMENT_CHANNELS)
+    .enum(ORDER_PAYMENT_CHOICES)
     .describe(
-      "Online payment channel the user chose: card, bank_transfer, bank or ussd (Paystack checkout), opay, pocket (PocketApp; start_payment then needs their Pocket tag) or zap. The order is created unpaid; payment is completed separately with start_payment.",
+      "How the user chose to pay. Online channels: card, bank_transfer, bank or ussd (Paystack checkout), opay, pocket (PocketApp; start_payment then needs their Pocket tag) or zap; the order is created unpaid and paid with start_payment. wallet: paid from the user's Chowdeck wallet balance when the order is created (the balance must cover the estimated total). pay_for_me: created unpaid with a link the user shares with whoever will pay.",
     ),
   ...orderOptionsSchema,
   promo_code: z
@@ -131,7 +131,7 @@ export const registerOrderPlacementTools = (
     {
       title: "Place order",
       description:
-        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). The user must confirm the restaurant, items, delivery address, quoted total, payment channel, notes and any order options before anything is sent. The first call without confirmation places nothing and returns the full summary plus a confirmation value; show that entire summary to the user and only if they explicitly say yes, call place_order again with the same arguments plus confirmation. This two-call confirmation works without client-specific confirmation UI. The order is created unpaid; payment is not started here. The restaurant and delivery notes are the ones saved on the cart (set them first with set_cart_notes). A promo code comes from the quote (get_checkout_quote with promo_code); an optional tip or gift recipient is shown in the confirmation and sent with the order, and ChowBot never adds a tip itself. After creation the result reports Chowdeck's own order record (state, total, notes). Never call it again after an unknown outcome.",
+        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). The user must confirm the restaurant, items, delivery address, quoted total, payment channel, notes and any order options before anything is sent. The first call without confirmation places nothing and returns the full summary plus a confirmation value; show that entire summary to the user and only if they explicitly say yes, call place_order again with the same arguments plus confirmation. This two-call confirmation works without client-specific confirmation UI. With an online channel or pay_for_me the order is created unpaid (pay_for_me returns a pay_for_me_link to share); with wallet, Chowdeck takes the payment from the wallet at creation, which ChowBot cannot undo. The restaurant and delivery notes are the ones saved on the cart (set them first with set_cart_notes). A promo code comes from the quote (get_checkout_quote with promo_code); an optional tip or gift recipient is shown in the confirmation and sent with the order, and ChowBot never adds a tip itself. After creation the result reports Chowdeck's own order record (state, total, notes). Never call it again after an unknown outcome.",
       inputSchema: z.object(placeOrderSchema),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },

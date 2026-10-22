@@ -2027,4 +2027,132 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(received).toHaveLength(0);
     });
   });
+
+  /*
+   * Pay for me as observed on 2026-10-22: the order carries payment_method
+   * "pay_for_me" and has_external_payment: true, no payment_method_id, and
+   * the response a pay_for_me_url https://chowdeck.com/store/pay/<token>.
+   * Wallet follows the website's code (payment_method "wallet"); its order
+   * request was never observed, so these tests pin ChowBot's own rules.
+   */
+  describe("wallet and pay for me", () => {
+    const PAY_LINK = "https://chowdeck.com/store/pay/OHgvZmtiSnd0VVJTOHREak56WmhwZz09Ojo6OllnTk5Fdy9YbUs0Sm4vZVFzSzZpd2c9PQ";
+    const wallet = (total_balance: number) => () =>
+      Response.json({
+        status: "success",
+        message: "Wallet retrieved successfully",
+        data: { page: 1, has_next_page: false, items: [{ id: 1, reason: "PRIVATE-refund-reason" }], balances: { cash: total_balance / 2, chowbucks: total_balance / 2 }, total_balance, currency: "NGN" },
+      });
+
+    const place = async (baseUrl: string, payment_channel: string) => {
+      const quoteRef = await getQuoteRef(baseUrl);
+      const first = reportOf(await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), payment_channel }, legacy: true }));
+      return { quoteRef, first };
+    };
+    const confirm = (baseUrl: string, quoteRef: string, payment_channel: string, confirmation: string) =>
+      call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), payment_channel, confirmation }, legacy: true });
+
+    test("pay for me: sends the observed fields without a channel id, and returns the link to share", async () => {
+      scriptHappyPath();
+      route("POST /customer/order", orderCreated({ pay_for_me_url: PAY_LINK }));
+      const baseUrl = await startApp();
+
+      const { quoteRef, first } = await place(baseUrl, "pay_for_me");
+      expect(first.outcome).toBe("confirmation_required");
+      expect(first.summary).toContain("Payment: pay for me. Chowdeck creates the order unpaid and returns a link to share");
+      expect(received.some((r) => r.path === "/customer/payment/channel")).toBe(false);
+      const pending = await row(quoteRef);
+      expect(pending.payment_method_id).toBeNull();
+      expect(pending.payment_channel_name).toBe("pay_for_me");
+
+      const result = reportOf(await confirm(baseUrl, quoteRef, "pay_for_me", first.confirmation));
+
+      expect(result.outcome).toBe("order_created");
+      expect(result.pay_for_me_link).toBe(PAY_LINK);
+      expect(result.next_step).toContain("start_payment is not used for this order");
+      const [order] = posts("/customer/order");
+      expect(order!.body).toMatchObject({ payment_method: "pay_for_me", has_external_payment: true, cart_id: 30742921 });
+      expect(order!.body).not.toHaveProperty("payment_method_id");
+      expect(posts("/customer/order")).toHaveLength(1);
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+
+    test("pay for me: warns when Chowdeck returns no link in the expected form", async () => {
+      scriptHappyPath();
+      route("POST /customer/order", orderCreated({ pay_for_me_url: "https://pay.example/PRIVATE-pay" }));
+      const baseUrl = await startApp();
+
+      const { quoteRef, first } = await place(baseUrl, "pay_for_me");
+      const result = reportOf(await confirm(baseUrl, quoteRef, "pay_for_me", first.confirmation));
+
+      expect(result).not.toHaveProperty("pay_for_me_link");
+      expect(result.warnings.join("\n")).toContain("Chowdeck returned no pay-for-me link");
+      expectNothingPrivate(result);
+    });
+
+    test("wallet: checks the balance, sends payment_method wallet, and reports paid only from the order record", async () => {
+      scriptHappyPath();
+      route("GET /customer/wallet", wallet(600000));
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ status: "pending", payment: { status: "success" } }));
+      const baseUrl = await startApp();
+
+      const { quoteRef, first } = await place(baseUrl, "wallet");
+      expect(first.summary).toContain("Payment: your Chowdeck wallet (balance ₦6,000.00). Chowdeck takes the payment from the wallet when it creates the order");
+      expect(first.chowdeck_confirmed).toContain("your Chowdeck wallet balance is ₦6,000.00");
+      const walletRead = received.find((r) => r.path === "/customer/wallet")!;
+      expect(walletRead.query.get("currency")).toBe("NGN");
+      expect(walletRead.query.get("new_response")).toBe("true");
+      expect(JSON.stringify(first)).not.toContain("PRIVATE-refund-reason");
+
+      const result = reportOf(await confirm(baseUrl, quoteRef, "wallet", first.confirmation));
+
+      expect(result.status.order_state).toBe("payment_confirmed");
+      expect(result.message).toContain("Chowdeck's order record shows it paid");
+      const [order] = posts("/customer/order");
+      expect(order!.body).toMatchObject({ payment_method: "wallet" });
+      expect(order!.body).not.toHaveProperty("payment_method_id");
+      expect(order!.body).not.toHaveProperty("has_external_payment");
+    });
+
+    test("wallet: an order whose record does not show the payment is reported unpaid, with a warning not to pay again", async () => {
+      scriptHappyPath();
+      route("GET /customer/wallet", wallet(600000));
+      const baseUrl = await startApp();
+
+      const { quoteRef, first } = await place(baseUrl, "wallet");
+      const result = reportOf(await confirm(baseUrl, quoteRef, "wallet", first.confirmation));
+
+      expect(result.status.order_state).toBe("order_created");
+      expect(result.warnings.join("\n")).toContain("does not show the wallet payment as successful");
+      expect(result.next_step).toContain("Do not pay this order another way");
+    });
+
+    test.each([
+      ["a balance below the estimated total", wallet(500000), "your Chowdeck wallet balance (₦5,000.00) is below the estimated total (₦5,540.00)"],
+      ["an unreadable balance", () => Response.json({ message: "Server Error" }, { status: 500 }), "ChowBot could not read your Chowdeck wallet balance"],
+      ["a wallet in another currency", () => Response.json({ status: "success", data: { total_balance: 900000, currency: "GHS" } }), "ChowBot could not read your Chowdeck wallet balance"],
+    ])("wallet: refuses %s and issues no confirmation", async (_, reply, message) => {
+      scriptHappyPath();
+      route("GET /customer/wallet", reply);
+      const baseUrl = await startApp();
+
+      const { quoteRef, first } = await place(baseUrl, "wallet");
+
+      expect(first.outcome).toBe("not_sent");
+      expect(first.message).toContain(message);
+      expect((await row(quoteRef)).state).toBe("quoted");
+      expect(posts("/customer/order")).toHaveLength(0);
+    });
+
+    test("an online channel still needs Chowdeck's channel id in a pending confirmation", async () => {
+      const { id } = await stores.orderSubmissions.createQuote(alice.userId, {
+        vendorId: 102555, cartId: 1, feeId: 1, addressId: ADDRESS_ID, cartFingerprint: "f", computedTotal: 1,
+      });
+      await expect(
+        sql`UPDATE order_submissions SET state = 'confirmation_pending', payment_channel_name = 'opay', confirmation_nonce_hash = 'h', confirmation_expires_at = now() WHERE id = ${id}`.then((r) => r),
+      ).rejects.toThrow();
+      await sql`UPDATE order_submissions SET state = 'confirmation_pending', payment_channel_name = 'wallet', confirmation_nonce_hash = 'h', confirmation_expires_at = now() WHERE id = ${id}`;
+      expect((await row(id)).state).toBe("confirmation_pending");
+    });
+  });
 });

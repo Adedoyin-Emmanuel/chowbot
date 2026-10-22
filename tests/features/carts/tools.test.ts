@@ -1426,3 +1426,105 @@ describe("cart editability and orders already placed", () => {
     expect(JSON.parse(textOf(failing))).not.toHaveProperty("existing_orders");
   });
 });
+
+/*
+ * Brown bags as observed on 2026-10-22: POST /customer/cart/vendor/{id}
+ * with {"bag_quantity":1} answered "Cart updated successfully", and the
+ * re-read cart showed bag_quantity 1, bag_information {amount_per_bag:
+ * 20000, total_amount: 20000, quantity: 1} and total_price 570000.
+ */
+describe("set_cart_bags", () => {
+  const rows = packRows(PACK_A, [1, 2, 3]);
+  const cartWithBags = (bags: number, extra: Record<string, unknown> = {}) => () =>
+    Response.json({
+      status: "success",
+      data: {
+        ...cartData(rows, 220000 + bags * 20000),
+        bag_quantity: bags,
+        ...(bags > 0 && { bag_information: { amount_per_bag: 20000, total_amount: bags * 20000, quantity: bags } }),
+        ...extra,
+      },
+    });
+  const updated = () => Response.json({ status: "success", message: "Cart updated successfully" });
+  const setBags = async (quantity: unknown) =>
+    callTool(serverFor(await signedIn()), "set_cart_bags", { restaurant_id: 102555, quantity });
+
+  test("sends bag_quantity alone, once, and confirms it from the re-read cart", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithBags(0), cartWithBags(1));
+    route("POST /customer/cart/vendor/102555", updated);
+
+    const result = await setBags(1);
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(writes().map((w) => w.body)).toEqual([{ bag_quantity: 1 }]);
+    expect(parsed).toMatchObject({
+      sent: 1,
+      stored: 1,
+      confirmed_by_chowdeck: true,
+      bags: { quantity: 1, amount_per_bag: "₦200.00", total: "₦200.00" },
+      cart_total: "₦2,400.00",
+    });
+    expect(parsed.message).toContain("get a new one before ordering");
+  });
+
+  test("shows the bags in get_cart once there are some", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithBags(1));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_cart", { restaurant_id: 102555 })));
+
+    expect(parsed.cart.bag_quantity).toBe(1);
+  });
+
+  test("removes the bags with 0", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithBags(1), cartWithBags(0));
+    route("POST /customer/cart/vendor/102555", updated);
+
+    const parsed = JSON.parse(textOf(await setBags(0)));
+
+    expect(writes().map((w) => w.body)).toEqual([{ bag_quantity: 0 }]);
+    expect(parsed).toMatchObject({ stored: 0, confirmed_by_chowdeck: true });
+  });
+
+  test("never reports the bags set when the re-read cart disagrees or cannot be read", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithBags(0), cartWithBags(0));
+    route("POST /customer/cart/vendor/102555", updated);
+    const mismatch = JSON.parse(textOf(await setBags(2)));
+    expect(mismatch.confirmed_by_chowdeck).toBe(false);
+    expect(mismatch.message).toContain("do not tell the user the bags were set");
+
+    route("GET /customer/cart/vendor/102555", cartWithBags(0), () => Response.json({ message: "Server Error" }, { status: 500 }));
+    const unread = JSON.parse(textOf(await setBags(1)));
+    expect(unread.confirmed_by_chowdeck).toBe(false);
+    expect(unread.verification_error).toContain("could not be re-read");
+  });
+
+  test("reports a refusal, and an unclear answer as uncertain, sending once", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithBags(0));
+    route("POST /customer/cart/vendor/102555", () => Response.json({ status: "failed", message: "Bags unavailable" }, { status: 422 }));
+    const refused = await setBags(1);
+    expect(textOf(refused)).toContain("Bags unavailable; the bags were not changed");
+
+    received = [];
+    route("POST /customer/cart/vendor/102555", () => Response.json({ message: "Server Error" }, { status: 503 }));
+    const unclear = await setBags(1);
+    expect(textOf(unclear)).toContain("the bags may or may not have been changed; check the cart with get_cart before retrying");
+    expect(writes()).toHaveLength(1);
+  });
+
+  test.each([[-1], [11], [1.5], ["1"]])("refuses %p bags before contacting Chowdeck", async (quantity) => {
+    const result = await setBags(quantity);
+
+    expect(textOf(result)).toContain("Input validation error");
+    expect(received).toHaveLength(0);
+  });
+
+  test("refuses a cart Chowdeck links to an order, and a missing cart, writing nothing", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithBags(0, { order_id: 43605309 }));
+    expect(textOf(await setBags(1))).toContain("Chowdeck links this cart to order 43605309");
+
+    route("GET /customer/cart/vendor/102555", noCart);
+    expect(textOf(await setBags(1))).toContain("there is no cart for this restaurant");
+    expect(writes()).toHaveLength(0);
+  });
+});

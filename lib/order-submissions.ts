@@ -100,7 +100,10 @@ export type NewQuote = {
 export type ConfirmationRequest = {
   nonceHash: string;
   ttlSeconds: number;
-  paymentMethodId: number;
+  /*
+   * null for wallet and pay_for_me, which carry no channel id.
+   */
+  paymentMethodId: number | null;
   paymentChannelName: string;
 };
 

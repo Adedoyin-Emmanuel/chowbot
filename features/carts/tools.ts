@@ -5,7 +5,7 @@ import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
 import { textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
-import CartService, { CartRequestError } from "./service";
+import CartService, { CartRequestError, MAX_BAGS } from "./service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import type { UserOrderSubmissions } from "../../lib/order-submissions";
 
@@ -197,6 +197,28 @@ export const registerCartTools = (
         return await withOrders(restaurant_id, await service.setNotes(restaurant_id, notes));
       } catch (error) {
         return failure("set checkout notes", "set_cart_notes", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_cart_bags",
+    {
+      title: "Set brown bags",
+      description:
+        "Set how many of Chowdeck's brown bags (paid packaging for the whole order) the signed-in user's cart at a restaurant gets; 0 removes them. Saved on Chowdeck's cart, as the website does, and confirmed by re-reading the cart: only confirmed_by_chowdeck: true means it was set. The bags change the cart total, so get a new checkout quote afterwards. Does not place an order.",
+      inputSchema: z.object({
+        restaurant_id: restaurantId,
+        quantity: z.number().int().min(0).max(MAX_BAGS).describe("Number of bags; 0 for none"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ restaurant_id, quantity }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        return await withOrders(restaurant_id, await service.setBags(restaurant_id, quantity));
+      } catch (error) {
+        return failure("set the bags", "set_cart_bags", error);
       }
     },
   );

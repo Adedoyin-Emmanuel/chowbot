@@ -2,7 +2,9 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/server";
 
 import OrderService, { ORDER_LIST_STATUSES, type LiveTracking, type OrderDetail, type OrderTimelineResult } from "./service";
-import { classifyOrder, orderAmounts, stateFromChowdeck } from "./status";
+import { classifyOrder, orderAmounts, reportResult, notSentReport, stateFromChowdeck, stateUnavailable } from "./status";
+import { validateNote } from "../carts/notes";
+import { isRecord } from "../../utils/object";
 import { logger } from "../../utils/logger";
 import { textResult } from "../../utils/tool-result";
 import type { UserSession } from "../../lib/session";
@@ -167,6 +169,136 @@ export const registerOrderTools = (
         return failure("track order", "track_order", error);
       }
     },
+  );
+  server.registerTool(
+    "update_order_delivery_note",
+    {
+      title: "Change an order's rider note",
+      description:
+        "Change or clear the delivery (rider) note on one of the signed-in user's Chowdeck orders that was already placed, as the Chowdeck website does. Sent once; the change counts only when Chowdeck's order record, read again, shows the new note. A cancelled order is refused, and Chowdeck may refuse others (for example once the order is delivered). Up to 500 characters (ChowBot's limit). For an order not yet placed, use set_cart_notes instead.",
+      inputSchema: z.object({
+        ...orderIdSchema,
+        delivery_note: z.string().max(4000).nullable().describe("The new note for the rider; null or \"\" clears it"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ order_id, delivery_note }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        return await updateDeliveryNote(service, String(order_id), delivery_note);
+      } catch (error) {
+        return failure("change the rider note", "update_order_delivery_note", error);
+      }
+    },
+  );
+};
+
+const ACTION = "update_order_delivery_note";
+const quoted = (note: string) => (note ? `"${note}"` : "none");
+const noteOf = (order: OrderDetail) => (typeof order.customer_delivery_note === "string" ? order.customer_delivery_note : "");
+
+/*
+ * Reads the order, refuses a cancelled one, sends the change once and reads
+ * the order again: only that second reading confirms the note.
+ */
+const updateDeliveryNote = async (service: OrderService, orderId: string, input: string | null) => {
+  const checked = validateNote(input);
+  if (!checked.ok) {
+    return notSentReport(ACTION, `Rider note not changed: the note ${checked.error}.`, "Shorten or correct the note and try again.");
+  }
+  const note = checked.value;
+  const numericId = Number(orderId);
+  const stateOf = (order: OrderDetail) =>
+    Number.isSafeInteger(numericId) ? stateFromChowdeck(numericId, classifyOrder(order)) : null;
+
+  let before: OrderDetail;
+  try {
+    ({ order: before } = await service.getOrder(orderId));
+  } catch (error) {
+    if (error instanceof NotSignedInError) throw error;
+    const reason = error instanceof ChowdeckApiError ? error.message : "unexpected error";
+    return notSentReport(
+      ACTION,
+      `Rider note not changed: ChowBot could not read the order from Chowdeck (${reason}). Nothing was sent.`,
+      "Try again later.",
+      Number.isSafeInteger(numericId) ? stateUnavailable(numericId, reason) : null,
+    );
+  }
+  if (classifyOrder(before).state === "cancelled") {
+    return notSentReport(ACTION, "Rider note not changed: Chowdeck's order record shows this order cancelled. Nothing was sent.", "Nothing to change.", stateOf(before));
+  }
+  if (noteOf(before) === note) {
+    return reportResult({
+      action: ACTION,
+      outcome: "unchanged",
+      message: `Chowdeck's order record already has the rider note ${quoted(note)}. Nothing was sent.`,
+      chowdeck_confirmed: [`the rider note on Chowdeck's order record is ${quoted(note)}`],
+      status: stateOf(before),
+      next_step: "Nothing to change.",
+      outcome_uncertain: false,
+      safe_to_retry: true,
+    });
+  }
+
+  let requestDetail: string | undefined;
+  let rejected = false;
+  try {
+    const response = await service.sendDeliveryNote(orderId, note);
+    if (!isRecord(response) || response.status !== "success") requestDetail = "Chowdeck's answer was not a success";
+  } catch (error) {
+    if (error instanceof NotSignedInError) throw error;
+    const definite =
+      error instanceof ChowdeckApiError && error.kind === "http" && error.status !== undefined && error.status < 500 && error.status !== 401;
+    rejected = definite;
+    requestDetail = error instanceof ChowdeckApiError ? error.message : "unexpected error";
+  }
+  if (rejected) {
+    return reportResult(
+      {
+        action: ACTION,
+        outcome: "rejected_by_chowdeck",
+        message: `Rider note not changed: Chowdeck refused the change (${requestDetail}).`,
+        chowdeck_confirmed: [`Chowdeck refused the change (${requestDetail})`],
+        status: stateOf(before),
+        next_step: "Tell the user Chowdeck did not accept the change; they can contact the rider or Chowdeck from the app.",
+        outcome_uncertain: false,
+        safe_to_retry: false,
+      },
+      true,
+    );
+  }
+
+  let after: OrderDetail | undefined;
+  try {
+    ({ order: after } = await service.getOrder(orderId));
+  } catch (error) {
+    if (error instanceof NotSignedInError) throw error;
+  }
+  if (after && noteOf(after) === note) {
+    return reportResult({
+      action: ACTION,
+      outcome: "note_changed",
+      message: `The rider note on order ${orderId} is now ${quoted(note)}: Chowdeck's order record confirms it.`,
+      chowdeck_confirmed: [`the rider note on Chowdeck's order record is ${quoted(note)}`],
+      status: stateOf(after),
+      next_step: "Tell the user the rider note was changed.",
+      outcome_uncertain: false,
+      safe_to_retry: true,
+    });
+  }
+  return reportResult(
+    {
+      action: ACTION,
+      outcome: "unconfirmed",
+      message: `The rider note change is not confirmed${requestDetail ? ` (${requestDetail})` : ""}: ${after ? `Chowdeck's order record still shows ${quoted(noteOf(after))}` : "the order could not be read again"}.`,
+      chowdeck_confirmed: after ? [`the rider note on Chowdeck's order record is ${quoted(noteOf(after))}`] : [],
+      status: after ? stateOf(after) : null,
+      next_step:
+        "Do not tell the user the note was changed. They can check the order in the Chowdeck app; sending the same note again only repeats the same change.",
+      outcome_uncertain: true,
+      safe_to_retry: false,
+    },
+    true,
   );
 };
 

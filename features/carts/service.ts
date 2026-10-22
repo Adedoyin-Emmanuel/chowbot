@@ -8,6 +8,7 @@ import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import AddressService, { NotSignedInError } from "../addresses/service";
 import { NOTE_FIELDS, storedNote, validateNote, type NoteKind } from "./notes";
 import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
+import { formatNaira } from "../checkout/draft";
 
 export type CartRow = Record<string, ScalarValue>;
 
@@ -107,6 +108,26 @@ export type SetCartNotesResult = {
   notes?: CartNotes;
   verification_error?: string;
 };
+
+/*
+ * Chowdeck's brown bags on a cart: what was sent, what the cart re-read
+ * afterwards holds, and the price Chowdeck put on them.
+ */
+export type SetCartBagsResult = {
+  restaurant_id: number;
+  sent: number;
+  stored: number | null;
+  confirmed_by_chowdeck: boolean;
+  message: string;
+  bags?: { quantity: ScalarValue; amount_per_bag?: string; total?: string };
+  cart_total?: string;
+  verification_error?: string;
+};
+
+/*
+ * ChowBot's own limit: only 0 (a new cart) and 1 were observed.
+ */
+export const MAX_BAGS = 10;
 
 export class CartRequestError extends Error {
   constructor(message: string) {
@@ -262,6 +283,7 @@ const parseCart = (value: unknown): CartDetail | undefined => {
     ...pickScalarFields(value, CART_FIELDS),
     ...(vendorName !== undefined && { vendor_name: vendorName }),
     ...cartEditability(value),
+    ...(typeof value.bag_quantity === "number" && value.bag_quantity > 0 && { bag_quantity: value.bag_quantity }),
     packs,
     validation_issues: parseValidationIssues(value.validation_result),
   };
@@ -516,6 +538,79 @@ class CartService {
         message:
           "Chowdeck answered the change with success, but the cart could not be read again, so the saved notes are not confirmed. Check them with get_cart_notes before ordering; do not tell the user they were saved.",
         verification_error: `the cart could not be re-read to confirm the notes (${error instanceof Error ? error.message : "unexpected error"})`,
+      };
+    }
+  }
+
+  /*
+   * Sets how many of Chowdeck's brown bags the order gets, as the website's
+   * checkout does (observed 2026-10-22): POST /customer/cart/vendor/{id}
+   * with {"bag_quantity": n} alone, answered "Cart updated successfully",
+   * then a re-read showing bag_quantity, bag_information and a total_price
+   * that includes the bags. Sent once, never retried; saved only when the
+   * re-read cart holds exactly that number.
+   */
+  async setBags(restaurantId: number, quantity: number): Promise<SetCartBagsResult> {
+    if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > MAX_BAGS) {
+      throw new CartRequestError(`the number of bags must be a whole number from 0 to ${MAX_BAGS} (ChowBot's limit)`);
+    }
+    const headers = await this.authHeaders();
+    const before = await this.getVendorCart(restaurantId);
+    if (!before.exists) {
+      throw new CartRequestError("there is no cart for this restaurant; add an item first");
+    }
+    assertEditable(before.cart);
+
+    const path = vendorCartPath(restaurantId);
+    let response: unknown;
+    try {
+      response = await this.client.request(path, { method: "POST", headers, body: { bag_quantity: quantity } });
+    } catch (error) {
+      if (error instanceof ChowdeckApiError && isDefiniteRejection(error)) {
+        throw new ChowdeckApiError("http", `${error.message}; the bags were not changed`, error.status);
+      }
+      throw uncertainOutcome(
+        `${error instanceof ChowdeckApiError ? error.message : "unexpected error"}; the bags may or may not have been changed`,
+      );
+    }
+    if (!isRecord(response) || response.status !== "success") {
+      throw uncertainOutcome(`POST ${path} returned an unexpected response; the bags may or may not have been changed`);
+    }
+
+    try {
+      const { result, raw } = await this.getVendorCartSnapshot(restaurantId);
+      if (!result.exists || !raw) throw unexpectedShape("GET", path);
+      const stored = typeof raw.bag_quantity === "number" ? raw.bag_quantity : null;
+      const info = isRecord(raw.bag_information) ? raw.bag_information : undefined;
+      const amount = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? formatNaira(value) : undefined);
+      const confirmed = stored === quantity;
+      const perBag = amount(info?.amount_per_bag);
+      const total = amount(info?.total_amount);
+      const cartTotal = amount(result.cart.total_price);
+      return {
+        restaurant_id: restaurantId,
+        sent: quantity,
+        stored,
+        confirmed_by_chowdeck: confirmed,
+        message: confirmed
+          ? `Chowdeck's cart, read again after the change, has ${quantity} bag(s)${total ? ` costing ${total}` : ""}. Any earlier checkout quote no longer matches the cart: get a new one before ordering.`
+          : `Chowdeck's cart, read again after the change, shows ${stored ?? "no"} bag(s), not ${quantity}; do not tell the user the bags were set.`,
+        bags: {
+          quantity: stored,
+          ...(perBag && { amount_per_bag: perBag }),
+          ...(total && { total }),
+        },
+        ...(cartTotal && { cart_total: cartTotal }),
+      };
+    } catch (error) {
+      return {
+        restaurant_id: restaurantId,
+        sent: quantity,
+        stored: null,
+        confirmed_by_chowdeck: false,
+        message:
+          "Chowdeck answered the change with success, but the cart could not be read again, so the number of bags is not confirmed. Check it with get_cart before ordering.",
+        verification_error: `the cart could not be re-read (${error instanceof Error ? error.message : "unexpected error"})`,
       };
     }
   }

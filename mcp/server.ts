@@ -1,21 +1,23 @@
-import { McpServer, type RequestStateCodec } from "@modelcontextprotocol/server";
+import {
+  McpServer,
+  type RequestStateCodec,
+} from "@modelcontextprotocol/server";
 
 import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
 
 import type { UserSession } from "../lib/session";
-import type { UserOrderSubmissions } from "../lib/order-submissions";
 import { registerAuthTools } from "../features/auth/tools";
 import { registerMenuTools } from "../features/menus/tools";
 import { registerCartTools } from "../features/carts/tools";
-import { registerCheckoutTools } from "../features/checkout/tools";
 import { registerOrderTools } from "../features/orders/tools";
-import { registerOrderPlacementTools } from "../features/order-placement/tools";
-import type { PaymentChannelQuery } from "../features/order-placement/channels";
 import { registerPaymentTools } from "../features/payments/tools";
-import type { PaymentStartConfig } from "../features/payments/service";
 import { registerAddressTools } from "../features/addresses/tools";
-import { registerArithmeticTool } from "../features/arithmetic/tools";
+import { registerCheckoutTools } from "../features/checkout/tools";
+import type { UserOrderSubmissions } from "../lib/order-submissions";
+import type { PaymentStartConfig } from "../features/payments/service";
 import { registerRestaurantTools } from "../features/restaurants/tools";
+import type { PaymentChannelQuery } from "../features/order-placement/channels";
+import { registerOrderPlacementTools } from "../features/order-placement/tools";
 
 /*
  * Inlined as a data URI so clients can show the icon over stdio too, where
@@ -30,26 +32,16 @@ const SERVER_ICON = {
   sizes: ["192x192"],
 };
 
-/*
- * Chat-based OTP login is only for the local stdio entry point. Remote
- * clients sign in through the browser /authorize flow, so the OTP never
- * passes through an AI conversation.
- */
 export type ServerOptions = {
   session?: UserSession;
   enableChatLogin?: boolean;
+  placeOrderEnabled?: boolean;
   submissions?: UserOrderSubmissions;
   requestStateCodec?: RequestStateCodec;
-  paymentChannelQuery?: PaymentChannelQuery;
   paymentStartConfig?: PaymentStartConfig;
-  placeOrderEnabled?: boolean;
+  paymentChannelQuery?: PaymentChannelQuery;
 };
 
-/*
- * With a requestStateCodec (hosted HTTP), every multi-round-trip
- * requestState is verified before any handler runs; state that fails the
- * HMAC, expiry or user binding is rejected by the SDK.
- */
 export const createServer = ({
   session,
   enableChatLogin = false,
@@ -68,7 +60,6 @@ export const createServer = ({
     requestStateCodec && { requestState: { verify: requestStateCodec.verify } },
   );
 
-  registerArithmeticTool(server);
   registerRestaurantTools(server, session);
   registerMenuTools(server, session);
   registerAddressTools(server, session);

@@ -332,6 +332,10 @@ class PaymentStartService {
       return PAYMENT_START_GUIDANCE[
         submission.paymentStartState ?? "in_flight"
       ];
+    if (submission.paymentChannelName === "pay_for_me")
+      return "this is a pay-for-me order: whoever pays uses the link place_order returned, so ChowBot starts no payment for it";
+    if (submission.paymentChannelName === "wallet")
+      return "this order was placed to be paid from the Chowdeck wallet, so ChowBot starts no other payment for it; check it with get_order_submission";
     if (!isSupportedChannel(submission.paymentChannelName))
       return "this order's payment channel is not supported here";
     return undefined;

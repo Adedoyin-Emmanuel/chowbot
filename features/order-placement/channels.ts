@@ -32,6 +32,24 @@ export type SupportedPaymentChannel =
   (typeof SUPPORTED_PAYMENT_CHANNELS)[number];
 
 /*
+ * How an order can be paid, as place_order offers it: every online channel
+ * above (created unpaid, then paid through start_payment), plus
+ *   pay_for_me  observed 2026-10-22: the order carries payment_method
+ *               "pay_for_me" and has_external_payment: true, and Chowdeck
+ *               returns a pay_for_me_url for someone else to pay
+ *   wallet      the website sends payment_method "wallet" and no channel id
+ *               (storefront code); the wallet balance pays at creation.
+ *               Never observed on the wire.
+ */
+export const ID_LESS_PAYMENT_CHOICES = ["wallet", "pay_for_me"] as const;
+export type IdLessPaymentChoice = (typeof ID_LESS_PAYMENT_CHOICES)[number];
+export const ORDER_PAYMENT_CHOICES = [...SUPPORTED_PAYMENT_CHANNELS, ...ID_LESS_PAYMENT_CHOICES] as const;
+export type OrderPaymentChoice = (typeof ORDER_PAYMENT_CHOICES)[number];
+
+export const isIdLessChoice = (value: unknown): value is IdLessPaymentChoice =>
+  (ID_LESS_PAYMENT_CHOICES as readonly unknown[]).includes(value);
+
+/*
  * Every observed channel carried is_active: 1. A channel that does not say
  * it is active is treated as unavailable.
  */

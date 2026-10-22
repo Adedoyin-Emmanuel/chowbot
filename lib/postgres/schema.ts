@@ -222,6 +222,12 @@ export const CANCEL_REQUEST_STATES = ["accepted", "rejected", "unknown"] as cons
  */
 export const FAILURE_REASONS = ["gate_rejected", "gate_uncertain", "order_rejected", "not_sent", "superseded"] as const;
 
+/*
+ * Payment choices sent as payment_method, without a channel id (mirrors
+ * features/order-placement/channels.ts, which the schema does not import).
+ */
+export const ID_LESS_PAYMENT_CHOICES = ["wallet", "pay_for_me"] as const;
+
 export const RESOLUTIONS = ["paid_verified", "linked_user_supplied_order", "cancelled_verified"] as const;
 
 /*
@@ -308,7 +314,11 @@ export const orderSubmissions = pgTable(
     ),
     check(
       "order_submissions_confirmation_pending_check",
-      sql`${table.state} <> 'confirmation_pending' OR (${table.paymentMethodId} IS NOT NULL AND ${table.confirmationNonceHash} IS NOT NULL AND ${table.confirmationExpiresAt} IS NOT NULL)`,
+      /*
+       * Online channels carry Chowdeck's channel id; wallet and pay_for_me
+       * orders have none (the website sends payment_method instead).
+       */
+      sql`${table.state} <> 'confirmation_pending' OR ((${table.paymentMethodId} IS NOT NULL OR ${table.paymentChannelName} IN (${inList(ID_LESS_PAYMENT_CHOICES)})) AND ${table.confirmationNonceHash} IS NOT NULL AND ${table.confirmationExpiresAt} IS NOT NULL)`,
     ),
     check(
       "order_submissions_confirmation_expiry_check",
