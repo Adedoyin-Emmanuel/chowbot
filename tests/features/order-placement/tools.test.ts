@@ -217,7 +217,24 @@ type Call = {
   legacy?: boolean;
 };
 
-const call = async ({ baseUrl, token = alice.token, name, args, capabilities = { elicitation: { form: {} } }, inputResponses, requestState, legacy }: Call) => {
+/*
+ * place_order confirms in two calls for every client: the first returns a
+ * summary and a confirmation code; the second sends the code back as the
+ * confirmation argument. A test's second round (requestState plus an
+ * accepted answer) is expressed that way here.
+ */
+const call = async ({ baseUrl, token = alice.token, name, args: given, capabilities = { elicitation: { form: {} } }, inputResponses, requestState, legacy }: Call) => {
+  let args = given;
+  if (name === "place_order" && requestState !== undefined) {
+    const content = (inputResponses?.confirm as { content?: { acknowledge_unresolved_attempts?: boolean } } | undefined)?.content;
+    args = {
+      ...given,
+      confirmation: requestState,
+      ...(content?.acknowledge_unresolved_attempts !== undefined && { acknowledge_unresolved_attempts: content.acknowledge_unresolved_attempts }),
+    };
+    inputResponses = undefined;
+    requestState = undefined;
+  }
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: {
@@ -264,11 +281,35 @@ const getQuoteRef = async (baseUrl: string, token = alice.token) => {
 
 const placeArgs = (quoteRef: string) => ({ quote_ref: quoteRef, address_id: ADDRESS_ID, payment_channel: "opay" });
 
-const firstRound = async (baseUrl: string, quoteRef: string) => {
-  const body = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef) });
-  expect(body.result.resultType).toBe("input_required");
-  return body.result as { requestState: string; inputRequests: { confirm: { params: { message: string; requestedSchema: { properties: Record<string, unknown> } } } } };
+type FirstRound = {
+  requestState: string;
+  inputRequests: { confirm: { params: { message: string; requestedSchema: { properties: Record<string, unknown> } } } };
 };
+
+/*
+ * The first place_order call: a summary and a confirmation code, nothing
+ * ordered. Returned in the shape the confirmation tests read.
+ */
+const asFirstRound = (body: { result: { content: { text: string }[] } }): FirstRound => {
+  const result = JSON.parse(body.result.content[0]!.text);
+  expect(result).toMatchObject({ status: "confirmation_required", order_placed: false });
+  return {
+    requestState: result.confirmation,
+    inputRequests: {
+      confirm: {
+        params: {
+          message: result.summary,
+          requestedSchema: {
+            properties: { confirm: {}, ...(result.requires_acknowledge_unresolved_attempts && { acknowledge_unresolved_attempts: {} }) },
+          },
+        },
+      },
+    },
+  };
+};
+
+const firstRound = async (baseUrl: string, quoteRef: string) =>
+  asFirstRound(await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef) }));
 
 const placeOrder = async (baseUrl: string, inputResponses: Record<string, unknown> = ACCEPT) => {
   const quoteRef = await getQuoteRef(baseUrl);
@@ -418,16 +459,13 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expectNothingPrivate(result);
     });
 
-    test.each([
-      ["declines", { confirm: { action: "decline" } }],
-      ["answers confirm: false", { confirm: { action: "accept", content: { confirm: false } } }],
-    ])("places nothing when the user %s", async (_, answer) => {
+    test("a summary alone orders nothing: without the second call, the attempt just waits", async () => {
       scriptHappyPath();
       const baseUrl = await startApp();
+      const quoteRef = await getQuoteRef(baseUrl);
 
-      const { quoteRef, second } = await placeOrder(baseUrl, answer);
+      await firstRound(baseUrl, quoteRef);
 
-      expect(textOf(second)).toBe("Order not placed: it was not confirmed.");
       expect(posts("/customer/order")).toHaveLength(0);
       expect((await row(quoteRef)).state).toBe("confirmation_pending");
     });
@@ -441,7 +479,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef), inputResponses: ACCEPT, requestState: tampered });
 
-      expect(body.error.code).toBe(-32602);
+      expect(textOf(body)).toContain("the confirmation code is invalid, expired or not yours");
       expect(posts("/customer/order")).toHaveLength(0);
     });
 
@@ -495,6 +533,8 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(second.result.isError).toBeUndefined();
       const result = JSON.parse(textOf(second));
       expect(result).toMatchObject({ order_id: ORDER_ID, quote_ref: quoteRef, payment_channel: "opay", computed_total: 554000, status: "created; awaiting payment" });
+      expect(result.next_step).toContain("call start_payment with this quote_ref");
+      expect(result.next_step).not.toContain("does not start payments");
       expectNothingPrivate(result);
 
       expect(posts("/customer/delivery/amount")).toHaveLength(2);
@@ -1339,19 +1379,20 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
     };
     const placeWith = async (baseUrl: string, extras: Record<string, unknown>, second: Record<string, unknown> = extras) => {
       const quoteRef = await getQuoteRef(baseUrl);
-      const first = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...extras } });
-      if (first.result.resultType !== "input_required") return { quoteRef, first, second: undefined };
-      const result = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...second }, inputResponses: ACCEPT, requestState: first.result.requestState });
-      return { quoteRef, first, second: result };
+      const body = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...extras } });
+      if (body.result.isError) return { quoteRef, first: body, summary: undefined, second: undefined };
+      const parsed = JSON.parse(textOf(body));
+      const result = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...second, confirmation: parsed.confirmation } });
+      return { quoteRef, first: body, summary: parsed.summary as string, second: result };
     };
 
     test("confirms and sends a tip, gift and promo code exactly as the website would", async () => {
       scriptExtras();
       const baseUrl = await startApp();
 
-      const { first, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 }, gift, promo_code: "SAVE10" });
+      const { summary, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 }, gift, promo_code: "SAVE10" });
 
-      const message = first.result.inputRequests.confirm.params.message as string;
+      const message = summary!;
       expect(message).toContain("Tip: ₦200.00 for the rider.");
       expect(message).toContain('Gift for Tunde Example (phone 08012345678, NG) from Ada, message "Enjoy!".');
       expect(message).toContain("Promo code SAVE10: Chowdeck's discount calculation shows ₦50.00 off the items; the final discount is set by Chowdeck.");

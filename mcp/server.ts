@@ -85,7 +85,6 @@ export const createServer = ({
   registerPaymentTools(server, {
     session,
     submissions,
-    requestStateCodec,
     paymentStartConfig,
   });
 
