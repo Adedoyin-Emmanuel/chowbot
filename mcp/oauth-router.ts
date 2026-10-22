@@ -5,13 +5,13 @@ import express, {
 } from "express";
 import type { OAuthMetadata } from "@modelcontextprotocol/server";
 
-import { logger } from "../utils/logger";
-import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
 import {
   registerClient,
   ClientRegistrationError,
   type ClientStore,
 } from "../lib/oauth-clients";
+import { logger } from "../utils/logger";
+import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
 
 export const TOKEN_PATH = "/token";
 export const AUTHORIZE_PATH = "/authorize";

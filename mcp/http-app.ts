@@ -22,20 +22,10 @@ import {
   createAuthorizeRouter,
   type AuthorizeLimits,
 } from "./authorize-router";
-import type { UserStore } from "../lib/users";
-import { createTokenRouter } from "./token-router";
-import type { ChowdeckClient } from "../lib/client";
-import type { ClientStore } from "../lib/oauth-clients";
-import { createServer, type ServerOptions } from "./server";
-import type { PaymentChannelQuery } from "../features/order-placement/channels";
-import type { PaymentStartConfig } from "../features/payments/service";
-import { bindSession, type SessionStore } from "../lib/session";
 import {
   bindOrderSubmissions,
   type OrderSubmissionStore,
 } from "../lib/order-submissions";
-import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
-import { AccessTokenVerifier, type AccessTokenStore } from "../lib/oauth";
 import {
   createInProcessCodeExchange,
   type AuthorizationCodeStore,
@@ -45,6 +35,16 @@ import {
   InMemoryRefreshTokenStore,
   type RefreshTokenStore,
 } from "../lib/oauth-refresh";
+import type { UserStore } from "../lib/users";
+import { createTokenRouter } from "./token-router";
+import type { ChowdeckClient } from "../lib/client";
+import type { ClientStore } from "../lib/oauth-clients";
+import { createServer, type ServerOptions } from "./server";
+import { bindSession, type SessionStore } from "../lib/session";
+import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
+import type { PaymentStartConfig } from "../features/payments/service";
+import { AccessTokenVerifier, type AccessTokenStore } from "../lib/oauth";
+import type { PaymentChannelQuery } from "../features/order-placement/channels";
 
 /*
  * exchange and refreshTokens default to in-process implementations, which
@@ -58,18 +58,18 @@ export type HttpAppOptions = {
   clients: ClientStore;
   sessions: SessionStore;
   tokens: AccessTokenStore;
+  lifecycle?: AppLifecycle;
   chowdeck?: ChowdeckClient;
+  placeOrderEnabled?: boolean;
   codes: AuthorizationCodeStore;
   refreshTokens?: RefreshTokenStore;
   exchange?: AuthorizationCodeExchange;
+  requestStateCodec?: RequestStateCodec;
+  paymentStartConfig?: PaymentStartConfig;
+  orderSubmissions?: OrderSubmissionStore;
+  paymentChannelQuery?: PaymentChannelQuery;
   authorizeLimits?: Partial<AuthorizeLimits>;
   serverFactory?: (options: ServerOptions) => McpServer;
-  orderSubmissions?: OrderSubmissionStore;
-  requestStateCodec?: RequestStateCodec;
-  paymentChannelQuery?: PaymentChannelQuery;
-  paymentStartConfig?: PaymentStartConfig;
-  placeOrderEnabled?: boolean;
-  lifecycle?: AppLifecycle;
 };
 
 /*
@@ -94,10 +94,6 @@ const sendWebResponse = async (res: ExpressResponse, response: Response) => {
   res.send(await response.text());
 };
 
-/*
- * ChowBot is its own authorization server and serves the OAuth endpoints
- * from this app, so the issuer must be this server's origin with no path.
- */
 export const assertIssuerHostedBy = (issuerUrl: URL, serverUrl: URL) => {
   if (
     issuerUrl.origin !== serverUrl.origin ||
