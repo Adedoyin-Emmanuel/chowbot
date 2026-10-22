@@ -2,12 +2,12 @@ import { z } from "zod";
 import type { McpServer, RequestStateCodec } from "@modelcontextprotocol/server";
 
 import { logger } from "../../utils/logger";
-import OrderPlacementService, { type PlaceOrderArgs } from "./service";
+import OrderPlacementService, { type CancelOrderArgs, type PlaceOrderArgs } from "./service";
 import type { UserSession } from "../../lib/session";
 import { textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
 import { CheckoutRefusedError } from "../checkout/service";
-import { checkoutDraftSchema } from "../checkout/tools";
+import { orderOptionsSchema } from "../checkout/tools";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import type { UserOrderSubmissions } from "../../lib/order-submissions";
 import { SUPPORTED_PAYMENT_CHANNELS, type PaymentChannelQuery } from "./channels";
@@ -23,8 +23,15 @@ const placeOrderSchema = {
     .describe("The delivery address used for the quote, from list_addresses"),
   payment_channel: z
     .enum(SUPPORTED_PAYMENT_CHANNELS)
-    .describe("Online payment channel. The order is created unpaid; payment is completed separately."),
-  ...checkoutDraftSchema,
+    .describe(
+      "Online payment channel the user chose: card, bank_transfer, bank or ussd (Paystack checkout), opay, pocket (PocketApp; start_payment then needs their Pocket tag) or zap. The order is created unpaid; payment is completed separately with start_payment.",
+    ),
+  ...orderOptionsSchema,
+  promo_code: z
+    .string()
+    .max(100)
+    .optional()
+    .describe("Leave out: the promo code comes from the quote. If given, it must be the code the quote applied."),
   confirmation: z
     .string()
     .max(4096)
@@ -80,7 +87,7 @@ export const registerOrderPlacementTools = (
     {
       title: "Get order attempts",
       description:
-        "Show the signed-in user's order attempts at a restaurant that still lock a cart, and check unpaid orders' payment status with Chowdeck. Releases attempts whose order request provably never started. Never releases attempts with an unknown outcome.",
+        "Show the signed-in user's order attempts at a restaurant that still lock a cart, each with its current state read freshly from Chowdeck's order record (order_created, payment_link_generated, payment_pending, payment_confirmed, cancelled or unknown) and that state's source. Records payment or cancellation only from Chowdeck's order record. Releases attempts whose order request provably never started. Never releases attempts with an unknown outcome.",
       inputSchema: z.object({
         restaurant_id: z.number().int().positive().describe("Chowdeck restaurant ID"),
       }),
@@ -124,7 +131,7 @@ export const registerOrderPlacementTools = (
     {
       title: "Place order",
       description:
-        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). The user must confirm the restaurant, items, delivery address, quoted total, payment channel, notes and any order options before anything is sent. The first call without confirmation places nothing and returns the full summary plus a confirmation value; show that entire summary to the user and only if they explicitly say yes, call place_order again with the same arguments plus confirmation. This two-call confirmation works without client-specific confirmation UI. The order is created unpaid; payment is not started by ChowBot. An optional tip, gift recipient or promo code (as in preview_order) is shown in the confirmation and sent with the order; ChowBot never adds a tip itself, and a promo code is accepted only when Chowdeck's discount calculation shows a discount. Never call it again after an unknown outcome.",
+        "Place a real Chowdeck delivery order from an orderable quote (quote_ref from get_checkout_quote). The user must confirm the restaurant, items, delivery address, quoted total, payment channel, notes and any order options before anything is sent. The first call without confirmation places nothing and returns the full summary plus a confirmation value; show that entire summary to the user and only if they explicitly say yes, call place_order again with the same arguments plus confirmation. This two-call confirmation works without client-specific confirmation UI. The order is created unpaid; payment is not started here. The restaurant and delivery notes are the ones saved on the cart (set them first with set_cart_notes). A promo code comes from the quote (get_checkout_quote with promo_code); an optional tip or gift recipient is shown in the confirmation and sent with the order, and ChowBot never adds a tip itself. After creation the result reports Chowdeck's own order record (state, total, notes). Never call it again after an unknown outcome.",
       inputSchema: z.object(placeOrderSchema),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
@@ -133,6 +140,31 @@ export const registerOrderPlacementTools = (
         return await service.placeOrder(args as PlaceOrderArgs, ctx);
       } catch (error) {
         return failure("place the order", "place_order", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cancel_order",
+    {
+      title: "Cancel an unpaid order",
+      description:
+        "Cancel a Chowdeck order ChowBot placed (quote_ref from place_order) that Chowdeck's order record shows is not paid. The first call sends nothing: it reads the order from Chowdeck and returns a summary plus a confirmation value; only if the user explicitly says yes, call it again with the same quote_ref plus confirmation. ChowBot sends one cancellation request and never retries; the order counts as cancelled only when Chowdeck's order record shows it. A paid order cannot be cancelled here. Editing or clearing the cart never cancels an order.",
+      inputSchema: z.object({
+        quote_ref: quoteRef.describe("quote_ref of the order placed with place_order"),
+        confirmation: z
+          .string()
+          .max(4096)
+          .optional()
+          .describe("Only in the second call: the confirmation value from the first call, after the user explicitly said yes"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (args, ctx) => {
+      try {
+        return await service.cancelOrder(args as CancelOrderArgs, ctx);
+      } catch (error) {
+        return failure("cancel the order", "cancel_order", error);
       }
     },
   );

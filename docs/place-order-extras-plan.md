@@ -1,7 +1,7 @@
 # Plan: sending tip, gift and promo code through `place_order`
 
-**Status (updated 2026-10-21): steps 1–4 and 6 are implemented** for tip, gift and promo code.
-- **Promo:** accepted only when Chowdeck's discount calculation shows a discount.
+**Status (updated 2026-10-22): steps 1–4 and 6 are implemented** for tip, gift and promo code.
+- **Promo:** applied in `get_checkout_quote` (not `place_order`), only for a code on the account and only when Chowdeck's discount calculation, sent with the quote's fee, returns a discount naming the code. The code and discount are stored on the quote (migration 0007), which resolves step 5 for promo codes. See `docs/chowdeck-checkout-evidence.md`.
 - **Gift:** sent only after `POST /auth/phone/validate` returns `is_valid: true`.
 - **Step 5 (storing the extras on the submission record) is not done.** It would need a schema change. Chowdeck's order record is the reference instead.
 - **Still off:** `place_order` stays registered only with `CHOWBOT_PLACE_ORDER_ENABLED` and the channel settings, and `start_payment` stays unregistered.

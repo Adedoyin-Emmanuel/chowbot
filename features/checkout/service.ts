@@ -22,6 +22,7 @@ import {
 } from "./draft";
 import {
   totalOff,
+  discountsForCode,
   DISCOUNT_APPLY_PATH,
   discountRequestBody,
   parseAppliedDiscounts,
@@ -35,6 +36,8 @@ const CHECKOUT_CURRENCY = "NGN";
 const CHECKOUT_COUNTRY_CODE = "NG";
 
 const DELIVERY_AMOUNT_PATH = "/customer/delivery/amount";
+export const PROMO_CODE_LIST_PATH = "/customer/promo-code";
+export const DISCOUNT_LIST_PATH = "/customer/discount";
 const PAYMENT_METHODS_PATH = "/customer/payment/methods";
 const vendorPath = (restaurantId: number) => `/customer/vendor/${restaurantId}`;
 
@@ -101,6 +104,52 @@ export type CheckoutQuoteResult = {
   quote_ref?: string;
   quote_valid_until?: string;
   not_orderable_reasons?: string[];
+  promo?: QuotePromo;
+};
+
+/*
+ * A promo code applied in a quote: Chowdeck's discount calculation for this
+ * cart with the fresh quote's fee, exactly as the website requests it.
+ */
+export type QuotePromo = {
+  promo_code: string;
+  status: "applied" | "not_applied" | "rejected" | "unconfirmed";
+  detail: string;
+  chowdeck_discounts?: (AppliedDiscount & { amount: string })[];
+  discount?: string;
+  discount_raw?: number;
+  estimated_total_after_discount?: { amount: number; display: string; source: string };
+};
+
+/*
+ * Observed 2026-10-22 from GET /customer/promo-code. id, user_id,
+ * promo_code_id, discount_id, settings and the vendors objects are left out.
+ */
+const PROMO_FIELDS = [
+  "code",
+  "title",
+  "note",
+  "display_name",
+  "target_service",
+  "type",
+  "voucher_type",
+  "voucher_status",
+  "is_valid",
+  "expiry_time",
+  "minimum_order_amount",
+  "maximum_order_amount",
+  "usage_count",
+  "maximum_usage_count",
+  "vendor_id",
+] as const;
+
+export type AccountPromo = Record<string, unknown> & { code: string; vendor_ids: number[]; listed_in: string };
+
+export type PromoListResult = {
+  promo_codes: (AccountPromo & { chowbot_check: { problems: string[]; looks_usable: boolean } })[];
+  discounts: (AccountPromo & { chowbot_check: { problems: string[]; looks_usable: boolean } })[];
+  basis: string[];
+  errors?: string[];
 };
 
 /*
@@ -146,17 +195,17 @@ export type OrderPreviewResult = {
  * source/destination IDs or fee IDs.
  */
 /*
- * Chowdeck's discount calculation for one cart, with and without a promo
- * code. code_discount is ChowBot's difference between the two totals; the
- * response does not say which discount comes from the code.
+ * Chowdeck's discount calculation for one cart with a promo code, without a
+ * fee quote. code_discount is the sum of the discounts Chowdeck attributes to
+ * the code (each returned discount names its promo_code).
  */
 export type PromoCheckResult = {
   promo_code: string;
   status: "discount" | "no_discount" | "rejected";
   rejection?: string;
-  with_code?: { discounts: AppliedDiscount[]; total_off: number };
-  without_code?: { discounts: AppliedDiscount[]; total_off: number };
+  discounts?: AppliedDiscount[];
   code_discount: number;
+  total_off: number;
   cart_total: ScalarValue;
   basis: string[];
 };
@@ -203,6 +252,46 @@ const isClearlyClosed = (vendor: Record<string, unknown>) =>
   vendor.current_is_open_state === false ||
   vendor.is_closed_by_operations === true ||
   vendor.is_temporarily_unavailable === true;
+
+const numbers = (value: unknown) =>
+  Array.isArray(value) ? value.filter((v): v is number => Number.isSafeInteger(v)) : [];
+
+const parsePromoList = (body: unknown, path: string): AccountPromo[] => {
+  const entries = isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
+  if (!entries || !entries.every((entry) => isRecord(entry) && typeof entry.code === "string")) {
+    throw new ChowdeckApiError("invalid_response", `GET ${path} returned an unexpected response shape`);
+  }
+  return (entries as Record<string, unknown>[]).map((entry) => ({
+    ...pickScalarFields(entry, PROMO_FIELDS),
+    code: entry.code as string,
+    vendor_ids: numbers(entry.vendor_ids),
+    listed_in: path,
+  }));
+};
+
+/*
+ * ChowBot's own reading of a code's fields. Only Chowdeck's discount
+ * calculation decides whether it takes anything off; a minimum order is left
+ * to that calculation, as what Chowdeck compares it with is unknown.
+ */
+export const promoProblems = (promo: AccountPromo, restaurantId?: number, now = Date.now()) => {
+  const problems: string[] = [];
+  if (promo.is_valid === 0 || promo.is_valid === false) problems.push("Chowdeck marks it not valid");
+  if (typeof promo.expiry_time === "string") {
+    const expiry = Date.parse(promo.expiry_time);
+    if (!Number.isNaN(expiry) && expiry <= now) problems.push(`it expired at ${promo.expiry_time}`);
+  }
+  const max = promo.maximum_usage_count;
+  const used = promo.usage_count;
+  if (typeof max === "number" && max > 0 && typeof used === "number" && used >= max) {
+    problems.push("it has been used the maximum number of times");
+  }
+  const vendors = [...promo.vendor_ids, ...(typeof promo.vendor_id === "number" ? [promo.vendor_id] : [])];
+  if (restaurantId !== undefined && vendors.length > 0 && !vendors.includes(restaurantId)) {
+    problems.push("it is limited to other restaurants");
+  }
+  return problems;
+};
 
 class CheckoutService {
   private readonly carts: CartService;
@@ -317,12 +406,27 @@ class CheckoutService {
   async getQuote(
     restaurantId: number,
     addressId: number,
+    promoInput?: string,
   ): Promise<CheckoutQuoteResult> {
+    let promoCode: string | undefined;
+    if (promoInput !== undefined) {
+      const checked = validatePromoCode(promoInput);
+      if (!checked.ok) throw new CheckoutRefusedError(`the promo code ${checked.error}`);
+      promoCode = checked.value;
+    }
     const { cart, raw, vendor, restaurant } = await this.validateCheckout(
       restaurantId,
       addressId,
     );
     const total = cart.total_price;
+    /*
+     * Everything that can refuse the promo code without Chowdeck's
+     * calculation runs before the fee quote, which creates a fee record.
+     */
+    if (promoCode) {
+      await this.refuseSecondOrderForPromo(restaurantId);
+      promoCode = await this.accountPromoCode(promoCode, restaurantId);
+    }
 
     const quoteData = await this.requestQuote({
       destination_id: addressId,
@@ -335,6 +439,17 @@ class CheckoutService {
     });
 
     const result = await this.buildQuoteResult(cart, restaurant, quoteData, total);
+    if (promoCode) {
+      result.promo = await this.applyPromo(promoCode, {
+        raw,
+        restaurantId,
+        addressId,
+        orderClass: vendor.fields.self_delivery === true ? "vendor_delivery" : ORDER_CLASS,
+        feeId: quoteData.id,
+        deliveryFee: quoteData.final_delivery_amount as number,
+        computedTotal: result.computed_total,
+      });
+    }
     return this.recordOrderableQuote(result, {
       restaurantId,
       addressId,
@@ -343,6 +458,163 @@ class CheckoutService {
       vendorCurrency: vendor.fields.currency,
       feeId: quoteData.id,
     });
+  }
+
+  /*
+   * A promo code cannot be added to an order that already exists, and
+   * ChowBot never creates a second order just to apply one.
+   */
+  private async refuseSecondOrderForPromo(restaurantId: number) {
+    if (!this.submissions) return;
+    const open = (await this.submissions.listOpen(restaurantId)).filter((attempt) =>
+      ["submitting", "unknown", "created"].includes(attempt.state),
+    );
+    if (open.length === 0) return;
+    const ids = open.map((attempt) => (attempt.chowdeckOrderId ? `order ${attempt.chowdeckOrderId}` : `attempt ${attempt.id}`));
+    throw new CheckoutRefusedError(
+      `you already have an unpaid or unresolved order from this restaurant (${ids.join(", ")}). A promo code cannot be added to an order that was already created, and ChowBot does not create a second order just to apply one. Pay that order with start_payment, cancel it with cancel_order if it is unpaid, or check it with get_order_submission first`,
+    );
+  }
+
+  /*
+   * The website only submits codes already on the account (it redeems a new
+   * code first), so ChowBot applies only a code listed there, in the exact
+   * case Chowdeck lists it. Redeeming a new code is not supported.
+   */
+  private async accountPromoCode(code: string, restaurantId: number) {
+    const lists = await this.readPromoLists();
+    const all = [...lists.promoCodes, ...lists.discounts];
+    const match = all.find((promo) => String(promo.code).toUpperCase() === code.toUpperCase());
+    if (!match) {
+      if (lists.errors.length > 0) {
+        throw new CheckoutRefusedError(
+          `ChowBot could not check the promo code ${code} against your account (${lists.errors.join("; ")}); no fee quote was requested`,
+        );
+      }
+      throw new CheckoutRefusedError(
+        `the promo code ${code} is not on your Chowdeck account. Add it in the Chowdeck app first (ChowBot does not redeem new codes), or call list_promo_codes to see the codes you have`,
+      );
+    }
+    const problems = promoProblems(match, restaurantId);
+    if (problems.length > 0) {
+      throw new CheckoutRefusedError(`the promo code ${match.code} cannot be used: ${problems.join("; ")} (from Chowdeck's promo code list)`);
+    }
+    return String(match.code);
+  }
+
+  private async readPromoLists() {
+    const headers = await this.authHeaders();
+    const errors: string[] = [];
+    const read = async (path: string) => {
+      try {
+        return parsePromoList(await this.client.request(path, { headers }), path);
+      } catch (error) {
+        if (error instanceof NotSignedInError) throw error;
+        errors.push(error instanceof ChowdeckApiError ? error.message : `GET ${path} failed`);
+        return [];
+      }
+    };
+    const promoCodes = await read(PROMO_CODE_LIST_PATH);
+    const discounts = await read(DISCOUNT_LIST_PATH);
+    return { promoCodes, discounts, errors };
+  }
+
+  /*
+   * The signed-in user's promo codes and discounts (vouchers), read-only.
+   * Each carries ChowBot's reading of its fields; only Chowdeck's discount
+   * calculation in get_checkout_quote confirms a discount.
+   */
+  async listPromoCodes(restaurantId?: number): Promise<PromoListResult> {
+    const lists = await this.readPromoLists();
+    if (lists.errors.length === 2) {
+      throw new ChowdeckApiError("invalid_response", `neither promo list could be read (${lists.errors.join("; ")})`);
+    }
+    const annotate = (promo: AccountPromo) => {
+      const problems = promoProblems(promo, restaurantId);
+      return { ...promo, chowbot_check: { problems, looks_usable: problems.length === 0 } };
+    };
+    return {
+      promo_codes: lists.promoCodes.map(annotate),
+      discounts: lists.discounts.map(annotate),
+      basis: [
+        `promo_codes from GET ${PROMO_CODE_LIST_PATH}; discounts (vouchers) from GET ${DISCOUNT_LIST_PATH}, whose entries have only been observed empty`,
+        "chowbot_check is ChowBot's reading of validity, expiry, usage and restaurant limits; it is not a promise of a discount",
+        "a minimum order amount is left to Chowdeck's calculation; amounts are raw Chowdeck values (divide by 100 for naira)",
+        "to apply one, call get_checkout_quote with promo_code: Chowdeck's calculation then gives the discount, which is shown before ordering",
+      ],
+      ...(lists.errors.length > 0 && { errors: lists.errors }),
+    };
+  }
+
+  /*
+   * Chowdeck's discount calculation with the code and the fresh quote's fee,
+   * as the website sends it. The code counts as applied only when Chowdeck
+   * returns a discount carrying that promo_code. Sent once, never retried.
+   */
+  private async applyPromo(
+    code: string,
+    input: {
+      raw: Record<string, unknown>;
+      restaurantId: number;
+      addressId: number;
+      orderClass: string;
+      feeId: unknown;
+      deliveryFee: number;
+      computedTotal: ComputedTotal | null;
+    },
+  ): Promise<QuotePromo> {
+    if (!isPositiveId(input.feeId)) {
+      return { promo_code: code, status: "unconfirmed", detail: "Chowdeck returned no usable delivery-fee record, so the discount calculation was not requested" };
+    }
+    let discounts: AppliedDiscount[];
+    try {
+      ({ discounts } = await this.calculateDiscounts({
+        raw: input.raw,
+        vendorId: input.restaurantId,
+        addressId: input.addressId,
+        orderClass: input.orderClass,
+        promoCode: code,
+        fee: { id: input.feeId, deliveryFee: input.deliveryFee },
+      }));
+    } catch (error) {
+      if (isDefiniteHttpRejection(error)) {
+        return { promo_code: code, status: "rejected", detail: `Chowdeck refused the promo code (${error.message})` };
+      }
+      return {
+        promo_code: code,
+        status: "unconfirmed",
+        detail: `Chowdeck's discount calculation could not be read (${error instanceof ChowdeckApiError ? error.message : "unexpected error"})`,
+      };
+    }
+    const shown = discounts.map((d) => ({ ...d, amount: formatNaira(d.amount_off + d.bogof_amount_off) }));
+    const forCode = discountsForCode(discounts, code);
+    const off = totalOff(discounts);
+    if (forCode.length === 0 || totalOff(forCode) <= 0) {
+      return {
+        promo_code: code,
+        status: "not_applied",
+        detail: "Chowdeck's discount calculation returned no discount for this code on this cart (for example, its minimum order may not be met)",
+        chowdeck_discounts: shown,
+      };
+    }
+    const after = input.computedTotal ? input.computedTotal.amount - off : undefined;
+    return {
+      promo_code: code,
+      status: "applied",
+      detail: "Chowdeck's discount calculation (POST /customer/discount/apply) returned this discount for the code with this quote's delivery fee",
+      chowdeck_discounts: shown,
+      discount: formatNaira(off),
+      discount_raw: off,
+      ...(after !== undefined &&
+        after > 0 && {
+          estimated_total_after_discount: {
+            amount: after,
+            display: formatNaira(after),
+            source:
+              "ChowBot's arithmetic: computed_total minus the discounts Chowdeck's calculation returned, as the Chowdeck website displays it. The amount to pay is read from Chowdeck's order record before payment.",
+          },
+        }),
+    };
   }
 
   /*
@@ -372,6 +644,12 @@ class CheckoutService {
     if (context.vendorCurrency !== undefined && context.vendorCurrency !== CHECKOUT_CURRENCY) {
       reasons.push(`only ${CHECKOUT_CURRENCY} orders are supported`);
     }
+    const promo = result.promo;
+    if (promo && (promo.status !== "applied" || promo.discount_raw === undefined || !promo.estimated_total_after_discount)) {
+      reasons.push(
+        `the promo code ${promo.promo_code} was not confirmed by Chowdeck (${promo.detail}); call get_checkout_quote without promo_code to order without it`,
+      );
+    }
     if (reasons.length > 0 || !this.submissions || !result.computed_total) {
       return { ...result, orderable: false, not_orderable_reasons: reasons };
     }
@@ -384,7 +662,13 @@ class CheckoutService {
         addressId: context.addressId,
         cartFingerprint: cartFingerprint(cart),
         computedTotal: result.computed_total.amount,
+        ...(promo?.discount_raw !== undefined && { promo: { code: promo.promo_code, discount: promo.discount_raw } }),
       });
+      /*
+       * Older unclaimed quotes for this cart can no longer be confirmed, so a
+       * stale total (with or without a discount) is never ordered.
+       */
+      await this.submissions.supersedeQuotes(cart.id as number, saved.id);
       return {
         ...result,
         orderable: true,
@@ -601,19 +885,26 @@ class CheckoutService {
     addressId: number;
     orderClass: string;
     promoCode?: string;
+    fee?: { id: number; deliveryFee: number };
   }) {
     const body = await this.client.request(DISCOUNT_APPLY_PATH, {
       method: "POST",
       headers: await this.authHeaders(),
       body: discountRequestBody({ ...input, cart: input.raw }),
     });
+    if (isRecord(body) && body.status !== undefined && body.status !== "success") {
+      throw new ChowdeckApiError(
+        "invalid_response",
+        `POST ${DISCOUNT_APPLY_PATH} answered status ${String(body.status)}${typeof body.message === "string" ? `: ${body.message}` : ""}`,
+      );
+    }
     const discounts = parseAppliedDiscounts(body);
     return { discounts, total_off: totalOff(discounts) };
   }
 
   /*
-   * Runs Chowdeck's discount calculation for the cart with the code and
-   * without it. A 4xx for the code is Chowdeck refusing it, reported
+   * Runs Chowdeck's discount calculation for the cart with the code, without
+   * a fee quote. A 4xx for the code is Chowdeck refusing it, reported
    * verbatim. Nothing is retried; an unclear result is an error.
    */
   async promoCheck(
@@ -621,27 +912,26 @@ class CheckoutService {
     promoCode: string,
   ): Promise<PromoCheckResult> {
     const basis = [
-      "Chowdeck's discount calculation (POST /customer/discount/apply), requested as the Chowdeck website builds it; its responses have never been observed on the wire, so this is not a guarantee",
-      "no fee quote was requested, so discounts on delivery fees are not included (the website's own fallback when it has no quote)",
-      "code_discount is ChowBot's difference between the calculation with and without the code",
+      "Chowdeck's discount calculation (POST /customer/discount/apply), requested as the Chowdeck website builds it; this is a calculation, not a guarantee",
+      "no fee quote was requested, so discounts on delivery fees (such as free delivery) are not included; get_checkout_quote with promo_code includes them",
+      "code_discount is the sum of the discounts Chowdeck attributes to this code",
     ];
-    let withCode;
+    let result;
     try {
-      withCode = await this.calculateDiscounts({ ...checked, promoCode });
+      result = await this.calculateDiscounts({ ...checked, promoCode });
     } catch (error) {
       if (isDefiniteHttpRejection(error)) {
-        return { promo_code: promoCode, status: "rejected", rejection: error.message, code_discount: 0, cart_total: checked.cartTotal, basis };
+        return { promo_code: promoCode, status: "rejected", rejection: error.message, code_discount: 0, total_off: 0, cart_total: checked.cartTotal, basis };
       }
       throw error;
     }
-    const withoutCode = await this.calculateDiscounts(checked);
-    const codeDiscount = withCode.total_off - withoutCode.total_off;
+    const codeDiscount = totalOff(discountsForCode(result.discounts, promoCode));
     return {
       promo_code: promoCode,
       status: codeDiscount > 0 ? "discount" : "no_discount",
-      with_code: withCode,
-      without_code: withoutCode,
+      discounts: result.discounts,
       code_discount: codeDiscount,
+      total_off: result.total_off,
       cart_total: checked.cartTotal,
       basis,
     };
@@ -743,8 +1033,8 @@ class CheckoutService {
     if (gift) await this.validateGiftPhone(gift);
 
     /*
-     * A promo code is submitted only when Chowdeck's discount calculation
-     * shows it takes something off, the same rule place_order applies.
+     * A promo code is shown in the payload only when Chowdeck's discount
+     * calculation attributes a discount to it, the same rule a quote applies.
      */
     let promo: PromoCheckResult | undefined;
     if (promoCode) {
@@ -832,7 +1122,7 @@ class CheckoutService {
                   : promo.status === "rejected"
                     ? `promo code ${promo.promo_code}: Chowdeck refused it (${promo.rejection}), so it would not be submitted`
                     : `promo code ${promo.promo_code}: Chowdeck's calculation shows no discount, so it would not be submitted`,
-                "the Chowdeck website only submits promo codes already added to your account (it redeems a new code first); whether Chowdeck accepts a code that was not redeemed is unknown",
+                "a preview does not apply the code: to order with it, call get_checkout_quote with promo_code, which checks it is on your account and runs Chowdeck's calculation with the delivery fee",
               ]
             : []),
           ...(tip.kind === "amount" ? [`the ${tip.display} tip would be added on top of the quoted total`] : []),

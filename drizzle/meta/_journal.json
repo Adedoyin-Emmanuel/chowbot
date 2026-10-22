@@ -50,6 +50,13 @@
       "when": 1792574113737,
       "tag": "0006_paid_after_release_and_bootstrap",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792674522099,
+      "tag": "0007_promo_and_cancellation",
+      "breakpoints": true
     }
   ]
 }

@@ -1333,3 +1333,96 @@ describe("add_to_cart uncertain outcomes", () => {
     });
   });
 });
+
+/*
+ * Observed 2026-10-22: cart 31006911 stayed active with order_id null while
+ * six unpaid orders were created from it, so an order is a copy of the cart
+ * and later cart edits never reach it. A cart Chowdeck links to an order
+ * (order_id set) or reports as not active was not observed; ChowBot leaves
+ * it alone. Values other than the shapes are fictional.
+ */
+describe("cart editability and orders already placed", () => {
+  const twoPacks = [...packRows(PACK_A, [1, 2, 3]), ...packRows(PACK_B, [4, 5, 6])];
+  const cartWithFields = (fields: Record<string, unknown>) => () =>
+    Response.json({ status: "success", data: { ...cartData(twoPacks, 440000), ...fields } });
+
+  const serverWithOrders = (session: UserSession, listOpen: () => Promise<unknown[]>) => () => {
+    const server = new McpServer({ name: "ChowBot", version: "test" });
+    registerCartTools(
+      server,
+      session,
+      new ChowdeckClient({ baseUrl: upstream.url.origin, timeoutMs: 1000 }),
+      { listOpen } as never,
+    );
+    return server;
+  };
+
+  test("a cart with order_id null is editable as usual and carries no editability fields", async () => {
+    route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_cart", { restaurant_id: 102555 })));
+
+    expect(parsed.cart).not.toHaveProperty("editable");
+    expect(parsed.cart).not.toHaveProperty("linked_order_id");
+  });
+
+  test.each([
+    ["linked to an order", { order_id: 43605309 }, "Chowdeck links this cart to order 43605309"],
+    ["not active", { is_active: false, status: "checked_out" }, "Chowdeck reports this cart as checked_out"],
+  ])("a cart %s is shown as not editable", async (_, fields, reason) => {
+    route("GET /customer/cart/vendor/102555", cartWithFields(fields));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_cart", { restaurant_id: 102555 })));
+
+    expect(parsed.cart).toMatchObject({ editable: false, not_editable_reason: reason });
+  });
+
+  test.each([
+    ["add_to_cart", friedRiceRequest],
+    ["duplicate_cart_pack", { restaurant_id: 102555, pack_reference: PACK_A }],
+    ["remove_cart_pack", { restaurant_id: 102555, pack_reference: PACK_A }],
+    ["clear_cart", { restaurant_id: 102555 }],
+  ])("%s refuses a cart Chowdeck links to an order, writing nothing", async (tool, args) => {
+    route("GET /customer/address", addressList);
+    route("GET /customer/vendor/102555/menu/880557", friedRiceDetail());
+    route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: 43605309 }));
+
+    const result = await callTool(serverFor(await signedIn()), tool, args);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Chowdeck links this cart to order 43605309; ChowBot does not change it, because editing this cart would not change that order");
+    expect(received.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+
+  test("cart results say that editing or clearing the cart does not change or cancel an order already placed", async () => {
+    const session = await signedIn();
+    const listOpen = async () => [
+      { id: "a", state: "created", chowdeckOrderId: 43606940 },
+      { id: "b", state: "paid", chowdeckOrderId: 43605309 },
+      { id: "c", state: "unknown", chowdeckOrderId: null },
+    ];
+    route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }), noCart);
+    route("DELETE /customer/cart/30725140", () => Response.json({ status: "success", data: {} }));
+
+    const cleared = JSON.parse(textOf(await callTool(serverWithOrders(session, listOpen), "clear_cart", { restaurant_id: 102555 })));
+
+    expect(cleared.cleared).toBe(true);
+    expect(cleared.existing_orders).toEqual([
+      { order_id: 43606940, recorded_state: "created", note: expect.stringContaining("not changed or cancelled by editing or clearing the cart. To cancel it while it is unpaid, use cancel_order") },
+      { order_id: 43605309, recorded_state: "paid", note: expect.stringContaining("ChowBot cannot change or cancel a paid order") },
+    ]);
+    expect(cleared.existing_orders_source).toContain("check their current state with get_order_submission");
+  });
+
+  test("adds nothing when ChowBot placed no order there, or its records cannot be read", async () => {
+    const session = await signedIn();
+    route("GET /customer/cart/vendor/102555", cartWithFields({ order_id: null }));
+
+    const none = JSON.parse(textOf(await callTool(serverWithOrders(session, async () => []), "get_cart", { restaurant_id: 102555 })));
+    expect(none).not.toHaveProperty("existing_orders");
+
+    const failing = await callTool(serverWithOrders(session, async () => { throw new Error("db down"); }), "get_cart", { restaurant_id: 102555 });
+    expect(failing.isError).toBeUndefined();
+    expect(JSON.parse(textOf(failing))).not.toHaveProperty("existing_orders");
+  });
+});

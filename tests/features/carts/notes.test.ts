@@ -142,8 +142,41 @@ describe("set_cart_notes", () => {
         vendor: { sent: "No onions", stored: "No onions", verification: "verified" },
         delivery: { sent: "Call on arrival 📞", stored: "Call on arrival 📞", verification: "verified" },
       },
+      confirmed_by_chowdeck: true,
+      message: "Chowdeck's cart, read again after the change, holds exactly these notes; an order placed from this cart carries them.",
       notes: { restaurant_id: RESTAURANT, cart_id: 30742921, vendor_note: "No onions", delivery_note: "Call on arrival 📞" },
     });
+  });
+
+  /*
+   * Observed 2026-10-22: the note write answers {"status":"success","message":
+   * "Cart updated successfully"} and the website then re-reads the cart. A
+   * success alone is never reported as saved.
+   */
+  test("never reports a note saved when the re-read cart holds something else, or cannot be read", async () => {
+    routes[`GET /customer/cart/vendor/${RESTAURANT}`] = [cart(), cart({ customer_vendor_note: "I want extra pepper (edited)" })];
+    routes[`POST /customer/cart/vendor/${RESTAURANT}`] = [() => Response.json({ status: "success", message: "Cart updated successfully" })];
+    const mismatch = JSON.parse(textOf(await setNotes({ vendor_note: "I want extra pepper" })));
+    expect(mismatch.confirmed_by_chowdeck).toBe(false);
+    expect(mismatch.updated.vendor.verification).toBe("mismatch");
+    expect(mismatch.message).toContain("do not tell the user it was saved as written");
+
+    routes[`GET /customer/cart/vendor/${RESTAURANT}`] = [cart(), () => Response.json({ message: "Server Error" }, { status: 500 })];
+    const unread = JSON.parse(textOf(await setNotes({ vendor_note: "I want extra pepper" })));
+    expect(unread.confirmed_by_chowdeck).toBe(false);
+    expect(unread.updated.vendor.verification).toBe("unverified");
+    expect(unread.message).toContain("do not tell the user they were saved");
+  });
+
+  test("refuses to change the notes on a cart Chowdeck links to an order, before writing", async () => {
+    routes[`GET /customer/cart/vendor/${RESTAURANT}`] = [cart({ order_id: 43605309 })];
+    routes[`POST /customer/cart/vendor/${RESTAURANT}`] = [ok];
+
+    const result = await setNotes({ vendor_note: "I want extra pepper" });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Chowdeck links this cart to order 43605309; ChowBot does not change it");
+    expect(writes()).toHaveLength(0);
   });
 
   test("changes only the note given, leaving the other untouched", async () => {

@@ -197,6 +197,7 @@ export const ORDER_SUBMISSION_STATES = [
   "failed",
   "paid",
   "released",
+  "cancelled",
 ] as const;
 
 /*
@@ -206,6 +207,22 @@ export const ORDER_SUBMISSION_STATES = [
 export const LOCKING_SUBMISSION_STATES = ["submitting", "created", "unknown", "paid"] as const;
 
 export const PAYMENT_START_STATES = ["started", "rejected", "unknown"] as const;
+
+/*
+ * The recorded outcome of the one cancellation request for an order.
+ * accepted: Chowdeck answered success (the order record decides whether it
+ * is cancelled); rejected: Chowdeck definitely refused; unknown: the order
+ * may or may not have been cancelled.
+ */
+export const CANCEL_REQUEST_STATES = ["accepted", "rejected", "unknown"] as const;
+
+/*
+ * superseded: a newer orderable quote for the same cart replaced this one
+ * before it was claimed.
+ */
+export const FAILURE_REASONS = ["gate_rejected", "gate_uncertain", "order_rejected", "not_sent", "superseded"] as const;
+
+export const RESOLUTIONS = ["paid_verified", "linked_user_supplied_order", "cancelled_verified"] as const;
 
 /*
  * Why a cart lock was released: by a later claim that found the paid
@@ -244,12 +261,8 @@ export const orderSubmissions = pgTable(
     confirmationExpiresAt: timestamp("confirmation_expires_at", { withTimezone: true }),
     confirmationConsumedAt: timestamp("confirmation_consumed_at", { withTimezone: true }),
     state: text("state", { enum: ORDER_SUBMISSION_STATES }).notNull(),
-    failureReason: text("failure_reason", {
-      enum: ["gate_rejected", "gate_uncertain", "order_rejected", "not_sent"],
-    }),
-    resolution: text("resolution", {
-      enum: ["paid_verified", "linked_user_supplied_order"],
-    }),
+    failureReason: text("failure_reason", { enum: FAILURE_REASONS }),
+    resolution: text("resolution", { enum: RESOLUTIONS }),
     orderRequestStartedAt: timestamp("order_request_started_at", { withTimezone: true }),
     evidenceOrderStatus: text("evidence_order_status"),
     evidencePaymentStatus: text("evidence_payment_status"),
@@ -262,6 +275,14 @@ export const orderSubmissions = pgTable(
     paidAfterReleaseAt: timestamp("paid_after_release_at", { withTimezone: true }),
     paidAfterReleaseOrderStatus: text("paid_after_release_order_status"),
     paidAfterReleasePaymentStatus: text("paid_after_release_payment_status"),
+    /*
+     * The promo code applied in the quote and the discount Chowdeck's
+     * calculation returned for it (raw amount), both or neither.
+     */
+    promoCode: text("promo_code"),
+    promoDiscount: bigint("promo_discount", { mode: "number" }),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+    cancelRequestState: text("cancel_request_state", { enum: CANCEL_REQUEST_STATES }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
@@ -275,11 +296,11 @@ export const orderSubmissions = pgTable(
     check("order_submissions_computed_total_check", sql`${table.computedTotal} > 0`),
     check(
       "order_submissions_failure_reason_check",
-      sql`(${table.state} = 'failed') = (${table.failureReason} IS NOT NULL) AND (${table.failureReason} IS NULL OR ${table.failureReason} IN ('gate_rejected', 'gate_uncertain', 'order_rejected', 'not_sent'))`,
+      sql`(${table.state} = 'failed') = (${table.failureReason} IS NOT NULL) AND (${table.failureReason} IS NULL OR ${table.failureReason} IN (${inList(FAILURE_REASONS)}))`,
     ),
     check(
       "order_submissions_resolution_check",
-      sql`${table.resolution} IS NULL OR ${table.resolution} IN ('paid_verified', 'linked_user_supplied_order')`,
+      sql`${table.resolution} IS NULL OR ${table.resolution} IN (${inList(RESOLUTIONS)})`,
     ),
     check(
       "order_submissions_lock_release_check",
@@ -299,7 +320,7 @@ export const orderSubmissions = pgTable(
     ),
     check(
       "order_submissions_order_id_check",
-      sql`${table.state} NOT IN ('created', 'paid') OR ${table.chowdeckOrderId} IS NOT NULL`,
+      sql`${table.state} NOT IN ('created', 'paid', 'cancelled') OR ${table.chowdeckOrderId} IS NOT NULL`,
     ),
     /*
      * The order-request marker: committed before an order request may be
@@ -310,8 +331,8 @@ export const orderSubmissions = pgTable(
     check(
       "order_submissions_marker_check",
       sql`(${table.state} NOT IN ('quoted', 'confirmation_pending') OR ${table.orderRequestStartedAt} IS NULL)
-        AND (${table.state} NOT IN ('created', 'unknown', 'paid') OR ${table.orderRequestStartedAt} IS NOT NULL)
-        AND (${table.failureReason} IS NULL OR ${table.failureReason} NOT IN ('gate_rejected', 'gate_uncertain', 'not_sent') OR ${table.orderRequestStartedAt} IS NULL)
+        AND (${table.state} NOT IN ('created', 'unknown', 'paid', 'cancelled') OR ${table.orderRequestStartedAt} IS NOT NULL)
+        AND (${table.failureReason} IS NULL OR ${table.failureReason} NOT IN ('gate_rejected', 'gate_uncertain', 'not_sent', 'superseded') OR ${table.orderRequestStartedAt} IS NULL)
         AND (${table.failureReason} IS NULL OR ${table.failureReason} <> 'order_rejected' OR ${table.orderRequestStartedAt} IS NOT NULL)`,
     ),
     /*
@@ -333,6 +354,21 @@ export const orderSubmissions = pgTable(
     check(
       "order_submissions_paid_after_release_check",
       sql`${table.paidAfterReleaseAt} IS NULL OR (${table.state} = 'created' AND ${table.chowdeckOrderId} IS NOT NULL AND ${table.lockReleaseReason} = 'operator_released')`,
+    ),
+    check(
+      "order_submissions_promo_check",
+      sql`(${table.promoCode} IS NULL) = (${table.promoDiscount} IS NULL) AND (${table.promoDiscount} IS NULL OR ${table.promoDiscount} > 0)`,
+    ),
+    /*
+     * The cancellation marker: committed before the one cancellation request
+     * is sent, only for an order ChowBot created. A marker without a state is
+     * a request whose outcome was never recorded.
+     */
+    check(
+      "order_submissions_cancel_request_check",
+      sql`(${table.cancelRequestedAt} IS NULL OR ${table.chowdeckOrderId} IS NOT NULL)
+        AND (${table.cancelRequestState} IS NULL OR ${table.cancelRequestedAt} IS NOT NULL)
+        AND (${table.cancelRequestState} IS NULL OR ${table.cancelRequestState} IN (${inList(CANCEL_REQUEST_STATES)}))`,
     ),
     uniqueIndex("order_submissions_one_lock_per_cart_idx")
       .on(table.userId, table.cartId)

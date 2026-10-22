@@ -644,4 +644,125 @@ describePostgres("order submissions (PostgreSQL)", () => {
       await expect(insertRaw({ state: "created", chowdeck_order_id: 42, ...consumed, ...marker, cart_id: 2 })).rejects.toMatchObject({ errno: "23505" });
     });
   });
+
+  describe("migration 0007: promo codes, superseded quotes and cancellation", () => {
+    const createdOrder = async (orderId: number, quote: Partial<NewQuote> = {}) => {
+      const id = await claimedQuote(userA, `n-${orderId}`, quote);
+      await sent(id);
+      expect(await instanceA.recordOutcome(userA, id, { kind: "created", chowdeckOrderId: orderId })).toBe(true);
+      return id;
+    };
+    const CANCELLED = { orderStatus: "cancelled", paymentStatus: null };
+
+    test("stores a quote's promo code and Chowdeck's discount, and none without one", async () => {
+      const { id } = await instanceA.createQuote(userA, { ...QUOTE, promo: { code: "5FOR5", discount: 65000 } });
+      const { id: plain } = await instanceA.createQuote(userA, { ...QUOTE, cartId: 2 });
+
+      expect(await instanceB.get(userA, id)).toMatchObject({ promoCode: "5FOR5", promoDiscount: 65000 });
+      expect(await instanceB.get(userA, plain)).toMatchObject({ promoCode: null, promoDiscount: null });
+    });
+
+    test("a new quote supersedes the cart's older unclaimed quotes only", async () => {
+      const older = (await instanceA.createQuote(userA, QUOTE)).id;
+      const pending = await confirmedQuote(instanceA, userA, "pending");
+      const otherCart = (await instanceA.createQuote(userA, { ...QUOTE, cartId: 999 })).id;
+      const otherUser = (await instanceA.createQuote(userB, QUOTE)).id;
+      const newest = (await instanceA.createQuote(userA, QUOTE)).id;
+
+      expect(await instanceB.supersedeQuotes(userA, QUOTE.cartId, newest)).toBe(2);
+
+      for (const id of [older, pending]) expect(await row(id)).toMatchObject({ state: "failed", failure_reason: "superseded" });
+      expect((await row(newest)).state).toBe("quoted");
+      expect((await row(otherCart)).state).toBe("quoted");
+      expect((await row(otherUser)).state).toBe("quoted");
+      expect(await instanceA.issueConfirmation(userA, older, confirmation("again"))).toBe(false);
+    });
+
+    test("never supersedes a claimed attempt or an order", async () => {
+      const claimed = await claimedQuote(userA, "claimed");
+      const newest = (await instanceA.createQuote(userA, QUOTE)).id;
+
+      expect(await instanceA.supersedeQuotes(userA, QUOTE.cartId, newest)).toBe(0);
+      expect((await row(claimed)).state).toBe("submitting");
+    });
+
+    test("the cancellation marker is set once, only on a created order, and blocks any payment start", async () => {
+      const id = await createdOrder(5001);
+
+      expect(await instanceA.markCancelRequested(userA, id, 9999)).toBe(false);
+      expect(await instanceB.markCancelRequested(userB, id, 5001)).toBe(false);
+      const both = await Promise.all([instanceA.markCancelRequested(userA, id, 5001), instanceB.markCancelRequested(userA, id, 5001)]);
+      expect(both.filter(Boolean)).toHaveLength(1);
+      expect(await instanceA.markPaymentStarted(userA, id, 5001)).toBe(false);
+
+      expect(await instanceA.recordCancelRequest(userA, id, "accepted")).toBe(true);
+      expect(await instanceA.recordCancelRequest(userA, id, "unknown")).toBe(false);
+      expect(await row(id)).toMatchObject({ state: "created", cancel_request_state: "accepted" });
+      expect((await row(id)).cancel_requested_at).toBeInstanceOf(Date);
+    });
+
+    test("refuses a cancellation marker without an order, and allows one after a payment start", async () => {
+      const unsent = await claimedQuote(userA, "unsent");
+      expect(await instanceA.markCancelRequested(userA, unsent, 1)).toBe(false);
+
+      const paying = await createdOrder(5002, { cartId: 2 });
+      expect(await instanceA.markPaymentStarted(userA, paying, 5002)).toBe(true);
+      expect(await instanceA.markCancelRequested(userA, paying, 5002)).toBe(true);
+    });
+
+    test("a cancellation Chowdeck shows frees the cart lock and records the evidence", async () => {
+      const id = await createdOrder(5003);
+      const blocked = await confirmedQuote(instanceA, userA, "next");
+      expect(await instanceA.claim(userA, blocked, claimCheck("next"))).toMatchObject({ ok: false, reason: "cart_locked" });
+
+      expect(await instanceB.recordCancelled(userA, id, CANCELLED)).toBe(true);
+      expect(await row(id)).toMatchObject({ state: "cancelled", resolution: "cancelled_verified", evidence_order_status: "cancelled" });
+      expect(await instanceA.listOpen(userA, QUOTE.vendorId)).toHaveLength(0);
+
+      const next = await confirmedQuote(instanceA, userA, "after");
+      expect((await instanceA.claim(userA, next, claimCheck("after"))).ok).toBe(true);
+    });
+
+    test("never records a cancellation on a paid, abandoned or unsent attempt", async () => {
+      const paid = await createdOrder(5004);
+      await instanceA.recordPaid(userA, paid, PAID_EVIDENCE);
+      expect(await instanceA.recordCancelled(userA, paid, CANCELLED)).toBe(false);
+
+      const released = await createdOrder(5005, { cartId: 3 });
+      await sql`UPDATE order_submissions SET lock_released_at = now(), lock_release_reason = 'operator_released' WHERE id = ${released}`;
+      expect(await instanceA.recordCancelled(userA, released, CANCELLED)).toBe(false);
+
+      const unsent = await claimedQuote(userA, "unsent", { cartId: 4 });
+      expect(await instanceA.recordCancelled(userA, unsent, CANCELLED)).toBe(false);
+    });
+
+    describe("constraints", () => {
+      const insertRaw = async (fields: Record<string, unknown>) => {
+        await sql`INSERT INTO order_submissions ${sql({
+          user_id: userA, vendor_id: 1, cart_id: 1, fee_id: 1, address_binding: "b", cart_fingerprint: "f",
+          computed_total: 1, quote_expires_at: new Date(Date.now() + 300_000), state: "quoted", ...fields,
+        })}`;
+      };
+      const ordered = { confirmation_consumed_at: new Date(), order_request_started_at: new Date() };
+
+      test.each([
+        ["a promo code without its discount", { promo_code: "5FOR5" }],
+        ["a discount without its promo code", { promo_discount: 100 }],
+        ["a zero discount", { promo_code: "5FOR5", promo_discount: 0 }],
+        ["a cancellation marker without an order", { cancel_requested_at: new Date() }],
+        ["a cancellation outcome without its marker", { state: "created", chowdeck_order_id: 7, ...ordered, cancel_request_state: "accepted" }],
+        ["an unknown cancellation outcome value", { state: "created", chowdeck_order_id: 7, ...ordered, cancel_requested_at: new Date(), cancel_request_state: "maybe" }],
+        ["a cancelled attempt without an order", { state: "cancelled", ...ordered }],
+        ["a cancelled attempt without the order-request marker", { state: "cancelled", chowdeck_order_id: 7, confirmation_consumed_at: new Date() }],
+        ["a superseded quote carrying the marker", { state: "failed", failure_reason: "superseded", order_request_started_at: new Date() }],
+      ])("reject %s", async (_, fields) => {
+        await expect(insertRaw(fields)).rejects.toThrow();
+      });
+
+      test("accept a cancelled order and a superseded quote", async () => {
+        await insertRaw({ state: "cancelled", chowdeck_order_id: 8, ...ordered, resolution: "cancelled_verified", cancel_requested_at: new Date(), cancel_request_state: "accepted" });
+        await insertRaw({ state: "failed", failure_reason: "superseded", cart_id: 2 });
+      });
+    });
+  });
 });

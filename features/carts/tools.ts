@@ -7,6 +7,7 @@ import { textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
 import CartService, { CartRequestError } from "./service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
+import type { UserOrderSubmissions } from "../../lib/order-submissions";
 
 const SESSION_UNAVAILABLE =
   "Carts are not available on this connection: the server cannot identify individual users on this transport.";
@@ -72,12 +73,45 @@ const failure = (action: string, tool: string, error: unknown) => {
   return textResult(`Failed to ${action}: unexpected error`, true);
 };
 
+/*
+ * Orders ChowBot already placed from this restaurant's cart, from ChowBot's
+ * own records (no Chowdeck call). Chowdeck keeps an order as it was placed:
+ * the cart stays active and editable afterwards, and editing or clearing it
+ * changes or cancels nothing on the order.
+ */
+const existingOrdersNote = async (submissions: UserOrderSubmissions | undefined, restaurantId: number) => {
+  if (!submissions) return {};
+  let open;
+  try {
+    open = (await submissions.listOpen(restaurantId)).filter((attempt) => attempt.chowdeckOrderId);
+  } catch (error) {
+    logger.error("Reading order attempts for a cart note failed:", error instanceof Error ? error.name : typeof error);
+    return {};
+  }
+  if (open.length === 0) return {};
+  return {
+    existing_orders: open.map((attempt) => ({
+      order_id: attempt.chowdeckOrderId,
+      recorded_state: attempt.state,
+      note:
+        attempt.state === "paid"
+          ? "ChowBot recorded Chowdeck's payment confirmation for this order. Cart changes do not affect it, and ChowBot cannot change or cancel a paid order."
+          : "This order was already placed and is not changed or cancelled by editing or clearing the cart. To cancel it while it is unpaid, use cancel_order.",
+    })),
+    existing_orders_source:
+      "ChowBot's own records of orders it placed; check their current state with get_order_submission",
+  };
+};
+
 export const registerCartTools = (
   server: McpServer,
   session?: UserSession,
   client?: ChowdeckClient,
+  submissions?: UserOrderSubmissions,
 ) => {
   const service = session && new CartService(session, client);
+  const withOrders = async (restaurantId: number, result: object) =>
+    textResult(JSON.stringify({ ...result, ...(await existingOrdersNote(submissions, restaurantId)) }));
 
   server.registerTool(
     "list_carts",
@@ -101,14 +135,14 @@ export const registerCartTools = (
     "get_cart",
     {
       title: "Get cart",
-      description: `Get the signed-in user's cart for one restaurant. Items are grouped into packs; each pack is one menu item plus its chosen options. ${AMOUNTS_NOTE}`,
+      description: `Get the signed-in user's cart for one restaurant. Items are grouped into packs; each pack is one menu item plus its chosen options. A cart Chowdeck links to an order or reports as not active is marked editable: false, and ChowBot does not change it. existing_orders lists orders ChowBot already placed from it: editing the cart does not change them. ${AMOUNTS_NOTE}`,
       inputSchema: z.object({ restaurant_id: restaurantId }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ restaurant_id }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(JSON.stringify(await service.getVendorCart(restaurant_id)));
+        return await withOrders(restaurant_id, await service.getVendorCart(restaurant_id));
       } catch (error) {
         return failure("get cart", "get_cart", error);
       }
@@ -145,7 +179,7 @@ export const registerCartTools = (
     {
       title: "Set checkout notes",
       description:
-        "Set or clear the restaurant note (instructions for the restaurant) and/or the delivery note (instructions for the rider) on the signed-in user's existing cart for a restaurant. Give only the note(s) to change; null or an empty string clears one. Up to 500 characters each (ChowBot's limit). Saved on Chowdeck's cart, as the website does, and confirmed by re-reading the cart. Does not place an order.",
+        "Set or clear the restaurant note (instructions for the restaurant) and/or the delivery note (instructions for the rider) on the signed-in user's existing cart for a restaurant. Give only the note(s) to change; null or an empty string clears one. Up to 500 characters each (ChowBot's limit). Saved on Chowdeck's cart, as the website does, and confirmed by re-reading the cart: only confirmed_by_chowdeck: true means it was saved. Set the notes before place_order: an order carries the notes saved on the cart when it is placed, and later note changes do not reach an order already placed. Does not place an order.",
       inputSchema: z.object({
         restaurant_id: restaurantId,
         vendor_note: noteInput.describe("Instructions for the restaurant; null or \"\" clears it"),
@@ -160,7 +194,7 @@ export const registerCartTools = (
           ...(vendor_note !== undefined && { vendor: vendor_note }),
           ...(delivery_note !== undefined && { delivery: delivery_note }),
         };
-        return textResult(JSON.stringify(await service.setNotes(restaurant_id, notes)));
+        return await withOrders(restaurant_id, await service.setNotes(restaurant_id, notes));
       } catch (error) {
         return failure("set checkout notes", "set_cart_notes", error);
       }
@@ -190,7 +224,7 @@ export const registerCartTools = (
           quantity,
           modifiers: modifiers.map(({ group_id, option_id }) => ({ groupId: group_id, optionId: option_id })),
         });
-        return textResult(JSON.stringify(result));
+        return await withOrders(restaurant_id, result);
       } catch (error) {
         return failure("add to cart", "add_to_cart", error);
       }
@@ -217,7 +251,7 @@ export const registerCartTools = (
           restaurant_id,
           pack_reference,
         );
-        return textResult(JSON.stringify(result));
+        return await withOrders(restaurant_id, result);
       } catch (error) {
         return failure("duplicate cart pack", "duplicate_cart_pack", error);
       }
@@ -241,7 +275,7 @@ export const registerCartTools = (
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
         const result = await service.removePack(restaurant_id, pack_reference);
-        return textResult(JSON.stringify(result));
+        return await withOrders(restaurant_id, result);
       } catch (error) {
         return failure("remove cart pack", "remove_cart_pack", error);
       }
@@ -253,7 +287,7 @@ export const registerCartTools = (
     {
       title: "Clear cart",
       description:
-        "Delete the signed-in user's whole cart for one restaurant. Carts at other restaurants are not affected. Does nothing if there is no cart.",
+        "Delete the signed-in user's whole cart for one restaurant. Carts at other restaurants are not affected. Does nothing if there is no cart. Clearing a cart never cancels an order already placed from it; use cancel_order for an unpaid order.",
       inputSchema: z.object({ restaurant_id: restaurantId }),
       annotations: {
         readOnlyHint: false,
@@ -265,7 +299,7 @@ export const registerCartTools = (
     async ({ restaurant_id }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(JSON.stringify(await service.clearCart(restaurant_id)));
+        return await withOrders(restaurant_id, await service.clearCart(restaurant_id));
       } catch (error) {
         return failure("clear cart", "clear_cart", error);
       }

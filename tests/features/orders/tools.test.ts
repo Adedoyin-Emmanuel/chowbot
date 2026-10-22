@@ -333,13 +333,14 @@ describe("order tools", () => {
     const byName = (name: string) =>
       tools.find((t: { name: string }) => t.name === name);
 
-    for (const name of ["list_orders", "get_order", "get_order_timeline"]) {
+    for (const name of ["list_orders", "get_order", "get_order_timeline", "track_order"]) {
       expect(byName(name).annotations.readOnlyHint).toBe(true);
     }
     expect(byName("get_order").inputSchema.required).toEqual(["order_id"]);
     expect(byName("get_order_timeline").inputSchema.required).toEqual([
       "order_id",
     ]);
+    expect(byName("track_order").inputSchema.required).toEqual(["order_id"]);
   });
 
   test.each([
@@ -552,7 +553,15 @@ describe("get_order", () => {
     expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
       `GET ${ORDER_PATH}`,
     ]);
-    expect(JSON.parse(text)).toEqual({
+    const parsed = JSON.parse(text);
+    expect(parsed.payment_state).toEqual({
+      state: "payment_confirmed",
+      detail: "Chowdeck's order record shows the payment succeeded (order status success, payment status success)",
+      source: "Chowdeck's order record, read just now",
+    });
+    expect(parsed.amount).toMatchObject({ total: "₦11,040.00", total_raw: 1104000, discounts: { discount_price: "₦800.00" } });
+    const { payment_state: _state, amount: _amount, ...rest } = parsed;
+    expect(rest).toEqual({
       order: {
         id: ORDER_ID,
         vendor_id: 4401,
@@ -905,5 +914,206 @@ describe("order tools never mutate", () => {
         ),
       ),
     ).toBe(false);
+  });
+});
+
+/*
+ * The tracking link and live tracking, with the shapes observed on
+ * 2026-10-22: orders carry tracking_url https://chowdeck.com/store/track/
+ * <token>, GET /customer/order?status=active lists orders in progress, and
+ * GET /customer/order/{id}/live-tracking answered for an unpaid order with
+ * every delivery field null. A rider during delivery was never observed, so
+ * the rider values below are invented.
+ */
+const TRACKING_LINK = "https://chowdeck.com/store/track/Y3B4SkhTQ3dXL3E2S3VnU3hwMktKUT09Ojo6OmFMY3FUcmlrOG42TW51ek5Ic2tEY2c9PQ";
+const LIVE_PATH = `${ORDER_PATH}/live-tracking`;
+
+const liveResponse = (overrides: Record<string, unknown> = {}) => () =>
+  Response.json({
+    status: "success",
+    message: "Live tracking data retrieved",
+    data: {
+      order_id: ORDER_ID,
+      user_id: "PRIVATE-live-user",
+      order_status: "in_transit",
+      order_class: "delivery",
+      placed_at: "2026-10-01T12:00:00.000Z",
+      delivered_at: null,
+      delivery_id: "PRIVATE-delivery-id",
+      delivery_status: "picked_up",
+      delivery_is_terminal: false,
+      rider: { first_name: "Tunde", phone: "08000000000", id: "PRIVATE-rider-id", photo: { url: "PRIVATE-photo" } },
+      rider_location: { latitude: 6.59, longitude: 3.35, accuracy_token: "PRIVATE-accuracy" },
+      customer_location: { latitude: "PRIVATE-customer-lat" },
+      vendor_location: { latitude: "PRIVATE-vendor-lat" },
+      route: { polyline: "PRIVATE-route" },
+      socket_room: "PRIVATE-socket",
+      pusher_channel: "PRIVATE-pusher",
+      ...overrides,
+    },
+  });
+
+describe("list_orders with a status filter", () => {
+  test.each([
+    [{}, "completed"],
+    [{ status: "completed" }, "completed"],
+    [{ status: "active" }, "active"],
+  ])("sends %p as status=%s", async (args, status) => {
+    route("GET /customer/order", orderList([orderSummary(ORDER_ID, { status: "abandoned" })]));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "list_orders", args)));
+
+    expect(received[0]!.query.get("status")).toBe(status);
+    expect(parsed.status_filter).toBe(status);
+    expect(parsed.orders[0].status).toBe("abandoned");
+  });
+
+  test("refuses any other filter before contacting Chowdeck", async () => {
+    const result = await callTool(serverFor(await signedIn()), "list_orders", { status: "cancelled" });
+
+    expect(textOf(result)).toContain("Input validation error");
+    expect(received).toHaveLength(0);
+  });
+});
+
+describe("tracking link in get_order", () => {
+  test("includes a tracking link in the form Chowdeck sends", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK }));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+
+    expect(parsed.order.tracking_url).toBe(TRACKING_LINK);
+  });
+
+  test.each([
+    ["another host", "https://track.example/store/track/abc"],
+    ["plain http", "http://chowdeck.com/store/track/abc"],
+    ["embedded credentials", "https://user:pass@chowdeck.com/store/track/abc"],
+    ["another page", "https://chowdeck.com/store/pay/abc"],
+    ["a nested path", "https://chowdeck.com/store/track/abc/../../pay"],
+    ["a port", "https://chowdeck.com:8443/store/track/abc"],
+    ["a javascript: URL", "javascript:alert(1)"],
+    ["a non-string", { href: TRACKING_LINK }],
+  ])("drops a tracking link with %s", async (_, value) => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: value }));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+
+    expect(parsed.order).not.toHaveProperty("tracking_url");
+  });
+});
+
+describe("track_order", () => {
+  const track = async () => callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID });
+
+  test("combines the order record, progress steps and live tracking, with the tracking link and nothing private", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK }));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+
+    const result = await track();
+    const text = textOf(result);
+    const parsed = JSON.parse(text);
+
+    expect(result.isError).toBeUndefined();
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([`GET ${ORDER_PATH}`, `GET ${TIMELINE_PATH}`, `GET ${LIVE_PATH}`]);
+    expect(parsed.status).toMatchObject({ order_state: "payment_confirmed", chowdeck_payment_status: "success" });
+    expect(parsed.order_status).toBe("success");
+    expect(parsed.restaurant).toBe("Item 7 (Go) - Allen");
+    expect(parsed.tracking_link.url).toBe(TRACKING_LINK);
+    expect(parsed.live_tracking).toEqual({
+      order_status: "in_transit",
+      order_class: "delivery",
+      placed_at: "2026-10-01T12:00:00.000Z",
+      delivered_at: null,
+      delivery_status: "picked_up",
+      delivery_is_terminal: false,
+      rider: { first_name: "Tunde", phone: "08000000000" },
+      rider_location: { latitude: 6.59, longitude: 3.35 },
+    });
+    expect(parsed.progress_steps.length).toBeGreaterThan(0);
+    expect(parsed.progress_note).toContain("a listed stage is not proof it was reached");
+    expect(parsed.next_step).toContain("give them the tracking link as a clickable link");
+    expect(parsed).not.toHaveProperty("unavailable");
+    expectNoPrivateData(text);
+  });
+
+  test("reports the observed unpaid order as unpaid, whatever its timeline lists", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ status: "abandoned", payment: {}, time_payment_confirmed: null, tracking_url: TRACKING_LINK }));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(
+      `GET ${LIVE_PATH}`,
+      liveResponse({ order_status: "abandoned", delivery_status: null, rider: null, rider_location: null, customer_location: null, vendor_location: null, route: null }),
+    );
+
+    const parsed = JSON.parse(textOf(await track()));
+
+    expect(parsed.status.order_state).toBe("order_created");
+    expect(parsed.live_tracking).toEqual({
+      order_status: "abandoned",
+      order_class: "delivery",
+      placed_at: "2026-10-01T12:00:00.000Z",
+      delivered_at: null,
+      delivery_status: null,
+      delivery_is_terminal: false,
+    });
+    expect(parsed.next_step).toContain("Chowdeck shows no payment for this order yet");
+  });
+
+  test("lists a part Chowdeck cannot give under unavailable, reading each part once", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK }));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+
+    const result = await track();
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.unavailable).toEqual([`live tracking: GET ${LIVE_PATH} failed with status 500: Server Error`]);
+    expect(parsed).not.toHaveProperty("live_tracking");
+    expect(parsed.tracking_link.url).toBe(TRACKING_LINK);
+    expect(received.filter((r) => r.path === LIVE_PATH)).toHaveLength(1);
+  });
+
+  test("reports the payment state as unknown, with no tracking link, when the order record cannot be read", async () => {
+    route(`GET ${ORDER_PATH}`, () => Response.json({ message: "Server Error" }, { status: 503 }));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+
+    const parsed = JSON.parse(textOf(await track()));
+
+    expect(parsed.status.order_state).toBe("unknown");
+    expect(parsed.status.detail).toContain("does not mean the order is unpaid, paid or cancelled");
+    expect(parsed.tracking_link).toBeNull();
+    expect(parsed.unavailable[0]).toContain("order record");
+  });
+
+  test("refuses live tracking for a different order", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse());
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse({ order_id: 999 }));
+
+    const parsed = JSON.parse(textOf(await track()));
+
+    expect(parsed.unavailable).toEqual([`live tracking: GET ${LIVE_PATH} returned an unexpected response shape`]);
+  });
+
+  test("fails when Chowdeck gives none of the parts", async () => {
+    for (const path of [ORDER_PATH, TIMELINE_PATH, LIVE_PATH]) route(`GET ${path}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+
+    const result = await track();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toStartWith("Failed to track order: Chowdeck gave none of the order's details");
+  });
+
+  test("only ever reads", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse());
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+
+    await track();
+
+    expectOnlyGets();
   });
 });

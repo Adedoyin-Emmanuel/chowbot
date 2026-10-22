@@ -72,7 +72,7 @@ export const createServer = ({
   registerRestaurantTools(server, session);
   registerMenuTools(server, session);
   registerAddressTools(server, session);
-  registerCartTools(server, session);
+  registerCartTools(server, session, undefined, submissions);
   registerCheckoutTools(server, session, undefined, submissions);
   registerOrderTools(server, session);
   registerOrderPlacementTools(server, {

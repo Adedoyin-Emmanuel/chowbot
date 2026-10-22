@@ -132,6 +132,13 @@ const orderDetail = (overrides: Record<string, unknown> = {}) => () =>
 const timeline = (actions: string[]) => () =>
   Response.json({ message: "Successfully retrieved order timeline", data: actions.map((action) => ({ heading: action, action, level: "x", time: null })) });
 
+/*
+ * The order record as observed for a freshly created, unpaid order
+ * (2026-10-22): status "abandoned", payment {}, no confirmation time.
+ */
+const createdDetail = (overrides: Record<string, unknown> = {}) =>
+  orderDetail({ status: "abandoned", payment: {}, time_payment_confirmed: null, total_price: 554000, ...overrides });
+
 const scriptHappyPath = () => {
   route("GET /customer/cart/vendor/102555", cart());
   route("GET /customer/address", addresses());
@@ -140,6 +147,7 @@ const scriptHappyPath = () => {
   route("GET /customer/payment/channel", channels());
   route("GET /customer/payment/methods", () => Response.json({ status: "success", data: [{ type: "online_payment" }] }));
   route("POST /customer/order", orderCreated());
+  route(`GET /customer/order/${ORDER_ID}`, createdDetail());
 };
 
 const posts = (path: string) => received.filter((r) => r.method === "POST" && r.path === path);
@@ -150,12 +158,9 @@ const posts = (path: string) => received.filter((r) => r.method === "POST" && r.
  */
 const storeWith = (overrides: Partial<OrderSubmissionStore>): OrderSubmissionStore => {
   const real = stores.orderSubmissions;
-  const methods = [
-    "createQuote", "get", "issueConfirmation", "claim", "recordGateFailure", "markOrderRequestStarted",
-    "recoverUnsent", "recordOutcome", "recordPaid", "linkOrder", "listOpen",
-    "listRecentlyReleased", "markPaymentStarted", "recordPaymentStart",
-  ] as const;
-  const delegate = Object.fromEntries(methods.map((m) => [m, (real[m] as Function).bind(real)]));
+  const proto = Object.getPrototypeOf(real);
+  const methods = Object.getOwnPropertyNames(proto).filter((m) => m !== "constructor" && typeof proto[m] === "function");
+  const delegate = Object.fromEntries(methods.map((m) => [m, ((real as never)[m] as Function).bind(real)]));
   return { ...delegate, ...overrides } as OrderSubmissionStore;
 };
 
@@ -270,6 +275,8 @@ const call = async ({ baseUrl, token = alice.token, name, args: given, capabilit
 };
 
 const textOf = (body: { result?: { content?: { text: string }[] } }) => body.result?.content?.[0]?.text ?? "";
+const reportOf = (body: { result?: { content?: { text: string }[] } }) => JSON.parse(textOf(body));
+const messageOf = (body: { result?: { content?: { text: string }[] } }) => reportOf(body).message as string;
 const ACCEPT = { confirm: { action: "accept", content: { confirm: true } } };
 
 const getQuoteRef = async (baseUrl: string, token = alice.token) => {
@@ -292,7 +299,7 @@ type FirstRound = {
  */
 const asFirstRound = (body: { result: { content: { text: string }[] } }): FirstRound => {
   const result = JSON.parse(body.result.content[0]!.text);
-  expect(result).toMatchObject({ status: "confirmation_required", order_placed: false });
+  expect(result).toMatchObject({ action: "place_order", outcome: "confirmation_required", order_placed: false, status: null });
   return {
     requestState: result.confirmation,
     inputRequests: {
@@ -423,7 +430,9 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(message).toContain("Deliver to: Home");
       expect(message).toContain("554000");
       expect(message).toContain("opay");
-      expect(message).toContain("Tip: none (ChowBot does not add a tip). Restaurant note: none. Delivery note: none. Not a gift. No promo code.");
+      expect(message).toContain("Tip: none (ChowBot does not add a tip). Restaurant note: none. Delivery note: none.");
+      expect(message).toContain("to change one, use set_cart_notes");
+      expect(message).toContain("Not a gift. No promo code.");
       expect(message).not.toContain("Estimated total");
       expectNothingPrivate(first);
       expect(posts("/customer/order")).toHaveLength(0);
@@ -448,7 +457,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       expect(body.result.isError).toBeUndefined();
       const result = JSON.parse(textOf(body));
-      expect(result).toMatchObject({ status: "confirmation_required", order_placed: false, expires_in_seconds: 300 });
+      expect(result).toMatchObject({ outcome: "confirmation_required", order_placed: false, expires_in_seconds: 300, outcome_uncertain: false, safe_to_retry: true });
       expect(result.summary).toContain("Place this order at Chicken Republic - Opebi?");
       expect(result.summary).toContain("Total: 554000");
       expect(result.confirmation).toMatch(/^v1\./);
@@ -489,7 +498,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       const quoteRef = await getQuoteRef(baseUrl);
 
       const stolen = await call({ baseUrl, token: bob.token, name: "place_order", args: placeArgs(quoteRef) });
-      expect(textOf(stolen)).toBe("Order not placed: that quote_ref does not exist for your account.");
+      expect(messageOf(stolen)).toBe("Order not placed: that quote_ref does not exist for your account.");
 
       await sql`UPDATE order_submissions SET quote_expires_at = now() - interval '1 second' WHERE id = ${quoteRef}`;
       const expired = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef) });
@@ -504,7 +513,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef) });
 
-      expect(textOf(body)).toBe("Order not placed: the opay payment channel is not available right now.");
+      expect(messageOf(body)).toBe("Order not placed: the opay payment channel is not available right now.");
       expect((await row(quoteRef)).state).toBe("quoted");
     });
 
@@ -532,8 +541,18 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       expect(second.result.isError).toBeUndefined();
       const result = JSON.parse(textOf(second));
-      expect(result).toMatchObject({ order_id: ORDER_ID, quote_ref: quoteRef, payment_channel: "opay", computed_total: 554000, status: "created; awaiting payment" });
+      expect(result).toMatchObject({
+        action: "place_order", outcome: "order_created", order_id: ORDER_ID, quote_ref: quoteRef, payment_channel: "opay", computed_total: 554000,
+        outcome_uncertain: false, safe_to_retry: false,
+        status: { order_id: ORDER_ID, order_state: "order_created", chowdeck_order_status: "abandoned", chowdeck_payment_status: null },
+        amount: { total: "₦5,540.00", total_raw: 554000 },
+      });
+      expect(result.status.source).toStartWith("Chowdeck's order record, read ");
+      expect(result.chowdeck_confirmed).toContain(`Chowdeck created order ${ORDER_ID} (POST /customer/order answered success)`);
+      expect(result.chowdeck_confirmed).toContain("Chowdeck's order record shows a total of ₦5,540.00");
+      expect(result).not.toHaveProperty("warnings");
       expect(result.next_step).toContain("call start_payment with this quote_ref");
+      expect(result.next_step).toContain("cancel_order");
       expect(result.next_step).not.toContain("does not start payments");
       expectNothingPrivate(result);
 
@@ -596,6 +615,10 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const sequence = received.filter((r) => r.method === "POST").map((r) => r.path);
       expect(sequence).toEqual(["/customer/delivery/amount", "/customer/delivery/amount", "/customer/order"]);
+      // The order record is read once, only after the order was created.
+      const paths = received.map((r) => `${r.method} ${r.path}`);
+      expect(paths.filter((p) => p === `GET /customer/order/${ORDER_ID}`)).toHaveLength(1);
+      expect(paths.at(-1)).toBe(`GET /customer/order/${ORDER_ID}`);
     });
 
     test("cannot be replayed", async () => {
@@ -651,7 +674,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       expect(first.inputRequests.confirm.params.message).toContain("earlier order attempt(s) at this restaurant");
       expect(Object.keys(first.inputRequests.confirm.params.requestedSchema.properties)).toEqual(["confirm", "acknowledge_unresolved_attempts"]);
-      expect(textOf(second)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
+      expect(messageOf(second)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
       expect(posts("/customer/order")).toHaveLength(0);
     });
 
@@ -676,7 +699,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const { quoteRef, second } = await placeOrder(baseUrl);
 
-      expect(textOf(second)).toBe("Order not placed: Chowdeck rejected the order check: POST /customer/delivery/amount failed with status 400: Vendor is closed. No order was sent.");
+      expect(messageOf(second)).toBe("Order not placed: Chowdeck rejected the order check: POST /customer/delivery/amount failed with status 400: Vendor is closed. No order was sent.");
       expect(posts("/customer/order")).toHaveLength(0);
       const failed = await row(quoteRef);
       expect(failed.failure_reason).toBe("gate_rejected");
@@ -742,7 +765,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const { second } = await placeOrder(baseUrl);
 
-      expect(textOf(second)).toBe("Order not placed: this attempt was recovered or changed before sending. Nothing was sent.");
+      expect(messageOf(second)).toBe("Order not placed: this attempt was recovered or changed before sending. Nothing was sent.");
       expect(posts("/customer/order")).toHaveLength(0);
     });
   });
@@ -755,7 +778,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const { quoteRef, second } = await placeOrder(baseUrl);
 
-      expect(textOf(second)).toBe("Order not placed: Chowdeck rejected the order: POST /customer/order failed with status 422: Fee expired. No order was created.");
+      expect(messageOf(second)).toBe("Order not placed: Chowdeck rejected the order: POST /customer/order failed with status 422: Fee expired. No order was created.");
       expect((await row(quoteRef)).failure_reason).toBe("order_rejected");
       expect(posts("/customer/order")).toHaveLength(1);
     });
@@ -850,7 +873,8 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       expect((await row(unsent)).failure_reason).toBe("not_sent");
       const attempts = JSON.parse(textOf(body)).attempts;
-      expect(attempts.map((a: { state: string }) => a.state)).toEqual(["unknown"]);
+      expect(attempts.map((a: { recorded_state: string }) => a.recorded_state)).toEqual(["unknown"]);
+      expect(attempts[0].status).toMatchObject({ order_state: "unknown", source: "ChowBot's record only: there is no Chowdeck order id to read" });
     });
 
     test.each([
@@ -881,7 +905,11 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       const body = await status(baseUrl);
 
       expect((await row(quoteRef)).state).toBe("created");
-      expect(JSON.parse(textOf(body)).attempts[0].payment_check).toContain("payment could not be checked");
+      const { status: current } = reportOf(body).attempts[0];
+      expect(current).toMatchObject({ order_id: ORDER_ID, order_state: "unknown", source: "none: Chowdeck's order record could not be read" });
+      expect(current.detail).toContain("This does not mean it is unpaid, paid or cancelled");
+      expect(current.last_recorded_by_chowbot).toStartWith("created (ChowBot's record, ");
+      expect(reportOf(body).outcome_uncertain).toBe(true);
     });
 
     /*
@@ -900,8 +928,9 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       const body = await status(baseUrl);
 
       const attempt = JSON.parse(textOf(body)).attempts[0];
-      expect(attempt.payment_check).toBe(`payment could not be checked (GET /customer/order/${ORDER_ID} failed with status ${code}: ${message})`);
-      expect(attempt.state).toBe("created");
+      expect(attempt.status.order_state).toBe("unknown");
+      expect(attempt.status.detail).toContain(`(GET /customer/order/${ORDER_ID} failed with status ${code}: ${message})`);
+      expect(attempt.recorded_state).toBe("created");
       expect(received.some((r) => r.path.endsWith("/timeline"))).toBe(false);
       const locked = await row(quoteRef);
       expect(locked.state).toBe("created");
@@ -921,7 +950,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const unpaid = await status(baseUrl);
 
-      expect(JSON.parse(textOf(unpaid)).attempts[0].payment_check).toBe("not paid yet (Chowdeck payment status: unknown)");
+      expect(JSON.parse(textOf(unpaid)).attempts[0].status).toMatchObject({ order_state: "order_created", chowdeck_payment_status: null });
       const attempt = await row(quoteRef);
       expect(attempt.state).toBe("created");
       expect(attempt.resolution).toBeNull();
@@ -938,7 +967,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const body = await status(baseUrl);
 
-      expect(JSON.parse(textOf(body)).attempts[0].payment_check).toBe("not paid yet (Chowdeck payment status: unknown)");
+      expect(JSON.parse(textOf(body)).attempts[0].status.order_state).toBe("order_created");
       expect(received.some((r) => r.path.endsWith("/timeline"))).toBe(false);
       expect((await row(quoteRef)).state).toBe("created");
     });
@@ -950,8 +979,41 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const { quoteRef, second } = await placeOrder(baseUrl);
 
-      expect(JSON.parse(textOf(second)).status).toBe("created; Chowdeck reports it paid");
+      const result = reportOf(second);
+      expect(result.outcome).toBe("order_created");
+      expect(result.status.order_state).toBe("order_created");
+      expect(result.chowdeck_confirmed).toContain("Chowdeck's create response says made_payment: true; that is not payment evidence, only the order record is");
       expect((await row(quoteRef)).state).toBe("created");
+    });
+  });
+
+  /*
+   * Every created order carried tracking_url https://chowdeck.com/store/
+   * track/<token> (2026-10-22). Only that form reaches the user.
+   */
+  describe("the tracking link after creation", () => {
+    const LINK = "https://chowdeck.com/store/track/V3ovODAvUmk2S21DY1VvQzArUHJjUT09Ojo6OnFHdnZoUUtLZ2V3RnJmM2ZpQmxNS0E9PQ";
+
+    test("returns Chowdeck's tracking link from the create response", async () => {
+      scriptHappyPath();
+      route("POST /customer/order", orderCreated({ tracking_url: LINK }));
+      const baseUrl = await startApp();
+
+      const { second } = await placeOrder(baseUrl);
+
+      const result = reportOf(second);
+      expect(result.tracking_link).toBe(LINK);
+      expect(result.next_step).toContain("track_order");
+    });
+
+    test("leaves out a tracking link not in Chowdeck's form", async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+
+      const { second } = await placeOrder(baseUrl);
+
+      expect(reportOf(second)).not.toHaveProperty("tracking_link");
+      expectNothingPrivate(reportOf(second));
     });
   });
 
@@ -1069,7 +1131,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(body.attempts).toEqual([]);
       const [abandoned] = body.abandoned;
       expect(abandoned).toMatchObject({
-        quote_ref: quoteRef, status: "abandoned", last_known_state: "created", order_id: ORDER_ID,
+        quote_ref: quoteRef, status_label: "abandoned", last_known_state: "created", order_id: ORDER_ID,
         reason: "user_reported_abandoned",
       });
       expect(Date.parse(abandoned.abandoned_at)).not.toBeNaN();
@@ -1107,7 +1169,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(message).toContain("Abandoned is not cancelled: ChowBot did not cancel anything on Chowdeck");
       expect(message).toContain("may still be payable");
       expect(Object.keys(first.inputRequests.confirm.params.requestedSchema.properties)).toEqual(["confirm", "acknowledge_unresolved_attempts"]);
-      expect(textOf(second)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
+      expect(messageOf(second)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
       expect(posts("/customer/order")).toHaveLength(0);
     });
 
@@ -1133,7 +1195,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       expect(body.attempts).toEqual([]);
       const [abandoned] = body.abandoned;
-      expect(abandoned.payment_check).toBe("payment confirmed by Chowdeck after the attempt was abandoned");
+      expect(abandoned.status.order_state).toBe("payment_confirmed");
       expect(Date.parse(abandoned.paid_after_abandoned.confirmed_at)).not.toBeNaN();
       expect(abandoned.last_known_state).toBe("created");
       expect(abandoned.guidance).toContain("Chowdeck has since confirmed this order was paid");
@@ -1170,10 +1232,10 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
     });
 
     test.each([
-      ["Chowdeck shows it unpaid", orderDetail(), timeline(["ORDER_CREATED"]), "not paid yet (Chowdeck payment status: pending)"],
-      ["only the timeline shows MADE_PAYMENT", orderDetail({ payment: undefined }), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), "not paid yet (Chowdeck payment status: unknown)"],
-      ["the order lookup returns 404", () => Response.json({ message: "Order not found" }, { status: 404 }), timeline([]), "payment could not be checked"],
-      ["the order lookup fails upstream", () => Response.json({ message: "Server Error" }, { status: 500 }), timeline([]), "payment could not be checked"],
+      ["Chowdeck shows it unpaid", orderDetail(), timeline(["ORDER_CREATED"]), "payment_pending"],
+      ["only the timeline shows MADE_PAYMENT", orderDetail({ payment: undefined }), timeline(["ORDER_CREATED", "MADE_PAYMENT"]), "order_created"],
+      ["the order lookup returns 404", () => Response.json({ message: "Order not found" }, { status: 404 }), timeline([]), "unknown"],
+      ["the order lookup fails upstream", () => Response.json({ message: "Server Error" }, { status: 500 }), timeline([]), "unknown"],
     ])("records nothing and keeps the uncertainty when %s", async (_, detail, steps, check) => {
       scriptHappyPath();
       const baseUrl = await startApp();
@@ -1186,10 +1248,11 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       for (const body of [first, second]) {
         const [abandoned] = body.abandoned;
-        expect(abandoned.payment_check).toContain(check);
+        expect(abandoned.status.order_state).toBe(check);
         expect(abandoned).not.toHaveProperty("paid_after_abandoned");
         expect(abandoned.guidance).toContain("The order may still exist and may still be payable");
-        expect(JSON.stringify(body)).not.toMatch(/cancell?ed\b(?<!not cancelled)/i);
+        // Only the explicit disclaimer that an unknown state is not "unpaid, paid or cancelled" may mention it.
+        expect(JSON.stringify(body).replaceAll("unpaid, paid or cancelled", "")).not.toMatch(/cancell?ed\b(?<!not cancelled)/i);
       }
       const after = await row(quoteRef);
       expect(after).toEqual({ ...before, updated_at: after.updated_at });
@@ -1211,7 +1274,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(received.filter((r) => r.path.startsWith("/customer/order/"))).toHaveLength(0);
       expect((await row(quoteRef)).paid_after_release_at).toBeNull();
       expect(body.abandoned.map((a: { quote_ref: string }) => a.quote_ref)).toEqual([unknown]);
-      expect(body.abandoned[0]).not.toHaveProperty("payment_check");
+      expect(body.abandoned[0]).not.toHaveProperty("status");
       expect(body.abandoned[0].guidance).toContain("An order may or may not exist for this attempt");
     });
 
@@ -1342,7 +1405,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const second = await call({ baseUrl, name: "place_order", args: placeArgs(quoteRef), inputResponses: ACCEPT, requestState: first.requestState });
 
-      expect(textOf(second)).toBe("Order not placed: the cart's restaurant or delivery note changed after confirmation was requested. Start again to confirm the current notes.");
+      expect(messageOf(second)).toBe("Order not placed: the cart's restaurant or delivery note changed after confirmation was requested.");
       expect(posts("/customer/order")).toHaveLength(0);
       expect(posts("/customer/delivery/amount")).toHaveLength(1);
       expect((await row(quoteRef)).state).toBe("confirmation_pending");
@@ -1361,22 +1424,30 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
   });
 
   /*
-   * Tip, gift and promo code: validated live at confirmation, shown to the
-   * user, bound into the confirmation state and sent in the website's shape.
+   * Tip and gift: validated live at confirmation, shown to the user, bound
+   * into the confirmation state and sent in the website's shape. The promo
+   * code is the one the quote applied (stored with Chowdeck's calculated
+   * discount); place_order never runs a discount calculation itself.
    */
   describe("order extras", () => {
     const tipsConfig = () =>
       Response.json({ status: "success", data: { delivery_driver_tips_config: { recommendation_percent: [5, 10, "Custom"], minimum_tip_amount: 10000, maximum_tip_amount: 500000 } } });
-    const discounts = (entries: Record<string, unknown>[]) => () => Response.json({ status: "success", data: entries });
     const gift = { donor_name: "Ada", name: "Tunde Example", phone: "08012345678", message: "Enjoy!" };
     const scriptExtras = () => {
       scriptHappyPath();
       route("GET /customer/config", tipsConfig);
       route("POST /auth/phone/validate", () => Response.json({ status: "success", data: { is_valid: true } }));
-      route("POST /customer/discount/apply", discounts([{ target: "menus", amount_off: 5000 }]), discounts([]));
     };
-    const placeWith = async (baseUrl: string, extras: Record<string, unknown>, second: Record<string, unknown> = extras) => {
+    const withQuotePromo = (quoteRef: string, code = "SAVE10", discount = 5000) =>
+      sql`UPDATE order_submissions SET promo_code = ${code}, promo_discount = ${discount} WHERE id = ${quoteRef}`;
+    const placeWith = async (
+      baseUrl: string,
+      extras: Record<string, unknown>,
+      second: Record<string, unknown> = extras,
+      prepare: (quoteRef: string) => Promise<unknown> = async () => {},
+    ) => {
       const quoteRef = await getQuoteRef(baseUrl);
+      await prepare(quoteRef);
       const body = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), ...extras } });
       if (body.result.isError) return { quoteRef, first: body, summary: undefined, second: undefined };
       const parsed = JSON.parse(textOf(body));
@@ -1384,17 +1455,20 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       return { quoteRef, first: body, summary: parsed.summary as string, second: result };
     };
 
-    test("confirms and sends a tip, gift and promo code exactly as the website would", async () => {
+    test("confirms and sends a tip, gift and the quote's promo code exactly as the website would", async () => {
       scriptExtras();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ total_price: 569000, promo_codes: "SAVE10", promo_code_price: 5000 }));
       const baseUrl = await startApp();
 
-      const { summary, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 }, gift, promo_code: "SAVE10" });
+      const { first, summary, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 }, gift }, undefined, withQuotePromo);
 
       const message = summary!;
       expect(message).toContain("Tip: ₦200.00 for the rider.");
       expect(message).toContain('Gift for Tunde Example (phone 08012345678, NG) from Ada, message "Enjoy!".');
-      expect(message).toContain("Promo code SAVE10: Chowdeck's discount calculation shows ₦50.00 off the items; the final discount is set by Chowdeck.");
-      expect(message).toContain("Estimated total: ₦5,690.00 (the total above plus the tip minus the calculated discount; computed by ChowBot, not confirmed by Chowdeck).");
+      expect(message).toContain("Promo code SAVE10: Chowdeck's discount calculation in the quote returned ₦50.00 off.");
+      expect(message).toContain("Estimated total: ₦5,690.00 (the total above plus the tip minus Chowdeck's calculated discount; computed by ChowBot, not yet confirmed by Chowdeck's order record).");
+      expect(reportOf(first).amount).toMatchObject({ promo_code: "SAVE10", chowdeck_calculated_discount: "₦50.00", estimated_total: "₦5,690.00" });
+      expect(received.some((r) => r.path === "/customer/discount/apply")).toBe(false);
 
       const [order] = posts("/customer/order");
       expect(posts("/customer/order")).toHaveLength(1);
@@ -1405,7 +1479,21 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
         payment_method_id: OPAY_CHANNEL_ID,
       });
       expect(order!.body).not.toHaveProperty("payment_method");
-      expect(JSON.parse(textOf(second!))).toMatchObject({ order_id: ORDER_ID, tip: "₦200.00", promo_code: "SAVE10", gift_for: "Tunde Example" });
+      const result = reportOf(second!);
+      expect(result).toMatchObject({ order_id: ORDER_ID, tip: "₦200.00", promo_code: "SAVE10", gift_for: "Tunde Example" });
+      expect(result.amount).toMatchObject({ total: "₦5,690.00", discounts: { promo_code_price: "₦50.00" }, promo_codes: "SAVE10" });
+      expect(result.chowdeck_confirmed).toContain("Chowdeck's order record lists the promo code SAVE10");
+      expect(result).not.toHaveProperty("warnings");
+    });
+
+    test("accepts a promo_code argument only when it is the quote's code", async () => {
+      scriptExtras();
+      const baseUrl = await startApp();
+
+      const { second } = await placeWith(baseUrl, { promo_code: "save10" }, undefined, withQuotePromo);
+
+      expect(reportOf(second!).outcome).toBe("order_created");
+      expect((posts("/customer/order")[0]!.body as Record<string, unknown>).promo_codes).toEqual(["SAVE10"]);
     });
 
     test("sends the same payload as before when no extras are given", async () => {
@@ -1422,26 +1510,26 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
     });
 
     test.each([
-      ["a promo code with no calculated discount", { promo_code: "SAVE10" }, () => route("POST /customer/discount/apply", discounts([]), discounts([])), "Order not placed: Chowdeck's discount calculation shows no discount for the promo code SAVE10."],
-      ["a refused promo code", { promo_code: "SAVE10" }, () => route("POST /customer/discount/apply", () => Response.json({ message: "Promo code has expired" }, { status: 422 })), "Order not placed: Chowdeck refused the promo code SAVE10 (POST /customer/discount/apply failed with status 422: Promo code has expired)."],
-      ["an invalid gift phone", { gift }, () => route("POST /auth/phone/validate", () => Response.json({ status: "success", data: { is_valid: false } })), "Order not placed: Chowdeck says the gift recipient's phone number is not valid for that country."],
-      ["a tip above the maximum", { tip: { amount_naira: 6000 } }, () => {}, "Order not placed: the tip must be at most ₦5,000.00."],
-    ])("asks for nothing and places nothing with %s", async (_, extras, override, message) => {
+      ["a promo code the quote did not apply", { promo_code: "SAVE10" }, async () => {}, "Order not placed: a promo code is applied in the quote, not here; call get_checkout_quote with promo_code SAVE10 so Chowdeck can calculate its discount."],
+      ["a promo code other than the quote's", { promo_code: "OTHER" }, (quoteRef: string) => withQuotePromo(quoteRef), "Order not placed: this quote applied the promo code SAVE10, not OTHER; call get_checkout_quote with the code you want."],
+      ["an invalid gift phone", { gift }, async () => route("POST /auth/phone/validate", () => Response.json({ status: "success", data: { is_valid: false } })), "Order not placed: Chowdeck says the gift recipient's phone number is not valid for that country."],
+      ["a tip above the maximum", { tip: { amount_naira: 6000 } }, async () => {}, "Order not placed: the tip must be at most ₦5,000.00."],
+    ])("asks for nothing and places nothing with %s", async (_, extras, prepare, message) => {
       scriptExtras();
-      override();
       const baseUrl = await startApp();
 
-      const { quoteRef, first } = await placeWith(baseUrl, extras);
+      const { quoteRef, first } = await placeWith(baseUrl, extras, extras, prepare as (quoteRef: string) => Promise<unknown>);
 
-      expect(textOf(first)).toBe(message);
+      expect(messageOf(first)).toBe(message);
+      expect(reportOf(first)).toMatchObject({ action: "place_order", outcome: "not_sent", outcome_uncertain: false, safe_to_retry: true });
       expect(posts("/customer/order")).toHaveLength(0);
+      expect(received.some((r) => r.path === "/customer/discount/apply")).toBe(false);
       expect((await row(quoteRef)).state).toBe("quoted");
     });
 
     test.each([
       ["a different tip", { tip: { amount_naira: 200 } }, { tip: { amount_naira: 500 } }],
       ["a dropped tip", { tip: { amount_naira: 200 } }, {}],
-      ["an added promo code", {}, { promo_code: "SAVE10" }],
       ["a changed gift recipient", { gift }, { gift: { ...gift, name: "Someone Else" } }],
     ])("refuses %s at submission, sending and claiming nothing", async (_, confirmed, submitted) => {
       scriptExtras();
@@ -1449,7 +1537,18 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const { quoteRef, second } = await placeWith(baseUrl, confirmed, submitted);
 
-      expect(textOf(second!)).toBe("Order not placed: the tip, gift or promo code differs from what was confirmed. Start again.");
+      expect(messageOf(second!)).toBe("Order not placed: the tip, gift or promo code differs from what was confirmed.");
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("confirmation_pending");
+    });
+
+    test("refuses a promo code added at submission, sending and claiming nothing", async () => {
+      scriptExtras();
+      const baseUrl = await startApp();
+
+      const { quoteRef, second } = await placeWith(baseUrl, {}, { promo_code: "SAVE10" });
+
+      expect(messageOf(second!)).toContain("a promo code is applied in the quote, not here");
       expect(posts("/customer/order")).toHaveLength(0);
       expect((await row(quoteRef)).state).toBe("confirmation_pending");
     });
@@ -1462,6 +1561,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       const { quoteRef, second } = await placeWith(baseUrl, { tip: { amount_naira: 200 } });
 
       expect(textOf(second!)).toContain("The order's outcome is unknown");
+      expect(reportOf(second!)).toMatchObject({ outcome: "unknown_outcome", outcome_uncertain: true, safe_to_retry: false });
       expect(posts("/customer/order")).toHaveLength(1);
       expect((await row(quoteRef)).state).toBe("unknown");
     });
@@ -1492,7 +1592,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       });
 
       const summary = JSON.parse(textOf(first));
-      expect(summary).toMatchObject({ status: "confirmation_required", order_placed: false });
+      expect(summary).toMatchObject({ outcome: "confirmation_required", order_placed: false });
       expect(summary.summary).toContain("Chicken Republic - Opebi");
       expect(summary.summary).toContain("Deliver to: Home");
       expect(summary.summary).toContain("Total: 554000");
@@ -1512,7 +1612,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
 
       const second = await call({ baseUrl, name: "place_order", args: { ...placeArgs(quoteRef), confirmation: first.confirmation }, ...variant });
 
-      expect(JSON.parse(textOf(second))).toMatchObject({ order_id: ORDER_ID, quote_ref: quoteRef, status: "created; awaiting payment" });
+      expect(JSON.parse(textOf(second))).toMatchObject({ outcome: "order_created", order_id: ORDER_ID, quote_ref: quoteRef, status: { order_state: "order_created" } });
       expect(posts("/customer/order")).toHaveLength(1);
       expect(posts("/customer/delivery/amount")).toHaveLength(2);
       expect((await row(quoteRef)).state).toBe("created");
@@ -1588,7 +1688,7 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(first.summary).toContain("earlier order attempt(s) at this restaurant");
 
       const without = await secondCall(baseUrl, { ...placeArgs(quoteRef), confirmation: first.confirmation });
-      expect(textOf(without)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
+      expect(messageOf(without)).toBe("Order not placed: the earlier unresolved order attempts were not acknowledged.");
       expect(posts("/customer/order")).toHaveLength(0);
     });
 
@@ -1604,6 +1704,327 @@ describePostgres("order placement over the hosted stack (PostgreSQL)", () => {
       expect(textOf(result)).toContain("The order's outcome is unknown");
       expect(posts("/customer/order")).toHaveLength(1);
       expect((await row(quoteRef)).state).toBe("unknown");
+    });
+  });
+
+  describe("place_order evidence after creation", () => {
+    test("refuses a quote a newer quote for the same cart replaced, sending nothing", async () => {
+      scriptHappyPath();
+      route("POST /customer/delivery/amount", quote, quote, gateQuote);
+      const baseUrl = await startApp();
+      const older = await getQuoteRef(baseUrl);
+      const newer = await getQuoteRef(baseUrl);
+
+      expect((await row(older)).failure_reason).toBe("superseded");
+      expect((await row(newer)).state).toBe("quoted");
+      const body = await call({ baseUrl, name: "place_order", args: placeArgs(older) });
+
+      expect(messageOf(body)).toBe("Order not placed: this quote was replaced by a newer quote for the same cart, so its total can no longer be confirmed.");
+      expect(reportOf(body).next_step).toContain("newest get_checkout_quote");
+      expect(posts("/customer/order")).toHaveLength(0);
+      expect(received.some((r) => r.path === "/customer/payment/channel")).toBe(false);
+    });
+
+    test("warns when Chowdeck's order total differs from the confirmed estimate", async () => {
+      scriptHappyPath();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ total_price: 600000 }));
+      const baseUrl = await startApp();
+
+      const { second } = await placeOrder(baseUrl);
+
+      const result = reportOf(second);
+      expect(result.outcome).toBe("order_created");
+      expect(result.amount).toMatchObject({ total: "₦6,000.00", estimated_total: "₦5,540.00" });
+      expect(result.warnings.join(" ")).toContain("Chowdeck's order total (₦6,000.00) differs from the estimate the user confirmed (₦5,540.00)");
+      expect(posts("/customer/order")).toHaveLength(1);
+    });
+
+    test("warns when the notes on Chowdeck's order record differ from the cart's", async () => {
+      scriptHappyPath();
+      route("GET /customer/cart/vendor/102555", cart({ customer_vendor_note: "No onions", customer_delivery_note: "Blue gate" }));
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ customer_vendor_note: "No onions", customer_delivery_note: "Green gate" }));
+      const baseUrl = await startApp();
+
+      const { second } = await placeOrder(baseUrl);
+
+      const result = reportOf(second);
+      expect(result.chowdeck_confirmed).toContain('the restaurant note on Chowdeck\'s order record is "No onions"');
+      expect(result.warnings).toEqual(['the delivery note on Chowdeck\'s order record ("Green gate") differs from the cart\'s ("Blue gate").']);
+    });
+
+    test("reports the order created with an unknown state when its record cannot be read, and sends nothing again", async () => {
+      scriptHappyPath();
+      route(`GET /customer/order/${ORDER_ID}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+      const baseUrl = await startApp();
+
+      const { quoteRef, second } = await placeOrder(baseUrl);
+
+      expect(second.result.isError).toBeUndefined();
+      const result = reportOf(second);
+      expect(result).toMatchObject({ outcome: "order_created", order_id: ORDER_ID, outcome_uncertain: false, safe_to_retry: false });
+      expect(result.status).toMatchObject({ order_state: "unknown", last_recorded_by_chowbot: "created (from Chowdeck's create response)" });
+      expect(result.warnings.join(" ")).toContain("could not be read, so its total is not confirmed yet");
+      expect(posts("/customer/order")).toHaveLength(1);
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+  });
+
+  describe("get_order_submission state derivation", () => {
+    const status = async (baseUrl: string) => reportOf(await call({ baseUrl, name: "get_order_submission", args: { restaurant_id: 102555 } }));
+    const placed = async () => {
+      scriptHappyPath();
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      received = [];
+      return { baseUrl, quoteRef };
+    };
+
+    test.each([
+      ["unpaid with no payment start", {}, createdDetail(), "order_created", "created"],
+      ["unpaid after a payment link was generated", { payment_start_state: "started" }, createdDetail(), "payment_link_generated", "created"],
+      ["unpaid while a payment start's outcome is unknown", { payment_start_state: "unknown" }, createdDetail(), "payment_pending", "created"],
+      ["unpaid while a payment start's outcome was never recorded", { payment_start_state: null }, createdDetail(), "payment_pending", "created"],
+      ["paid (payment status success)", {}, createdDetail({ payment: { status: "success" } }), "payment_confirmed", "paid"],
+      ["given a confirmation time without a successful payment", {}, createdDetail({ time_payment_confirmed: "2026-10-22T12:00:00.000Z" }), "unknown", "created"],
+      ["given a payment status ChowBot does not understand", {}, createdDetail({ payment: { status: "refunded" } }), "unknown", "created"],
+    ])("reports an order %s from Chowdeck's record", async (_, start, detail, expected, recorded) => {
+      const { baseUrl, quoteRef } = await placed();
+      if ("payment_start_state" in start) {
+        await sql`UPDATE order_submissions SET payment_started_at = now(), payment_start_state = ${(start as { payment_start_state: string | null }).payment_start_state} WHERE id = ${quoteRef}`;
+      }
+      route(`GET /customer/order/${ORDER_ID}`, detail);
+
+      const body = await status(baseUrl);
+
+      const [attempt] = body.attempts;
+      expect(attempt.status.order_state).toBe(expected);
+      expect(attempt.status.source).toStartWith("Chowdeck's order record, read ");
+      expect(body.outcome_uncertain).toBe(expected === "unknown");
+      const after = await row(quoteRef);
+      expect(after.state).toBe(recorded);
+      expect(after.lock_released_at).toBeNull();
+      if (expected === "payment_confirmed") expect(attempt.guidance).toContain("ChowBot cannot cancel, change or refund a paid order");
+      if (expected === "order_created") expect(attempt.guidance).toContain("cancel_order");
+    });
+
+    test("records a cancellation Chowdeck's record shows and frees the cart lock", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ status: "cancelled" }));
+
+      const body = await status(baseUrl);
+
+      expect(body.attempts).toEqual([]);
+      expect(body.cancelled).toHaveLength(1);
+      expect(body.cancelled[0]).toMatchObject({ quote_ref: quoteRef, order_id: ORDER_ID, status: { order_state: "cancelled", chowdeck_order_status: "cancelled" } });
+      const after = await row(quoteRef);
+      expect(after.state).toBe("cancelled");
+      expect(after.resolution).toBe("cancelled_verified");
+      expect(after.evidence_order_status).toBe("cancelled");
+      expect(await stores.orderSubmissions.listOpen(alice.userId, 102555)).toEqual([]);
+    });
+
+    test("re-reads an order ChowBot already recorded as paid, and shows what Chowdeck shows now", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      await sql`UPDATE order_submissions SET state = 'paid', resolution = 'paid_verified' WHERE id = ${quoteRef}`;
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ payment: { status: "refunded" } }));
+
+      const body = await status(baseUrl);
+
+      expect(received.filter((r) => r.path === `/customer/order/${ORDER_ID}`)).toHaveLength(1);
+      expect(body.attempts[0]).toMatchObject({ recorded_state: "paid", status: { order_state: "unknown", chowdeck_payment_status: "refunded" } });
+      expect((await row(quoteRef)).state).toBe("paid");
+    });
+  });
+
+  describe("cancel_order", () => {
+    const CANCEL_PATH = `/customer/order/${ORDER_ID}/cancel`;
+    const cancel = (baseUrl: string, quoteRef: string, confirmation?: string, token = alice.token) =>
+      call({ baseUrl, token, name: "cancel_order", args: { quote_ref: quoteRef, ...(confirmation !== undefined && { confirmation }) } });
+    const cancelled = () => createdDetail({ status: "cancelled" });
+    const placed = async (options: { timeoutMs?: number } = {}) => {
+      scriptHappyPath();
+      const baseUrl = await startApp(options);
+      const { quoteRef, first } = await placeOrder(baseUrl);
+      received = [];
+      return { baseUrl, quoteRef, placeConfirmation: first.requestState };
+    };
+    const askFirst = async (baseUrl: string, quoteRef: string) => {
+      const body = reportOf(await cancel(baseUrl, quoteRef));
+      expect(body.outcome).toBe("confirmation_required");
+      return body as { confirmation: string; summary: string };
+    };
+
+    test("the first call sends nothing; the confirmed second call cancels once and records it only from the order record", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail(), createdDetail(), cancelled());
+      route(`POST ${CANCEL_PATH}`, () => Response.json({ status: "success", message: "Order cancelled" }));
+
+      const first = await askFirst(baseUrl, quoteRef);
+
+      expect(first.summary).toContain(`Cancel Chowdeck order ${ORDER_ID} (total ₦5,540.00 on Chowdeck's order record)?`);
+      expect(first.summary).toContain("it never retries");
+      expect(posts(CANCEL_PATH)).toHaveLength(0);
+      expect((await row(quoteRef)).cancel_requested_at).toBeNull();
+
+      const second = reportOf(await cancel(baseUrl, quoteRef, first.confirmation));
+
+      expect(second).toMatchObject({ action: "cancel_order", outcome: "cancelled", outcome_uncertain: false, safe_to_retry: false, status: { order_state: "cancelled" } });
+      expect(posts(CANCEL_PATH)).toHaveLength(1);
+      expect(posts(CANCEL_PATH)[0]!.authorization).toBe("Bearer secret-token-alice");
+      expect(posts(CANCEL_PATH)[0]!.body).toBeUndefined();
+      const paths = received.map((r) => `${r.method} ${r.path}`);
+      expect(paths.at(-1)).toBe(`GET /customer/order/${ORDER_ID}`);
+      const after = await row(quoteRef);
+      expect(after.state).toBe("cancelled");
+      expect(after.cancel_requested_at).toBeInstanceOf(Date);
+      expect(after.cancel_request_state).toBe("accepted");
+      expect(await stores.orderSubmissions.listOpen(alice.userId, 102555)).toEqual([]);
+    });
+
+    test("a success answer without a cancelled order record is unconfirmed, blocks payment, and is never re-sent", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail());
+      route(`POST ${CANCEL_PATH}`, () => Response.json({ status: "success", message: "Cancellation requested" }));
+      const first = await askFirst(baseUrl, quoteRef);
+
+      const body = await cancel(baseUrl, quoteRef, first.confirmation);
+
+      expect(body.result.isError).toBe(true);
+      expect(reportOf(body)).toMatchObject({ outcome: "cancellation_unconfirmed", outcome_uncertain: true, safe_to_retry: false, status: { order_state: "order_created" } });
+      const after = await row(quoteRef);
+      expect(after.state).toBe("created");
+      expect(after.cancel_request_state).toBe("accepted");
+      expect(await stores.orderSubmissions.markPaymentStarted(alice.userId, quoteRef, ORDER_ID)).toBe(false);
+
+      const again = await cancel(baseUrl, quoteRef);
+      expect(messageOf(again)).toContain("a cancellation was already sent");
+      expect(posts(CANCEL_PATH)).toHaveLength(1);
+    });
+
+    test("a definite refusal is recorded and never retried", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail());
+      route(`POST ${CANCEL_PATH}`, () => Response.json({ status: "failed", message: "Order cannot be cancelled" }, { status: 422 }));
+      const first = await askFirst(baseUrl, quoteRef);
+
+      const body = reportOf(await cancel(baseUrl, quoteRef, first.confirmation));
+
+      expect(body.outcome).toBe("rejected_by_chowdeck");
+      expect(body.message).toContain("Order cannot be cancelled");
+      expect(body.outcome_uncertain).toBe(false);
+      const after = await row(quoteRef);
+      expect(after.cancel_request_state).toBe("rejected");
+      expect(after.state).toBe("created");
+
+      const again = await askFirstOrRefusal(baseUrl, quoteRef);
+      expect(again).toContain("Chowdeck refused it");
+      expect(posts(CANCEL_PATH)).toHaveLength(1);
+    });
+
+    const askFirstOrRefusal = async (baseUrl: string, quoteRef: string) => messageOf(await cancel(baseUrl, quoteRef));
+
+    test.each([
+      ["a server error", () => Response.json({ message: "Server Error" }, { status: 503 })],
+      ["an expired token", () => Response.json({ message: "Token expired" }, { status: 401 })],
+      ["a non-JSON body", () => new Response("<html>ok</html>", { status: 200 })],
+      ["a failed envelope with status 200", () => Response.json({ status: "failed", message: "Something happened" })],
+      ["a timeout", async () => { await Bun.sleep(400); return Response.json({ status: "success" }); }],
+    ])("treats %s as an unknown outcome and never retries", async (_, reply) => {
+      const { baseUrl, quoteRef } = await placed({ timeoutMs: 200 });
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail());
+      route(`POST ${CANCEL_PATH}`, reply);
+      const first = await askFirst(baseUrl, quoteRef);
+
+      const body = reportOf(await cancel(baseUrl, quoteRef, first.confirmation));
+
+      expect(body).toMatchObject({ outcome: "unknown_outcome", outcome_uncertain: true, safe_to_retry: false });
+      expect(body.next_step).toContain("Do not send another cancellation");
+      expect((await row(quoteRef)).cancel_request_state).toBe("unknown");
+      expect((await row(quoteRef)).state).toBe("created");
+
+      expect(await askFirstOrRefusal(baseUrl, quoteRef)).toContain("its outcome is unknown");
+      await Bun.sleep(250);
+      expect(posts(CANCEL_PATH)).toHaveLength(1);
+    });
+
+    test("refuses a paid order with Chowdeck's options, records the payment, and sends nothing", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail({ payment: { status: "success" } }));
+
+      const body = reportOf(await cancel(baseUrl, quoteRef));
+
+      expect(body).toMatchObject({ outcome: "not_sent", status: { order_state: "payment_confirmed" } });
+      expect(body.message).toContain("Chowdeck's order record shows this order is paid. ChowBot cannot cancel, change or refund a paid order");
+      expect(posts(CANCEL_PATH)).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("paid");
+    });
+
+    test("refuses, sending nothing, when the order record cannot be read", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+
+      const body = reportOf(await cancel(baseUrl, quoteRef));
+
+      expect(body.message).toContain(`ChowBot could not read order ${ORDER_ID} from Chowdeck`);
+      expect(body.status).toMatchObject({ order_state: "unknown", source: "none: Chowdeck's order record could not be read" });
+      expect(posts(CANCEL_PATH)).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("created");
+    });
+
+    test("reports an order Chowdeck already shows cancelled, and records it", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, cancelled());
+
+      const body = reportOf(await cancel(baseUrl, quoteRef));
+
+      expect(body).toMatchObject({ outcome: "already_cancelled", status: { order_state: "cancelled" } });
+      expect(posts(CANCEL_PATH)).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("cancelled");
+    });
+
+    test.each([
+      ["a tampered confirmation", (c: string) => c.slice(0, -2) + (c.endsWith("AA") ? "BB" : "AA"), "the confirmation code is invalid, expired or not yours"],
+    ])("refuses %s and sends nothing", async (_, mutate, message) => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail());
+      const first = await askFirst(baseUrl, quoteRef);
+
+      const body = await cancel(baseUrl, quoteRef, mutate(first.confirmation));
+
+      expect(messageOf(body)).toContain(message);
+      expect(posts(CANCEL_PATH)).toHaveLength(0);
+      expect((await row(quoteRef)).cancel_requested_at).toBeNull();
+    });
+
+    test("refuses a place_order confirmation used as a cancellation confirmation", async () => {
+      const { baseUrl, quoteRef, placeConfirmation } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail());
+
+      const body = await cancel(baseUrl, quoteRef, placeConfirmation);
+
+      expect(messageOf(body)).toBe("Order not cancelled: the confirmation does not belong to this order.");
+      expect(posts(CANCEL_PATH)).toHaveLength(0);
+    });
+
+    test("refuses another user's quote_ref and an abandoned attempt before any Chowdeck request", async () => {
+      const { baseUrl, quoteRef } = await placed();
+      route(`GET /customer/order/${ORDER_ID}`, createdDetail());
+
+      expect(messageOf(await cancel(baseUrl, quoteRef, undefined, bob.token))).toBe("Order not cancelled: that quote_ref does not exist for your account.");
+      await sql`UPDATE order_submissions SET lock_released_at = now(), lock_release_reason = 'operator_released' WHERE id = ${quoteRef}`;
+      expect(messageOf(await cancel(baseUrl, quoteRef))).toContain("this attempt was marked abandoned");
+      expect(received).toHaveLength(0);
+    });
+
+    test("refuses an attempt with no created order", async () => {
+      scriptHappyPath();
+      route("POST /customer/order", () => Response.json({ message: "Server Error" }, { status: 503 }));
+      const baseUrl = await startApp();
+      const { quoteRef } = await placeOrder(baseUrl);
+      received = [];
+
+      expect(messageOf(await cancel(baseUrl, quoteRef))).toContain("only an order ChowBot created and recorded can be cancelled here");
+      expect(received).toHaveLength(0);
     });
   });
 });

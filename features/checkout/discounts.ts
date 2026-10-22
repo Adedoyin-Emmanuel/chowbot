@@ -6,8 +6,12 @@ import { ChowdeckApiError } from "../../lib/client";
  * (chunk 6117 module 64269 `P` for the packs; chunk 3488 for the request;
  * read 2026-10-21; see docs/chowdeck-checkout-evidence.md). The website runs
  * it on every cart, fee or promo change and on window focus, which is why it
- * is treated as a calculation rather than a change to anything. Its
- * responses have never been observed on the wire.
+ * is treated as a calculation rather than a change to anything.
+ *
+ * Observed on the wire 2026-10-22 (promo code 5FOR5, free delivery): the
+ * website sends the fee quote's id and final_delivery_amount, and each
+ * returned discount carries discount_id, title, description, amount_off,
+ * target ("deliveryfees"), discount_terms and the promo_code it came from.
  */
 
 export const DISCOUNT_APPLY_PATH = "/customer/discount/apply";
@@ -103,7 +107,15 @@ export const discountOrderLines = (cartItems: unknown[]) => {
   return { order_items, containers };
 };
 
-export type AppliedDiscount = { target: string | null; amount_off: number; bogof_amount_off: number };
+export type AppliedDiscount = {
+  target: string | null;
+  amount_off: number;
+  bogof_amount_off: number;
+  promo_code: string | null;
+  title?: string;
+  description?: string;
+  terms?: string;
+};
 
 /*
  * The website reads the response's data as a list of applied discounts and
@@ -121,10 +133,18 @@ export const parseAppliedDiscounts = (body: unknown): AppliedDiscount[] => {
   return body.data.map((entry) => {
     if (!isRecord(entry) || typeof entry.amount_off !== "number" || !Number.isFinite(entry.amount_off)) throw unexpected;
     const bogof = entry.bogof_amount_off;
+    const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
+    const title = text(entry.title);
+    const description = text(entry.description);
+    const terms = text(entry.discount_terms);
     return {
       target: typeof entry.target === "string" ? entry.target : null,
       amount_off: entry.amount_off,
       bogof_amount_off: typeof bogof === "number" && Number.isFinite(bogof) ? bogof : 0,
+      promo_code: text(entry.promo_code) ?? null,
+      ...(title && { title }),
+      ...(description && { description }),
+      ...(terms && { terms }),
     };
   });
 };
@@ -133,9 +153,16 @@ export const totalOff = (discounts: AppliedDiscount[]) =>
   discounts.reduce((sum, d) => sum + d.amount_off + d.bogof_amount_off, 0);
 
 /*
- * The website's request body. fee_id and delivery_fee use the website's own
- * fallbacks (|| 0) because ChowBot does not request a fee quote just to
- * calculate discounts, so discounts on delivery fees are not evaluated.
+ * The discounts Chowdeck attributes to a code, matched by the promo_code each
+ * returned discount carries (codes compared without regard to case).
+ */
+export const discountsForCode = (discounts: AppliedDiscount[], code: string) =>
+  discounts.filter((d) => d.promo_code !== null && d.promo_code.toUpperCase() === code.toUpperCase());
+
+/*
+ * The website's request body. Without a fee quote, fee_id and delivery_fee
+ * take the website's own fallbacks (|| 0), and discounts on delivery fees are
+ * then not evaluated; get_checkout_quote passes its fresh quote's values.
  */
 export const discountRequestBody = (input: {
   promoCode?: string;
@@ -143,18 +170,19 @@ export const discountRequestBody = (input: {
   addressId: number;
   cart: Record<string, unknown>;
   orderClass: string;
+  fee?: { id: number; deliveryFee: number };
 }) => {
   const lines = discountOrderLines(Array.isArray(input.cart.cart_items) ? input.cart.cart_items : []);
   return {
     promo_codes: input.promoCode ? [input.promoCode] : [],
     vendor_id: input.vendorId,
     address_id: input.addressId,
-    fee_id: 0,
+    fee_id: input.fee?.id ?? 0,
     ...(input.cart.id ? { cart_id: input.cart.id } : {}),
     currency: input.cart.currency,
     order_items: lines.order_items,
     containers: lines.containers,
-    delivery_fee: 0,
+    delivery_fee: input.fee?.deliveryFee ?? 0,
     order_class: input.orderClass === "vendor_delivery" ? "delivery" : input.orderClass,
   };
 };

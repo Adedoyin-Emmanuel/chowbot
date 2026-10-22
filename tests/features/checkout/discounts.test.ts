@@ -5,6 +5,7 @@ import {
   effectivePrice,
   discountOrderLines,
   discountRequestBody,
+  discountsForCode,
   parseAppliedDiscounts,
 } from "../../../features/checkout/discounts";
 
@@ -94,6 +95,30 @@ describe("discountRequestBody", () => {
     });
   });
 
+  /*
+   * The request the website sent on 2026-10-22 when 5FOR5 was chosen, with
+   * the fee quote's id and final delivery amount; key order included.
+   */
+  test("sends the fee quote's id and delivery fee exactly as observed on the wire", () => {
+    const observed = {
+      id: 31006911,
+      currency: "NGN",
+      cart_items: [row({ item_id: 2974683, type: "menu", pack_reference: "pack-a4cba05e-21f1-562c-aa61-6d6b0d699fe9" })],
+    };
+    const body = discountRequestBody({
+      promoCode: "5FOR5", vendorId: 134985, addressId: 4966130, cart: observed, orderClass: "delivery",
+      fee: { id: 262993706, deliveryFee: 65000 },
+    });
+
+    expect(JSON.stringify(body)).toBe(
+      JSON.stringify({
+        promo_codes: ["5FOR5"], vendor_id: 134985, address_id: 4966130, fee_id: 262993706, cart_id: 31006911, currency: "NGN",
+        order_items: [{ item_id: 2974683, quantity: 1, type: "menu", pack_id: 1, pack_unique_id: "pack-a4cba05e-21f1-562c-aa61-6d6b0d699fe9" }],
+        containers: [], delivery_fee: 65000, order_class: "delivery",
+      }),
+    );
+  });
+
   test("sends an empty promo list without a code, and no cart_id without a cart id", () => {
     const body = discountRequestBody({ vendorId: 7, addressId: 8, cart: { ...cart, id: undefined }, orderClass: "delivery" });
 
@@ -107,10 +132,36 @@ describe("parseAppliedDiscounts and totalOff", () => {
     const discounts = parseAppliedDiscounts({ status: "success", data: [{ target: "menus", amount_off: 500, bogof_amount_off: 200 }, { amount_off: 100 }] });
 
     expect(discounts).toEqual([
-      { target: "menus", amount_off: 500, bogof_amount_off: 200 },
-      { target: null, amount_off: 100, bogof_amount_off: 0 },
+      { target: "menus", amount_off: 500, bogof_amount_off: 200, promo_code: null },
+      { target: null, amount_off: 100, bogof_amount_off: 0, promo_code: null },
     ]);
     expect(totalOff(discounts)).toBe(800);
+  });
+
+  /*
+   * The response observed 2026-10-22 for promo code 5FOR5 (free delivery),
+   * trimmed to the fields ChowBot reads.
+   */
+  test("keeps the promo code, title, description and terms Chowdeck returns, and matches discounts to a code", () => {
+    const discounts = parseAppliedDiscounts({
+      status: "success",
+      message: "Discounts applied successfully",
+      data: [
+        {
+          discount_id: 580242, title: "5FOR5", description: "Free delivery", amount_off: 65000, target: "deliveryfees",
+          bogof_amount_off: 0, vendor_id: 134985, discount_terms: "Capped at NGN 1000. Minimum order amount is NGN 3000.",
+          maximum_usage_count: 1, usage_count: 0, promo_code: "5FOR5",
+        },
+        { title: "Automatic", amount_off: 1000, target: "menus" },
+      ],
+    });
+
+    expect(discounts[0]).toEqual({
+      target: "deliveryfees", amount_off: 65000, bogof_amount_off: 0, promo_code: "5FOR5",
+      title: "5FOR5", description: "Free delivery", terms: "Capped at NGN 1000. Minimum order amount is NGN 3000.",
+    });
+    expect(discountsForCode(discounts, "5for5")).toEqual([discounts[0]!]);
+    expect(discountsForCode(discounts, "DECK11")).toEqual([]);
   });
 
   test.each([[{ data: "x" }], [{ data: [{ amount_off: Number.NaN }] }], ["text"], [{ data: [null] }]])("refuses %p", (body) => {

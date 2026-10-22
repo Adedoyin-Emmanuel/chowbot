@@ -16,6 +16,7 @@ import {
   type OrderSubmission,
   type SubmissionOutcome,
   type PaymentStartState,
+  type CancelRequestState,
   type ConfirmationRequest,
   type OrderSubmissionStore,
 } from "../order-submissions";
@@ -43,6 +44,10 @@ const toSubmission = (row: Row): OrderSubmission => ({
   lockReleasedAt: row.lockReleasedAt,
   lockReleaseReason: row.lockReleaseReason,
   paidAfterReleaseAt: row.paidAfterReleaseAt,
+  promoCode: row.promoCode,
+  promoDiscount: row.promoDiscount,
+  cancelRequestedAt: row.cancelRequestedAt,
+  cancelRequestState: row.cancelRequestState,
   failureReason: row.failureReason,
   resolution: row.resolution,
   createdAt: row.createdAt,
@@ -90,6 +95,8 @@ export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
         addressBinding: this.keyring.bindAddress(userId, quote.addressId),
         cartFingerprint: quote.cartFingerprint,
         computedTotal: quote.computedTotal,
+        promoCode: quote.promo?.code ?? null,
+        promoDiscount: quote.promo?.discount ?? null,
         quoteExpiresAt: sql`now() + make_interval(secs => ${QUOTE_LIFETIME_SECONDS})`,
         state: "quoted",
       })
@@ -467,6 +474,7 @@ export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
           eq(orderSubmissions.chowdeckOrderId, chowdeckOrderId),
           isNull(orderSubmissions.paymentStartedAt),
           isNull(orderSubmissions.lockReleasedAt),
+          isNull(orderSubmissions.cancelRequestedAt),
         ),
       )
       .returning({ id: orderSubmissions.id });
@@ -487,6 +495,104 @@ export class PostgresOrderSubmissionStore implements OrderSubmissionStore {
           owned(userId, id),
           isNotNull(orderSubmissions.paymentStartedAt),
           isNull(orderSubmissions.paymentStartState),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * A newer orderable quote replaces every older one for the same cart that
+   * has not been claimed yet, so a stale total (for example one without a
+   * promo code's discount) can no longer be confirmed. Claimed attempts are
+   * never touched.
+   */
+  async supersedeQuotes(userId: string, cartId: number, keepId: string) {
+    if (!this.valid(userId, keepId)) return 0;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ state: "failed", failureReason: "superseded", updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(orderSubmissions.userId, userId),
+          eq(orderSubmissions.cartId, cartId),
+          ne(orderSubmissions.id, keepId),
+          inArray(orderSubmissions.state, ["quoted", "confirmation_pending"]),
+          isNull(orderSubmissions.confirmationConsumedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length;
+  }
+
+  /*
+   * The cancellation marker, committed before the one cancellation request
+   * is sent: only on a created order with the given id that ChowBot still
+   * tracks, and only once. Once set, no payment can be started for the
+   * attempt.
+   */
+  async markCancelRequested(userId: string, id: string, chowdeckOrderId: number) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ cancelRequestedAt: sql`now()`, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "created"),
+          eq(orderSubmissions.chowdeckOrderId, chowdeckOrderId),
+          isNull(orderSubmissions.cancelRequestedAt),
+          isNull(orderSubmissions.lockReleasedAt),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * Records the cancellation request's outcome once. The marker is never
+   * cleared, so a rejected or unknown cancellation is not retried.
+   */
+  async recordCancelRequest(userId: string, id: string, state: CancelRequestState) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({ cancelRequestState: state, updatedAt: sql`now()` })
+      .where(
+        and(
+          owned(userId, id),
+          isNotNull(orderSubmissions.cancelRequestedAt),
+          isNull(orderSubmissions.cancelRequestState),
+        ),
+      )
+      .returning({ id: orderSubmissions.id });
+    return rows.length === 1;
+  }
+
+  /*
+   * Records a cancellation Chowdeck's order record shows, whether ChowBot or
+   * the user (in the app) cancelled it. Leaving the locking states frees the
+   * cart lock. A paid or operator-released attempt is never changed here.
+   */
+  async recordCancelled(userId: string, id: string, evidence: OrderEvidence) {
+    if (!this.valid(userId, id)) return false;
+    const rows = await this.db
+      .update(orderSubmissions)
+      .set({
+        state: "cancelled",
+        resolution: "cancelled_verified",
+        resolvedAt: sql`now()`,
+        updatedAt: sql`now()`,
+        evidenceOrderStatus: evidence.orderStatus,
+        evidencePaymentStatus: evidence.paymentStatus,
+        evidenceCheckedAt: sql`now()`,
+      })
+      .where(
+        and(
+          owned(userId, id),
+          eq(orderSubmissions.state, "created"),
+          isNotNull(orderSubmissions.chowdeckOrderId),
+          isNull(orderSubmissions.lockReleasedAt),
         ),
       )
       .returning({ id: orderSubmissions.id });

@@ -75,12 +75,72 @@ deploy:
 - The user then **selects** a promo from the list `GET /customer/promo-code` returns. The order's `promo_codes` takes the selected object's `code`.
 - The website never submits a typed code that hasn't been redeemed.
 
-**Still not established, so ChowBot doesn't call `discount/apply`:**
-- **Never observed on the wire.** The 2026-10-20 capture recorded a `POST /customer/discount/apply` with HTTP 200, but its body wasn't read [NET].
-- **Which applied discount comes from the user's code.** The client reads only `amount_off`, `bogof_amount_off` and `target`, and doesn't match discounts to a code.
-- **Server responses for invalid, expired, ineligible or unredeemed codes.** The client has no error handling of its own; it just leaves the query in an error state.
-- **Whether `fee_id: 0` and `delivery_fee: 0`** (no quote) give meaningful results.
-- **The response shape** of `GET /customer/promo-code`, which would be needed to check a code is already on the account.
+**Established on the wire on 2026-10-22 (see below); still open:**
+- **Server responses for invalid, expired, ineligible or unredeemed codes** to `discount/apply`. Only a success was observed.
+- **Whether `fee_id: 0` and `delivery_fee: 0`** (no quote) give meaningful results. `check_promo_code` and `preview_order` still send them; `get_checkout_quote` sends the real quote's values.
+
+## Live checkout observations [NET] (2026-10-22, the user's own browser session)
+
+Captured by the user from the website's network tab; order ids are real, other values as
+recorded. Six unpaid orders were created from one cart; none was paid.
+
+**Carts**
+- `POST /customer/cart/vendor/{vendor_id}` with `{"customer_vendor_note": …}` or
+  `{"customer_delivery_note": …}` (or `{"bag_quantity": 1}`) answers
+  `{"status":"success","message":"Cart updated successfully"}` with no cart. The website then
+  re-reads `GET /customer/cart/vendor/{vendor_id}`, whose `data` carries both notes.
+- Cart 31006911 stayed `status: "active"`, `is_active: true` and **`order_id: null`** while six
+  orders were created from it. An order is a copy of the cart: editing the cart afterwards does
+  not reach an order. A cart with `order_id` set, or after a **paid** order, was not observed.
+- `GET /customer/cart` lists every active cart with the same fields.
+
+**Promo codes and discounts**
+- `GET /customer/promo-code` → `data[]` of `{ id, code, note, user_id, promo_code_id, amount,
+  is_valid (1), expiry_time, discount_id, maximum_usage_count, usage_count,
+  minimum_order_amount, maximum_order_amount, vendor_id, vendor_ids[], title, target_service
+  ("deliveryfees" | "orders"), type, settings, voucher_type ("discount"), display_name,
+  voucher_status, voucher_worth, vendors[] }`. Observed codes: `5FOR5` (free delivery, minimum
+  300000, single use) and `DECK11` (N500 off, minimum 250000).
+- `GET /customer/discount` → `{"data":[]}`; an entry's shape was never seen.
+- `POST /customer/promo-code/{code}` with `{"currency":"NGN"}` for an unknown code →
+  `{"status":"failed","message":"Promo code does not exist"}`. For an existing code the website
+  then calls `GET /customer/promo-code/{code}/security-question?currency=NGN` →
+  `{"data":{"security_question":null}}`. ChowBot does not redeem codes.
+- **`POST /customer/discount/apply`**, sent when a code was chosen:
+  `{"promo_codes":["5FOR5"],"vendor_id":134985,"address_id":4966130,"fee_id":262993706,"cart_id":31006911,"currency":"NGN","order_items":[{"item_id":2974683,"quantity":1,"type":"menu","pack_id":1,"pack_unique_id":"pack-…"}],"containers":[],"delivery_fee":65000,"order_class":"delivery"}`
+  → `data[]` of `{ discount_id, title, description, amount_off (65000), target ("deliveryfees"),
+  bogof_amount_off, vendor_id, discount_terms, maximum_usage_count, usage_count,
+  promo_code ("5FOR5"), … }`. **Each discount names the promo code it came from**, and the
+  request carries the quote's `fee_id` and `final_delivery_amount`.
+- The website then looked up payment methods with `amount=636000`: 701000 (items 550000 + bag
+  20000 + delivery 65000 + service 66000) minus the 65000 discount.
+
+**Orders and payment**
+- `POST /customer/order` with `promo_codes: ["5FOR5"]` was accepted three times for the same
+  single-use code while unpaid. Each answered `{ id, reference, delivery_price, tip_amount,
+  made_payment: false, pay_for_me_url, delivery_pin, tracking_url, … }`.
+- `POST /customer/payment/start/v2` for OPay: `{ method: "opay", order_id, return_url,
+  cancel_url }` → `{ processor: "opay", reference, authorization_url, currency,
+  amountInLowerUnits: 636000, status: "initialised", display_type: "webview" }`. The
+  processor's amount already includes the promo discount. Card, bank transfer, bank and USSD
+  start Paystack pages; Pocket and Zap differ; QR fails (also in the app).
+- **`GET /customer/order/{id}` returns an unpaid order**: order 43609160 showed
+  `status: "abandoned"` seconds after creation, `payment: {}`, `time_payment_confirmed: null`,
+  `total_price: 701000`, `promo_codes: ""`, `promo_code_price: 0`, `discount_price: 0`, both
+  notes, `can_be_updated: false`, and a timeline listing `MADE_PAYMENT` first (never evidence).
+  `GET /customer/order?status=active` listed it too.
+- **Tracking:** every create response and order record carried
+  `tracking_url: https://chowdeck.com/store/track/<token>`, a page anyone with the link can open.
+  `GET /customer/order/{id}/live-tracking` answered `{ order_id, user_id, order_status,
+  order_class, placed_at, delivered_at, delivery_id, delivery_status, delivery_is_terminal,
+  rider, rider_location, customer_location, vendor_location, route, socket_room,
+  pusher_channel }`, all delivery fields null for the unpaid order. ChowBot (`track_order`,
+  `get_order`, `place_order`) passes on only a tracking link of exactly that form, and leaves out
+  the user id, locations of the customer and vendor, route and channel names.
+- **Not observed:** an unpaid order's record **with** a promo code (whether `total_price`
+  already subtracts the discount and how `promo_codes` lists it), a paid order's record in this
+  session, and any cancellation. `POST /customer/order/{id}/cancel` was reported by the user;
+  its body, eligibility and responses are unverified, and ChowBot sends it without a body.
 
 ## Gift recipient [CODE]
 - **Schema (module 64834):** `phone` must match `/^[0-9]+$/` (**digits only**). `donor_name` (defaults to the user's first name), `name` and `country_code` are required, all non-empty.
@@ -126,9 +186,20 @@ deploy:
 - **ChowBot** sends the website's own pages on `https://chowdeck.com` (`paymentRedirects` in `features/payments/service.ts`).
 - **Still unobserved [NET]:** whether `GET /customer/order/{id}` returns an **unpaid** order. `start_payment` checks that before starting a payment, and stays unregistered in production until it's seen.
 
-## Implementation status (2026-10-21)
-- **`check_promo_code` and `preview_order`** run `discount/apply` as above, with and without the code. ChowBot reports the difference as the code's effect; it's not a Chowdeck figure.
-- **`place_order`** sends `promo_codes: [code]` only when that difference is positive. It also sends:
-  - `tip`: raw ×100, only when chosen;
-  - `gift_recipient`: the validated object, after `POST /auth/phone/validate` returns `is_valid: true`.
-- **None of these has been observed on the wire yet.**
+## Implementation status (2026-10-22)
+- **Order state** is read only from `GET /customer/order/{id}` (`features/orders/status.ts`):
+  paid only when `payment.status` is `success`; cancelled when the status contains `cancel`;
+  unpaid when there is no successful payment and no `time_payment_confirmed`; otherwise
+  unknown. A failed read is `unknown`, never unpaid.
+- **`list_promo_codes`** reads both promo lists. **`get_checkout_quote` with `promo_code`**
+  accepts only a code on the account, sends `discount/apply` once with the fresh quote's fee,
+  and counts the code as applied only when a returned discount names it. The quote stores the
+  code and Chowdeck's discount and supersedes older unconfirmed quotes for the cart.
+- **`check_promo_code` and `preview_order`** still calculate without a fee quote and attribute
+  discounts by `promo_code`; delivery-fee discounts need the quote.
+- **`place_order`** sends the quote's code, `tip` (raw ×100, only when chosen) and
+  `gift_recipient` (after `POST /auth/phone/validate` returns `is_valid: true`), then reads the
+  order record and reports its state, total and notes.
+- **`start_payment`** shows the order record's `total_price` and starts only with that total
+  confirmed; **`cancel_order`** sends `POST /customer/order/{id}/cancel` once and trusts only
+  the re-read order record.

@@ -29,15 +29,11 @@ const getCheckoutQuoteSchema = {
 };
 
 /*
- * Checkout extras shared by preview_order and place_order, so both accept
- * and validate exactly the same values.
+ * The order options shared by preview_order and place_order, so both accept
+ * and validate exactly the same values. A promo code is applied in the quote
+ * (get_checkout_quote), never at placement.
  */
-export const checkoutDraftSchema = {
-  promo_code: z
-    .string()
-    .max(100)
-    .optional()
-    .describe("A promo code the user wants to use. It is submitted only if Chowdeck's discount calculation shows a discount."),
+export const orderOptionsSchema = {
   tip: z
     .union([
       z.literal("none"),
@@ -58,6 +54,15 @@ export const checkoutDraftSchema = {
     .strict()
     .optional()
     .describe("Send this order as a gift, delivered to the cart's address"),
+};
+
+const promoCodeInput = z.string().max(100);
+
+export const checkoutDraftSchema = {
+  promo_code: promoCodeInput
+    .optional()
+    .describe("A promo code the user wants to try. Preview only: to order with it, use get_checkout_quote with promo_code."),
+  ...orderOptionsSchema,
 };
 
 const previewOrderSchema = {
@@ -100,8 +105,11 @@ export const registerCheckoutTools = (
     {
       title: "Get checkout quote",
       description:
-        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly. Amounts are Chowdeck's raw values without unit conversion; computed_total is calculated by ChowBot, not returned by Chowdeck.",
-      inputSchema: z.object(getCheckoutQuoteSchema),
+        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly; a new quote replaces any earlier unconfirmed quote for the cart. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. A promo code cannot be added to an order that already exists. Amounts are Chowdeck's raw values without unit conversion; computed_total and estimated_total_after_discount are calculated by ChowBot, not returned by Chowdeck.",
+      inputSchema: z.object({
+        ...getCheckoutQuoteSchema,
+        promo_code: promoCodeInput.optional().describe("A promo code on the user's account to apply in this quote"),
+      }),
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -109,14 +117,35 @@ export const registerCheckoutTools = (
         openWorldHint: true,
       },
     },
-    async ({ restaurant_id, address_id }) => {
+    async ({ restaurant_id, address_id, promo_code }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
         return textResult(
-          JSON.stringify(await service.getQuote(restaurant_id, address_id)),
+          JSON.stringify(await service.getQuote(restaurant_id, address_id, promo_code)),
         );
       } catch (error) {
         return failure("get checkout quote", "get_checkout_quote", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_promo_codes",
+    {
+      title: "List promo codes and vouchers",
+      description:
+        "List the promo codes and discounts (vouchers) on the signed-in user's Chowdeck account, with ChowBot's reading of each one's validity, expiry, usage and restaurant limits (pass restaurant_id to check the restaurant). This is not a promise of a discount: only Chowdeck's calculation in get_checkout_quote with promo_code confirms one. Read-only; does not add codes to the account.",
+      inputSchema: z.object({
+        restaurant_id: z.number().int().positive().optional().describe("Optional Chowdeck restaurant ID to check restaurant limits against"),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ restaurant_id }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        return textResult(JSON.stringify(await service.listPromoCodes(restaurant_id)));
+      } catch (error) {
+        return failure("list promo codes", "list_promo_codes", error);
       }
     },
   );
@@ -126,7 +155,7 @@ export const registerCheckoutTools = (
     {
       title: "Check a promo code",
       description:
-        "Ask Chowdeck's discount calculation what a promo code would take off the signed-in user's cart at a restaurant, compared with no code. Builds the request exactly as the Chowdeck website does; delivery-fee discounts are not included because no fee quote is requested. A result is Chowdeck's calculation, not a guarantee: the discount is only final in the order. Does not add the code to the account, change the cart or place an order.",
+        "Ask Chowdeck's discount calculation what a promo code would take off the signed-in user's cart at a restaurant, without requesting a fee quote. Builds the request exactly as the Chowdeck website does; delivery-fee discounts (such as free delivery) are not included, so use get_checkout_quote with promo_code to apply a code. A result is Chowdeck's calculation, not a guarantee: the amount to pay is read from Chowdeck's order record before payment. Does not add the code to the account, change the cart or place an order.",
       inputSchema: z.object({
         ...getCheckoutQuoteSchema,
         promo_code: z.string().max(100).describe("The promo code to check"),

@@ -18,7 +18,7 @@ import { callTool, rpc } from "../../helpers/mcp";
 import { createServer } from "../../../mcp/server";
 import { ChowdeckClient } from "../../../lib/client";
 import { registerCheckoutTools } from "../../../features/checkout/tools";
-import type { NewQuote, UserOrderSubmissions } from "../../../lib/order-submissions";
+import type { NewQuote, OrderSubmission, UserOrderSubmissions } from "../../../lib/order-submissions";
 
 type ReceivedRequest = {
   method: string;
@@ -891,16 +891,22 @@ describe("get_checkout_quote orderable quotes", () => {
    * A test double for the per-user store: it records what would be saved,
    * or fails like an unavailable database.
    */
-  const recordingStore = (failWith?: Error) => {
+  const recordingStore = (failWith?: Error, open: Partial<OrderSubmission>[] = []) => {
     const saved: NewQuote[] = [];
+    const superseded: { cartId: number; keepId: string }[] = [];
     const store = {
       createQuote: async (quote: NewQuote) => {
         if (failWith) throw failWith;
         saved.push(quote);
         return { id: "0f6c1d2e-3b4a-4c5d-8e9f-a0b1c2d3e4f5", quoteExpiresAt: new Date("2026-10-21T10:05:00Z") };
       },
+      supersedeQuotes: async (cartId: number, keepId: string) => {
+        superseded.push({ cartId, keepId });
+        return 0;
+      },
+      listOpen: async () => open,
     } as unknown as UserOrderSubmissions;
-    return { store, saved };
+    return { store, saved, superseded };
   };
 
   const quoteWith = async (store?: UserOrderSubmissions) =>
@@ -930,6 +936,15 @@ describe("get_checkout_quote orderable quotes", () => {
       cartFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
       computedTotal: 554000,
     });
+  });
+
+  test("replaces every older unconfirmed quote for the cart once the new one is saved", async () => {
+    scriptCheckout({ cart: orderableCart() });
+    const { store, superseded } = recordingStore();
+
+    await quoteWith(store);
+
+    expect(superseded).toEqual([{ cartId: 30742921, keepId: "0f6c1d2e-3b4a-4c5d-8e9f-a0b1c2d3e4f5" }]);
   });
 
   test("still never returns the fee id or address id with a quote_ref", async () => {
@@ -1023,8 +1038,8 @@ describe("preview_order checkout draft", () => {
   const setup = (config: Handler = tipsConfig()) => {
     scriptCheckout({ cart: cartResponse({ bag_quantity: 0, customer_vendor_note: "No onions", customer_delivery_note: "Blue gate" }) });
     route("GET /customer/config", config);
-    // First calculation is with the code, the second without it.
-    route("POST /customer/discount/apply", discounts([{ target: "menus", amount_off: 5000 }]), discounts([]));
+    // One calculation, with the code; Chowdeck names the code on its discount.
+    route("POST /customer/discount/apply", discounts([{ target: "menus", amount_off: 5000, promo_code: "SAVE10" }]));
     route("POST /auth/phone/validate", validPhone());
   };
   const gift = { donor_name: "Ada", name: "Tunde Example", phone: "08012345678", message: "Enjoy!" };
@@ -1119,7 +1134,7 @@ describe("preview_order checkout draft", () => {
 
     const parsed = JSON.parse(textOf(await preview({ promo_code: "  SAVE10 " })));
 
-    const [withCode, withoutCode] = calls("/customer/discount/apply");
+    const [withCode, ...others] = calls("/customer/discount/apply");
     const line = (pack: string, packId: number) => [
       { item_id: 880557, quantity: 1, type: "menu", pack_id: packId, pack_unique_id: pack },
       { item_id: 4294037, price: 0, quantity: 1, type: "group", pack_id: packId, group_id: 5844769 },
@@ -1137,18 +1152,19 @@ describe("preview_order checkout draft", () => {
       delivery_fee: 0,
       order_class: "delivery",
     });
-    expect((withoutCode!.body as Record<string, unknown>).promo_codes).toEqual([]);
+    expect(others).toHaveLength(0);
     expect(parsed.payload_preview.promo_codes).toEqual(["SAVE10"]);
     expect(parsed.checkout_draft.confirmed_by_chowdeck.discount_calculation).toMatchObject({ status: "discount", code_discount: 5000 });
     expect(parsed.checkout_draft.not_confirmed.join("\n")).toContain("Chowdeck's calculation shows ₦50.00 off the items");
-    expect(parsed.checkout_draft.not_confirmed.join("\n")).toContain("only submits promo codes already added to your account");
+    expect(parsed.checkout_draft.not_confirmed.join("\n")).toContain("a preview does not apply the code");
     expect(JSON.stringify(parsed)).not.toContain(String(ADDRESS_ID));
     neverMutates();
   });
 
   test.each([
-    ["no discount", [discounts([]), discounts([])], "shows no discount, so it would not be submitted"],
-    ["only the automatic discounts", [discounts([{ target: "deliveryfees", amount_off: 200 }]), discounts([{ target: "deliveryfees", amount_off: 200 }])], "shows no discount, so it would not be submitted"],
+    ["no discount", [discounts([])], "shows no discount, so it would not be submitted"],
+    ["only discounts not attributed to the code", [discounts([{ target: "deliveryfees", amount_off: 200 }])], "shows no discount, so it would not be submitted"],
+    ["only another code's discount", [discounts([{ target: "menus", amount_off: 200, promo_code: "OTHER" }])], "shows no discount, so it would not be submitted"],
     ["a refusal", [() => Response.json({ status: "failed", message: "Promo code has expired" }, { status: 422 })], "Chowdeck refused it (POST /customer/discount/apply failed with status 422: Promo code has expired), so it would not be submitted"],
   ])("leaves a promo code out of the payload when Chowdeck's calculation gives %s", async (_, replies, note) => {
     setup();
@@ -1253,28 +1269,26 @@ describe("check_promo_code", () => {
   const check = async (args: Record<string, unknown> = {}) =>
     callTool(serverFor(await signedIn()), "check_promo_code", { restaurant_id: 102555, address_id: ADDRESS_ID, promo_code: "SAVE10", ...args });
 
-  test("reports the code's effect as the difference between two Chowdeck calculations", async () => {
+  test("reports the discounts Chowdeck attributes to the code, from one calculation", async () => {
     scriptCheckout();
-    route(
-      "POST /customer/discount/apply",
-      () => Response.json({ status: "success", data: [{ target: "menus", amount_off: 5000, bogof_amount_off: 1000 }, { target: "deliveryfees", amount_off: 300 }] }),
-      () => Response.json({ status: "success", data: [{ target: "deliveryfees", amount_off: 300 }] }),
+    route("POST /customer/discount/apply", () =>
+      Response.json({
+        status: "success",
+        data: [
+          { target: "menus", amount_off: 5000, bogof_amount_off: 1000, promo_code: "save10" },
+          { target: "deliveryfees", amount_off: 300 },
+        ],
+      }),
     );
 
     const result = await check();
     const parsed = JSON.parse(textOf(result));
 
     expect(result.isError).toBeUndefined();
-    expect(parsed).toMatchObject({
-      promo_code: "SAVE10",
-      status: "discount",
-      code_discount: 6000,
-      with_code: { total_off: 6300 },
-      without_code: { total_off: 300 },
-      cart_total: 440000,
-    });
+    expect(parsed).toMatchObject({ promo_code: "SAVE10", status: "discount", code_discount: 6000, total_off: 6300, cart_total: 440000 });
     expect(parsed.basis.join("\n")).toContain("not a guarantee");
-    expect(received.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/customer/discount/apply", "/customer/discount/apply"]);
+    expect(parsed.basis.join("\n")).toContain("get_checkout_quote with promo_code includes them");
+    expect(received.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/customer/discount/apply"]);
     expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
   });
 
@@ -1297,6 +1311,16 @@ describe("check_promo_code", () => {
     expect(JSON.parse(textOf(await check()))).toMatchObject({ status: "no_discount", code_discount: 0 });
   });
 
+  test("treats a failed envelope as an error, not as no discount", async () => {
+    scriptCheckout();
+    route("POST /customer/discount/apply", () => Response.json({ status: "failed", message: "Promo code does not exist" }));
+
+    const result = await check();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("answered status failed: Promo code does not exist");
+  });
+
   test("refuses a malformed code, and a cart that does not belong to the restaurant, before calculating", async () => {
     scriptCheckout();
     expect(textOf(await check({ promo_code: "no spaces!" }))).toContain("the promo code must be 1-40 letters");
@@ -1305,5 +1329,218 @@ describe("check_promo_code", () => {
     scriptCheckout({ addresses: addressList([1]) });
     expect(textOf(await check())).toContain("address_id is not one of your saved delivery addresses");
     expect(received.some((r) => r.path === "/customer/discount/apply")).toBe(false);
+  });
+});
+
+/*
+ * Promo codes applied in a quote, with the shapes observed on 2026-10-22:
+ * GET /customer/promo-code (5FOR5 free delivery, DECK11 N500 off),
+ * GET /customer/discount (empty) and POST /customer/discount/apply naming
+ * the promo_code on its discount. Values other than the codes are fictional.
+ */
+describe("promo codes in a quote", () => {
+  const QUOTE_ID = "0f6c1d2e-3b4a-4c5d-8e9f-a0b1c2d3e4f5";
+  const promoEntry = (overrides: Record<string, unknown> = {}) => ({
+    id: 6799451, code: "5FOR5", note: "5FOR5 - Free delivery", user_id: 523668, promo_code_id: 206251, amount: 0, is_valid: 1,
+    expiry_time: "2099-10-31T23:59:59.000Z", created_at: "2026-10-22T09:59:01.000Z", updated_at: "2026-10-22T09:59:01.000Z",
+    discount_id: 580242, maximum_usage_count: 1, usage_count: 0, minimum_order_amount: 300000, claim_source: null, vendor_id: null,
+    title: "5FOR5", target_service: "deliveryfees", type: "5for5_marketing_first_time_orders", settings: "{\"has_multiple_discounts\":false}",
+    maximum_order_amount: 0, voucher_type: "discount", display_name: null, voucher_status: null, vendor_ids: [], voucher_worth: 0, vendors: [],
+    ...overrides,
+  });
+  const promoList = (entries: Record<string, unknown>[] = [promoEntry(), promoEntry({ id: 880538, code: "DECK11", note: "Registration discount", title: "N500 off", target_service: "orders", minimum_order_amount: 250000 })]) => () =>
+    Response.json({ status: "success", message: "Promo codes retrieved successfully", data: entries });
+  const discountList = () => Response.json({ status: "success", message: "Discounts retrieved successfully", data: [] });
+  const applied = (entries: Record<string, unknown>[] = [{
+    discount_id: 580242, title: "5FOR5", description: "Free delivery", amount_off: 70000, target: "deliveryfees", menu_price: 0, menu_total_price: 0,
+    source: 0, shared_percent: 100, capped_amount_per_user: null, capped_amount: null, max_usage_capped_amount: 100000, additional_items: [],
+    bogof_amount_off: 0, vendor_id: 102555, discount_terms: "Capped at NGN 1000. Minimum order amount is NGN 3000.", maximum_usage_count: 1, usage_count: 0, promo_code: "5FOR5",
+  }]) => () => Response.json({ status: "success", message: "Discounts applied successfully", data: entries });
+
+  const store = (open: Partial<OrderSubmission>[] = []) => {
+    const saved: NewQuote[] = [];
+    const superseded: string[] = [];
+    const submissions = {
+      createQuote: async (quote: NewQuote) => {
+        saved.push(quote);
+        return { id: QUOTE_ID, quoteExpiresAt: new Date("2026-10-22T10:05:00Z") };
+      },
+      supersedeQuotes: async (_cartId: number, keepId: string) => (superseded.push(keepId), 1),
+      listOpen: async () => open,
+    } as unknown as UserOrderSubmissions;
+    return { submissions, saved, superseded };
+  };
+
+  const script = (handlers: { promos?: Handler; discounts?: Handler; apply?: Handler } = {}) => {
+    scriptCheckout({ cart: cartResponse({ bag_quantity: 0 }) });
+    route("GET /customer/promo-code", handlers.promos ?? promoList());
+    route("GET /customer/discount", handlers.discounts ?? discountList);
+    route("POST /customer/discount/apply", handlers.apply ?? applied());
+  };
+
+  const quoteWithPromo = async (submissions: UserOrderSubmissions, promo_code = "5FOR5") =>
+    callTool(serverFor(await signedIn(), 1000, undefined, submissions), "get_checkout_quote", {
+      restaurant_id: 102555,
+      address_id: ADDRESS_ID,
+      promo_code,
+    });
+
+  const applyCalls = () => received.filter((r) => r.path === "/customer/discount/apply");
+
+  test("applies an account code with the fresh quote's fee, shows Chowdeck's discount, and saves it with the quote", async () => {
+    script();
+    const { submissions, saved, superseded } = store();
+
+    const result = await quoteWithPromo(submissions, "5for5");
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.orderable).toBe(true);
+    expect(parsed.promo).toMatchObject({
+      promo_code: "5FOR5",
+      status: "applied",
+      discount: "₦700.00",
+      discount_raw: 70000,
+      estimated_total_after_discount: { amount: 484000, display: "₦4,840.00" },
+    });
+    expect(parsed.promo.chowdeck_discounts[0]).toMatchObject({ title: "5FOR5", description: "Free delivery", promo_code: "5FOR5", amount: "₦700.00" });
+    expect(parsed.promo.estimated_total_after_discount.source).toContain("read from Chowdeck's order record before payment");
+    expect(parsed.computed_total.amount).toBe(554000);
+    expect(saved[0]).toMatchObject({ computedTotal: 554000, promo: { code: "5FOR5", discount: 70000 } });
+    expect(superseded).toEqual([QUOTE_ID]);
+
+    const [apply] = applyCalls();
+    expect(apply!.body).toMatchObject({ promo_codes: ["5FOR5"], fee_id: FEE_ID, delivery_fee: 70000, cart_id: 30742921, order_class: "delivery" });
+    expect(requestKeys()).toEqual([
+      "GET /customer/cart/vendor/102555",
+      "GET /customer/address",
+      "GET /customer/vendor/102555",
+      "GET /customer/promo-code",
+      "GET /customer/discount",
+      "POST /customer/delivery/amount",
+      "GET /customer/payment/methods",
+      "POST /customer/discount/apply",
+    ]);
+    expect(textOf(result)).not.toContain(String(FEE_ID));
+    expect(textOf(result)).not.toContain(String(ADDRESS_ID));
+    expect(textOf(result)).not.toContain("523668");
+  });
+
+  test.each([
+    ["is not on the account", "NOTMINE", promoList(), "is not on your Chowdeck account"],
+    ["is expired", "5FOR5", promoList([promoEntry({ expiry_time: "2020-01-01T00:00:00.000Z" })]), "it expired at 2020-01-01T00:00:00.000Z"],
+    ["was used up", "5FOR5", promoList([promoEntry({ usage_count: 1 })]), "it has been used the maximum number of times"],
+    ["is marked not valid", "5FOR5", promoList([promoEntry({ is_valid: 0 })]), "Chowdeck marks it not valid"],
+    ["is limited to another restaurant", "5FOR5", promoList([promoEntry({ vendor_ids: [999] })]), "it is limited to other restaurants"],
+  ])("refuses a code that %s before any fee quote", async (_, code, promos, message) => {
+    script({ promos });
+    const { submissions, saved } = store();
+
+    const result = await quoteWithPromo(submissions, code);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(message);
+    expect(quotePosts()).toHaveLength(0);
+    expect(applyCalls()).toHaveLength(0);
+    expect(saved).toHaveLength(0);
+  });
+
+  test("refuses when the promo lists cannot be read, before any fee quote", async () => {
+    script({ promos: () => Response.json({ message: "Server Error" }, { status: 500 }), discounts: () => Response.json({ message: "Server Error" }, { status: 500 }) });
+    const { submissions } = store();
+
+    const result = await quoteWithPromo(submissions);
+
+    expect(textOf(result)).toContain("ChowBot could not check the promo code 5FOR5 against your account");
+    expect(quotePosts()).toHaveLength(0);
+  });
+
+  test("never creates a second order to apply a promo to an existing unpaid order", async () => {
+    script();
+    const { submissions, saved } = store([{ id: "a", state: "created", chowdeckOrderId: 43606940 }]);
+
+    const result = await quoteWithPromo(submissions);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("order 43606940");
+    expect(textOf(result)).toContain("ChowBot does not create a second order just to apply one");
+    expect(received.some((r) => /promo-code|delivery\/amount|discount/.test(r.path))).toBe(false);
+    expect(saved).toHaveLength(0);
+  });
+
+  test.each([
+    ["returns no discount for the code", applied([]), "not_applied"],
+    ["returns only another code's discount", applied([{ amount_off: 5000, target: "menus", promo_code: "DECK11" }]), "not_applied"],
+    ["refuses the code", () => Response.json({ status: "failed", message: "Promo code has expired" }, { status: 422 }), "rejected"],
+    ["fails upstream", () => Response.json({ message: "Server Error" }, { status: 503 }), "unconfirmed"],
+    ["answers a failed envelope", () => Response.json({ status: "failed", message: "Promo code does not exist" }), "unconfirmed"],
+  ])("is not orderable when Chowdeck's calculation %s, and never retries it", async (_, apply, status) => {
+    script({ apply });
+    const { submissions, saved } = store();
+
+    const result = await quoteWithPromo(submissions);
+    const parsed = JSON.parse(textOf(result));
+
+    expect(parsed.orderable).toBe(false);
+    expect(parsed.quote_ref).toBeUndefined();
+    expect(parsed.promo.status).toBe(status);
+    expect(parsed.promo).not.toHaveProperty("estimated_total_after_discount");
+    expect(parsed.not_orderable_reasons.join("\n")).toContain("call get_checkout_quote without promo_code to order without it");
+    expect(saved).toHaveLength(0);
+    expect(applyCalls()).toHaveLength(1);
+    expect(quotePosts()).toHaveLength(1);
+  });
+
+  test("a quote without promo_code reads no promo lists and runs no discount calculation", async () => {
+    script();
+    const { submissions, saved } = store();
+
+    await callTool(serverFor(await signedIn(), 1000, undefined, submissions), "get_checkout_quote", { restaurant_id: 102555, address_id: ADDRESS_ID });
+
+    expect(received.some((r) => /promo-code|discount/.test(r.path))).toBe(false);
+    expect(saved[0]).not.toHaveProperty("promo");
+  });
+});
+
+describe("list_promo_codes", () => {
+  const list = async (args: Record<string, unknown> = {}) =>
+    callTool(serverFor(await signedIn()), "list_promo_codes", args);
+
+  const entries = [
+    { id: 1, user_id: 523668, promo_code_id: 9, discount_id: 44, code: "DECK11", title: "N500 off", note: "Registration discount", is_valid: 1, expiry_time: "2030-12-31T23:59:59.000Z", usage_count: 0, maximum_usage_count: 1, minimum_order_amount: 250000, target_service: "orders", vendor_ids: [], settings: "{}" },
+    { id: 2, user_id: 523668, code: "OLD", title: "Old", is_valid: 1, expiry_time: "2020-01-01T00:00:00.000Z", usage_count: 0, maximum_usage_count: 1, vendor_ids: [] },
+    { id: 3, user_id: 523668, code: "ELSEWHERE", title: "Other shop", is_valid: 1, expiry_time: "2030-01-01T00:00:00.000Z", usage_count: 0, maximum_usage_count: 0, vendor_ids: [999] },
+  ];
+
+  test("lists the account's codes and discounts with ChowBot's reading, without private ids, read-only", async () => {
+    route("GET /customer/promo-code", () => Response.json({ status: "success", data: entries }));
+    route("GET /customer/discount", () => Response.json({ status: "success", data: [] }));
+
+    const result = await list({ restaurant_id: 102555 });
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.promo_codes.map((p: { code: string }) => p.code)).toEqual(["DECK11", "OLD", "ELSEWHERE"]);
+    expect(parsed.promo_codes[0]).toMatchObject({ title: "N500 off", minimum_order_amount: 250000, chowbot_check: { looks_usable: true, problems: [] } });
+    expect(parsed.promo_codes[1].chowbot_check.problems).toEqual(["it expired at 2020-01-01T00:00:00.000Z"]);
+    expect(parsed.promo_codes[2].chowbot_check.problems).toEqual(["it is limited to other restaurants"]);
+    expect(parsed.discounts).toEqual([]);
+    expect(parsed.basis.join("\n")).toContain("not a promise of a discount");
+    for (const field of ["user_id", "promo_code_id", "discount_id", "settings"]) expect(parsed.promo_codes[0]).not.toHaveProperty(field);
+    expect(textOf(result)).not.toContain("523668");
+    expect(received.every((r) => r.method === "GET")).toBe(true);
+  });
+
+  test("reports a list it could not read, and fails only when neither can be read", async () => {
+    route("GET /customer/promo-code", () => Response.json({ status: "success", data: entries }));
+    route("GET /customer/discount", () => Response.json({ message: "Server Error" }, { status: 500 }));
+    const partial = JSON.parse(textOf(await list()));
+    expect(partial.promo_codes).toHaveLength(3);
+    expect(partial.errors.join("\n")).toContain("GET /customer/discount failed with status 500");
+
+    route("GET /customer/promo-code", () => Response.json({ message: "Server Error" }, { status: 500 }));
+    const failed = await list();
+    expect(failed.isError).toBe(true);
+    expect(textOf(failed)).toContain("neither promo list could be read");
   });
 });

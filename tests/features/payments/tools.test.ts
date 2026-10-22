@@ -40,6 +40,7 @@ const codec = createChowbotRequestStateCodec(keyring.requestStateKey);
 const TEST_CONFIG = createPaymentStartConfig();
 
 const ORDER_ID = 7001326;
+const TOTAL = 554000;
 const VENDOR_ID = 102555;
 const PAYMENT_LINK = "https://pay.example/checkout/PRIVATE-PAYMENT-LINK";
 const START_PATH = "/customer/payment/start/v2";
@@ -60,7 +61,7 @@ const servers: HttpServer[] = [];
 const route = (key: string, ...handlers: Handler[]) => routes.set(key, handlers);
 
 const orderDetail = (overrides: Record<string, unknown> = {}) => () =>
-  Response.json({ status: "success", data: { id: ORDER_ID, vendor_id: VENDOR_ID, status: "pending", created_at: new Date().toISOString(), ...overrides } });
+  Response.json({ status: "success", data: { id: ORDER_ID, vendor_id: VENDOR_ID, status: "pending", total_price: TOTAL, created_at: new Date().toISOString(), ...overrides } });
 
 const timeline = (actions: string[]) => () =>
   Response.json({ data: actions.map((action) => ({ heading: action, action })) });
@@ -71,7 +72,7 @@ const started = (data: Record<string, unknown> = {}) => () =>
     message: "Payment successfully started",
     data: {
       processor: "opay", reference: "PRIVATE-reference", authorization_url: PAYMENT_LINK, currency: "NGN",
-      amountInLowerUnits: 554000, status: "PRIVATE-status", display_type: "PRIVATE-display", processor_meta: {}, ...data,
+      amountInLowerUnits: TOTAL, status: "PRIVATE-status", display_type: "PRIVATE-display", processor_meta: {}, ...data,
     },
   });
 
@@ -82,6 +83,7 @@ const scriptUnpaidOrder = () => {
 };
 
 const posts = () => received.filter((r) => r.method === "POST" && r.path === START_PATH);
+const orderReads = () => received.filter((r) => r.method === "GET" && r.path === `/customer/order/${ORDER_ID}`);
 
 /*
  * A created, unpaid order attempt as place_order records it.
@@ -131,12 +133,13 @@ const startApp = async (options: { store?: OrderSubmissionStore; timeoutMs?: num
 type Call = {
   baseUrl: string;
   quoteRef: string;
+  confirmedTotal?: number;
   token?: string;
   capabilities?: Record<string, unknown>;
   legacy?: boolean;
 };
 
-const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = NO_CAPS, legacy }: Call) => {
+const call = async ({ baseUrl, quoteRef, confirmedTotal, token = alice.token, capabilities = NO_CAPS, legacy }: Call) => {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: {
@@ -153,7 +156,7 @@ const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = NO_
       method: "tools/call",
       params: {
         name: "start_payment",
-        arguments: { quote_ref: quoteRef },
+        arguments: { quote_ref: quoteRef, ...(confirmedTotal !== undefined && { confirmed_total: confirmedTotal }) },
         ...(!legacy && {
           _meta: {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -171,6 +174,35 @@ const call = async ({ baseUrl, quoteRef, token = alice.token, capabilities = NO_
 
 const textOf = (body: { result?: { content?: { text: string }[] } }) => body.result?.content?.[0]?.text ?? "";
 
+type Report = {
+  action: string;
+  outcome: string;
+  message: string;
+  chowdeck_confirmed: string[];
+  status: { order_id: number; order_state: string; source: string; detail: string } | null;
+  amount?: Record<string, unknown>;
+  next_step: string;
+  outcome_uncertain: boolean;
+  safe_to_retry: boolean;
+  confirmed_total?: number;
+  payment_link?: string;
+  order_id?: number;
+  warning?: string;
+};
+
+const reportOf = (body: { result?: { content?: { text: string }[] } }) => JSON.parse(textOf(body)) as Report;
+const messageOf = (body: { result?: { content?: { text: string }[] } }) => reportOf(body).message;
+
+/*
+ * Both calls: the first shows Chowdeck's total and starts nothing; the
+ * second sends that total back as confirmed_total.
+ */
+const pay = async (options: Call) => {
+  const first = reportOf(await call(options));
+  expect(first.outcome).toBe("confirmation_required");
+  return call({ ...options, confirmedTotal: first.confirmed_total });
+};
+
 /*
  * A successful start: the link in the result, nothing else from Chowdeck's
  * response.
@@ -180,7 +212,12 @@ const startedResult = (body: { result: { isError?: boolean; resultType?: string;
   expect(body.result.resultType).not.toBe("input_required");
   expect(textOf(body)).not.toContain("PRIVATE-reference");
   expect(textOf(body)).not.toContain("PRIVATE-status");
-  return JSON.parse(textOf(body)) as { status: string; order_id: number; payment_link: string; message: string; next_step: string };
+  const report = reportOf(body);
+  expect(report.action).toBe("start_payment");
+  expect(report.outcome).toBe("payment_link_generated");
+  expect(report.outcome_uncertain).toBe(false);
+  expect(report.safe_to_retry).toBe(false);
+  return report as Report & { payment_link: string; order_id: number };
 };
 
 /*
@@ -273,15 +310,25 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 
-      const result = startedResult(await call({ baseUrl, quoteRef }));
+      const first = reportOf(await call({ baseUrl, quoteRef }));
+      expect(first).toMatchObject({ action: "start_payment", outcome: "confirmation_required", confirmed_total: TOTAL, outcome_uncertain: false, safe_to_retry: true });
+      expect(first.status?.order_state).toBe("order_created");
+      expect(first.amount).toMatchObject({ total: "₦5,540.00", total_raw: TOTAL });
+      expect(posts()).toHaveLength(0);
+      expect((await row(quoteRef)).payment_started_at).toBeNull();
 
-      expect(result).toMatchObject({ status: "payment_started", order_id: ORDER_ID, payment_link: PAYMENT_LINK });
+      const result = startedResult(await call({ baseUrl, quoteRef, confirmedTotal: TOTAL }));
+
+      expect(result).toMatchObject({ order_id: ORDER_ID, payment_link: PAYMENT_LINK });
+      expect(result.status?.order_state).toBe("payment_link_generated");
+      expect(result.warning).toBeUndefined();
       expect(result.message).toBe(`Open this link to pay for Chowdeck order ${ORDER_ID} with opay: ${PAYMENT_LINK}`);
       expect(result.next_step).toContain("clickable link");
       expect(result.next_step).toContain("get_order_submission");
       expect(result.next_step).toContain("ChowBot will not start another payment for this order");
 
       expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
+        `GET /customer/order/${ORDER_ID}`,
         `GET /customer/order/${ORDER_ID}`,
         `POST ${START_PATH}`,
       ]);
@@ -314,7 +361,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 
-      const result = startedResult(await call({ baseUrl, quoteRef, ...variant }));
+      const result = startedResult(await pay({ baseUrl, quoteRef, ...variant }));
 
       expect(result.payment_link).toBe(PAYMENT_LINK);
       expect(posts()).toHaveLength(1);
@@ -325,11 +372,12 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       scriptUnpaidOrder();
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
-      startedResult(await call({ baseUrl, quoteRef }));
+      startedResult(await pay({ baseUrl, quoteRef }));
 
-      const again = await call({ baseUrl, quoteRef });
+      const again = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
 
-      expect(textOf(again)).toContain("a payment was already started for this order; ChowBot does not start another");
+      expect(messageOf(again)).toContain("a payment was already started for this order; ChowBot does not start another");
+      expect(reportOf(again).outcome).toBe("not_sent");
       expectNoLink(again);
       expect(posts()).toHaveLength(1);
     });
@@ -339,7 +387,10 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 
-      const results = await Promise.all([call({ baseUrl, quoteRef }), call({ baseUrl, quoteRef })]);
+      const results = await Promise.all([
+        call({ baseUrl, quoteRef, confirmedTotal: TOTAL }),
+        call({ baseUrl, quoteRef, confirmedTotal: TOTAL }),
+      ]);
 
       expect(posts()).toHaveLength(1);
       expect(results.filter((r) => textOf(r).includes("PRIVATE-PAYMENT-LINK"))).toHaveLength(1);
@@ -358,7 +409,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
     const baseUrl = await startApp();
     const quoteRef = await seedCreated();
 
-    const result = startedResult(await call({ baseUrl, quoteRef }));
+    const result = startedResult(await pay({ baseUrl, quoteRef }));
 
     expect(result.payment_link).toBe(PAYMENT_LINK);
     expect(posts()).toHaveLength(1);
@@ -375,7 +426,8 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, quoteRef, token: bob.token });
 
-      expect(textOf(body)).toBe("Payment not started: that quote_ref does not exist for your account.");
+      expect(messageOf(body)).toBe("Payment not started: that quote_ref does not exist for your account.");
+      expect(reportOf(body)).toMatchObject({ outcome: "not_sent", outcome_uncertain: false, safe_to_retry: true });
       expect(received).toHaveLength(0);
     });
 
@@ -389,7 +441,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toContain("only an order ChowBot created and recorded can be paid here");
+      expect(messageOf(body)).toContain("only an order ChowBot created and recorded can be paid here");
       expect(received).toHaveLength(0);
     });
 
@@ -400,7 +452,7 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toContain("this attempt was marked abandoned, so ChowBot no longer starts payments for it");
+      expect(messageOf(body)).toContain("this attempt was marked abandoned, so ChowBot no longer starts payments for it");
       expect(received).toHaveLength(0);
       expect((await row(quoteRef)).payment_started_at).toBeNull();
       expect(await stores.orderSubmissions.markPaymentStarted(alice.userId, quoteRef, ORDER_ID)).toBe(false);
@@ -414,7 +466,9 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toBe("Payment not started: Chowdeck shows this order is already paid.");
+      expect(messageOf(body)).toBe("Payment not started: Chowdeck shows this order is already paid.");
+      expect(reportOf(body)).toMatchObject({ outcome: "already_paid", outcome_uncertain: false });
+      expect(reportOf(body).status?.order_state).toBe("payment_confirmed");
       expect(posts()).toHaveLength(0);
       const paid = await row(quoteRef);
       expect(paid.state).toBe("paid");
@@ -432,7 +486,8 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       const body = await call({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toContain(`could not confirm with Chowdeck that order ${ORDER_ID} is unpaid`);
+      expect(messageOf(body)).toContain(`could not confirm with Chowdeck that order ${ORDER_ID} is unpaid`);
+      expect(reportOf(body).status?.order_state).toBe("unknown");
       expect(posts()).toHaveLength(0);
       expect((await row(quoteRef)).payment_started_at).toBeNull();
     });
@@ -442,9 +497,9 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp({ store: storeWith({ markPaymentStarted: async () => { throw new Error("connection lost"); } }) });
       const quoteRef = await seedCreated();
 
-      const body = await call({ baseUrl, quoteRef });
+      const body = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
 
-      expect(textOf(body)).toContain("could not confirm it was safe to start the payment, so nothing was sent");
+      expect(messageOf(body)).toContain("could not confirm it was safe to start the payment, so nothing was sent");
       expect(posts()).toHaveLength(0);
     });
   });
@@ -456,15 +511,17 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 
-      const body = await call({ baseUrl, quoteRef });
+      const body = await pay({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toBe("Payment not started: Chowdeck refused to start the payment (status 422). ChowBot will not try again; pay in the Chowdeck app.");
+      expect(messageOf(body)).toBe("Payment not started: Chowdeck refused to start the payment (status 422). ChowBot will not try again; pay in the Chowdeck app.");
+      expect(reportOf(body)).toMatchObject({ outcome: "rejected_by_chowdeck", outcome_uncertain: false, safe_to_retry: false });
+      expect(textOf(body)).not.toContain("Order already paid");
       expect(body.result.isError).toBe(true);
       expectNoLink(body);
       expect((await row(quoteRef)).payment_start_state).toBe("rejected");
 
-      const again = await call({ baseUrl, quoteRef });
-      expect(textOf(again)).toContain("Chowdeck refused the earlier payment start");
+      const again = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
+      expect(messageOf(again)).toContain("Chowdeck refused the earlier payment start");
       expect(posts()).toHaveLength(1);
     });
 
@@ -485,15 +542,16 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp();
       const quoteRef = await seedCreated();
 
-      const body = await call({ baseUrl, quoteRef });
+      const body = await pay({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toContain("The payment start's outcome is unknown");
-      expect(textOf(body)).toContain("so you do not pay twice");
+      expect(messageOf(body)).toContain("The payment start's outcome is unknown");
+      expect(messageOf(body)).toContain("so you do not pay twice");
+      expect(reportOf(body)).toMatchObject({ outcome: "unknown_outcome", outcome_uncertain: true, safe_to_retry: false });
       expectNoLink(body);
       expect((await row(quoteRef)).payment_start_state).toBe("unknown");
 
-      const again = await call({ baseUrl, quoteRef });
-      expect(textOf(again)).toContain("an earlier payment start for this order has an unknown outcome");
+      const again = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
+      expect(messageOf(again)).toContain("an earlier payment start for this order has an unknown outcome");
       expect(posts()).toHaveLength(1);
     });
 
@@ -506,16 +564,16 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp({ timeoutMs: 200 });
       const quoteRef = await seedCreated();
 
-      const body = await call({ baseUrl, quoteRef });
+      const body = await pay({ baseUrl, quoteRef });
 
-      expect(textOf(body)).toContain("timed out after 200ms");
-      expect(textOf(body)).toContain("The payment start's outcome is unknown");
+      expect(messageOf(body)).toContain("timed out after 200ms");
+      expect(messageOf(body)).toContain("The payment start's outcome is unknown");
       expectNoLink(body);
       expect(posts()).toHaveLength(1);
       expect((await row(quoteRef)).payment_start_state).toBe("unknown");
 
-      const again = await call({ baseUrl, quoteRef });
-      expect(textOf(again)).toContain("an earlier payment start for this order has an unknown outcome");
+      const again = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
+      expect(messageOf(again)).toContain("an earlier payment start for this order has an unknown outcome");
       expect(posts()).toHaveLength(1);
     });
 
@@ -524,16 +582,216 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
       const baseUrl = await startApp({ store: storeWith({ recordPaymentStart: async () => { throw new Error("down"); } }) });
       const quoteRef = await seedCreated();
 
-      const result = startedResult(await call({ baseUrl, quoteRef }));
+      const result = startedResult(await pay({ baseUrl, quoteRef }));
 
       expect(result.payment_link).toBe(PAYMENT_LINK);
       const inFlight = await row(quoteRef);
       expect(inFlight.payment_started_at).toBeInstanceOf(Date);
       expect(inFlight.payment_start_state).toBeNull();
 
-      const again = await call({ baseUrl, quoteRef });
-      expect(textOf(again)).toContain("was sent but its outcome was not recorded");
+      const again = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
+      expect(messageOf(again)).toContain("was sent but its outcome was not recorded");
       expect(posts()).toHaveLength(1);
+    });
+  });
+
+  describe("the amount confirmation", () => {
+    test("refuses, marking and sending nothing, when Chowdeck's total changed since it was confirmed", async () => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail(), orderDetail({ total_price: 489000 }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      const first = reportOf(await call({ baseUrl, quoteRef }));
+      const body = await call({ baseUrl, quoteRef, confirmedTotal: first.confirmed_total });
+
+      expect(reportOf(body)).toMatchObject({ outcome: "not_sent", safe_to_retry: true });
+      expect(messageOf(body)).toContain("Chowdeck's order total is now ₦4,890.00, not the ₦5,540.00 that was confirmed");
+      expect(reportOf(body).next_step).toContain("confirmed_total: 489000");
+      expect(posts()).toHaveLength(0);
+      expect((await row(quoteRef)).payment_started_at).toBeNull();
+    });
+
+    test("refuses a confirmed_total the order record never showed", async () => {
+      scriptUnpaidOrder();
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      const body = await call({ baseUrl, quoteRef, confirmedTotal: 1 });
+
+      expect(reportOf(body).outcome).toBe("not_sent");
+      expect(posts()).toHaveLength(0);
+      expect((await row(quoteRef)).payment_started_at).toBeNull();
+    });
+
+    test.each([
+      ["no total_price", { total_price: undefined }],
+      ["a non-numeric total_price", { total_price: "554000" }],
+    ])("refuses, sending nothing, when the order record has %s", async (_, overrides) => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail(overrides));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      for (const confirmedTotal of [undefined, TOTAL]) {
+        const body = await call({ baseUrl, quoteRef, confirmedTotal });
+        expect(reportOf(body).outcome).toBe("not_sent");
+        expect(messageOf(body)).toContain("shows no total");
+      }
+      expect(posts()).toHaveLength(0);
+      expect((await row(quoteRef)).payment_started_at).toBeNull();
+    });
+
+    test("shows Chowdeck's total and discounts before payment", async () => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ total_price: 636000, promo_code_price: 65000, discount_price: 65000, promo_codes: "5FOR5", delivery_price: 65000 }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      const first = reportOf(await call({ baseUrl, quoteRef }));
+
+      expect(first.outcome).toBe("confirmation_required");
+      expect(first.status?.order_state).toBe("order_created");
+      expect(first.status?.source).toContain("Chowdeck's order record");
+      expect(first.confirmed_total).toBe(636000);
+      expect(first.amount).toMatchObject({
+        total: "₦6,360.00",
+        total_raw: 636000,
+        discounts: { promo_code_price: "₦650.00", discount_price: "₦650.00" },
+        promo_codes: "5FOR5",
+      });
+      expect(first.next_step).toContain("including the discounts listed");
+      expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([`GET /customer/order/${ORDER_ID}`]);
+    });
+
+    test("returns no warning when the payment page amount matches the confirmed total", async () => {
+      scriptUnpaidOrder();
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      const result = startedResult(await pay({ baseUrl, quoteRef }));
+
+      expect(result.warning).toBeUndefined();
+      expect(result.amount).toEqual({ confirmed_total: "₦5,540.00", payment_page_amount: "₦5,540.00" });
+    });
+
+    test("still returns the link, with a warning, when the payment page amount differs", async () => {
+      scriptUnpaidOrder();
+      route(`POST ${START_PATH}`, started({ amountInLowerUnits: 600000 }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      const result = startedResult(await pay({ baseUrl, quoteRef }));
+
+      expect(result.payment_link).toBe(PAYMENT_LINK);
+      expect(result.warning).toContain("₦6,000.00");
+      expect(result.warning).toContain("₦5,540.00");
+      expect(posts()).toHaveLength(1);
+    });
+  });
+
+  describe("orders Chowdeck does not show as payable", () => {
+    test.each([
+      ["a payment status ChowBot does not understand", { payment: { status: "refunded" } }],
+      ["a payment confirmation time without a successful payment", { time_payment_confirmed: "2026-10-22T12:00:00.000Z" }],
+    ])("refuses, sending nothing, for %s", async (_, overrides) => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail(overrides));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      for (const confirmedTotal of [undefined, TOTAL]) {
+        const body = reportOf(await call({ baseUrl, quoteRef, confirmedTotal }));
+        expect(body.outcome).toBe("not_sent");
+        expect(body.status?.order_state).toBe("unknown");
+        expect(body.message).toContain("cannot confirm the order is unpaid");
+      }
+      expect(posts()).toHaveLength(0);
+      const after = await row(quoteRef);
+      expect(after.payment_started_at).toBeNull();
+      expect(after.state).toBe("created");
+    });
+
+    test("refuses, sending nothing, when the order record shows it cancelled", async () => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ status: "cancelled" }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated();
+
+      const body = reportOf(await call({ baseUrl, quoteRef, confirmedTotal: TOTAL }));
+
+      expect(body.outcome).toBe("not_sent");
+      expect(body.status?.order_state).toBe("cancelled");
+      expect(posts()).toHaveLength(0);
+      expect((await row(quoteRef)).payment_started_at).toBeNull();
+    });
+
+    test("refuses an attempt with a cancellation sent, before any Chowdeck request", async () => {
+      scriptUnpaidOrder();
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { cancel_requested_at: new Date(), cancel_request_state: "unknown" });
+
+      const body = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
+
+      expect(messageOf(body)).toContain("a cancellation was sent for this order");
+      expect(received).toHaveLength(0);
+      expect(await stores.orderSubmissions.markPaymentStarted(alice.userId, quoteRef, ORDER_ID)).toBe(false);
+    });
+
+    test("refuses a cancelled attempt, before any Chowdeck request", async () => {
+      scriptUnpaidOrder();
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { state: "cancelled", resolution: "cancelled_verified" });
+
+      const body = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL });
+
+      expect(messageOf(body)).toContain("cancelled");
+      expect(reportOf(body).outcome).toBe("not_sent");
+      expect(received).toHaveLength(0);
+    });
+  });
+
+  describe("an attempt ChowBot recorded as paid", () => {
+    test("reads Chowdeck again and reports the payment it still shows, starting nothing", async () => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: { status: "success" } }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { state: "paid", resolution: "paid_verified" });
+
+      const body = reportOf(await call({ baseUrl, quoteRef, confirmedTotal: TOTAL }));
+
+      expect(body).toMatchObject({ outcome: "already_paid", outcome_uncertain: false });
+      expect(body.status?.order_state).toBe("payment_confirmed");
+      expect(orderReads()).toHaveLength(1);
+      expect(posts()).toHaveLength(0);
+    });
+
+    test("reports what Chowdeck shows now, as uncertain, when it no longer shows the payment", async () => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, orderDetail({ payment: { status: "refunded" } }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { state: "paid", resolution: "paid_verified" });
+
+      const body = reportOf(await call({ baseUrl, quoteRef, confirmedTotal: TOTAL }));
+
+      expect(body).toMatchObject({ outcome: "not_sent", outcome_uncertain: true });
+      expect(body.status?.order_state).toBe("unknown");
+      expect(orderReads()).toHaveLength(1);
+      expect(posts()).toHaveLength(0);
+      expect((await row(quoteRef)).state).toBe("paid");
+    });
+
+    test("reports an unknown state when Chowdeck cannot be read, starting nothing", async () => {
+      scriptUnpaidOrder();
+      route(`GET /customer/order/${ORDER_ID}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { state: "paid", resolution: "paid_verified" });
+
+      const body = reportOf(await call({ baseUrl, quoteRef }));
+
+      expect(body).toMatchObject({ outcome: "not_sent", outcome_uncertain: true });
+      expect(body.status?.order_state).toBe("unknown");
+      expect(posts()).toHaveLength(0);
     });
   });
 });

@@ -25,10 +25,15 @@ export const CAPTURED_PAYMENT_CHANNEL_QUERY: Readonly<PaymentChannelQuery> = Obj
 export type PaymentChannel = { id: number; name: string };
 
 /*
- * Channels whose order path has been observed end to end (the OPay order
- * carried payment_method_id and no payment_method).
+ * Channels whose order path has been observed end to end (2026-10-22): each
+ * order carried payment_method_id (the channel's id) and no payment_method,
+ * and POST /customer/payment/start/v2 with method set to the channel's name
+ * returned an authorization_url. card, bank_transfer, bank, ussd and zap
+ * start Paystack (zap through joinzap.com); pocket needs the payer's Pocket
+ * tag and is approved in the Pocket app. qr is left out: it fails, in the
+ * app too.
  */
-export const SUPPORTED_PAYMENT_CHANNELS = ["opay"] as const;
+export const SUPPORTED_PAYMENT_CHANNELS = ["card", "bank_transfer", "opay", "bank", "ussd", "pocket", "zap"] as const;
 export type SupportedPaymentChannel = (typeof SUPPORTED_PAYMENT_CHANNELS)[number];
 
 /*

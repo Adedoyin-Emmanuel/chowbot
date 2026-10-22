@@ -13,7 +13,8 @@ export type OrderSubmissionState =
   | "unknown"
   | "failed"
   | "paid"
-  | "released";
+  | "released"
+  | "cancelled";
 
 export type GateFailure = "gate_rejected" | "gate_uncertain";
 
@@ -23,6 +24,14 @@ export type GateFailure = "gate_rejected" | "gate_uncertain";
  * refused; unknown: a payment may or may not have been started.
  */
 export type PaymentStartState = "started" | "rejected" | "unknown";
+
+/*
+ * The recorded outcome of the one cancellation request for an order.
+ * accepted: Chowdeck answered success, which alone does not prove the order
+ * is cancelled (its order record decides); rejected: Chowdeck definitely
+ * refused; unknown: the order may or may not have been cancelled.
+ */
+export type CancelRequestState = "accepted" | "rejected" | "unknown";
 
 /*
  * What a caller may learn about a record. fee_id, the address binding and
@@ -50,6 +59,14 @@ export type OrderSubmission = {
   lockReleasedAt: Date | null;
   lockReleaseReason: "cart_changed" | "operator_released" | null;
   paidAfterReleaseAt: Date | null;
+  /*
+   * The promo code applied in the quote, with the discount Chowdeck's
+   * calculation returned for it; both null when the quote has none.
+   */
+  promoCode: string | null;
+  promoDiscount: number | null;
+  cancelRequestedAt: Date | null;
+  cancelRequestState: CancelRequestState | null;
 };
 
 /*
@@ -77,6 +94,7 @@ export type NewQuote = {
   addressId: number;
   computedTotal: number;
   cartFingerprint: string;
+  promo?: { code: string; discount: number };
 };
 
 export type ConfirmationRequest = {
@@ -163,6 +181,22 @@ export interface OrderSubmissionStore {
     id: string,
     evidence: OrderEvidence,
   ): Promise<boolean>;
+  supersedeQuotes(userId: string, cartId: number, keepId: string): Promise<number>;
+  markCancelRequested(
+    userId: string,
+    id: string,
+    chowdeckOrderId: number,
+  ): Promise<boolean>;
+  recordCancelRequest(
+    userId: string,
+    id: string,
+    state: CancelRequestState,
+  ): Promise<boolean>;
+  recordCancelled(
+    userId: string,
+    id: string,
+    evidence: OrderEvidence,
+  ): Promise<boolean>;
 }
 
 /*
@@ -192,6 +226,10 @@ export type UserOrderSubmissions = {
   recordPaymentStart(id: string, state: PaymentStartState): Promise<boolean>;
   listRecentlyReleased(vendorId: number): Promise<ReleasedSubmission[]>;
   recordPaidAfterRelease(id: string, evidence: OrderEvidence): Promise<boolean>;
+  supersedeQuotes(cartId: number, keepId: string): Promise<number>;
+  markCancelRequested(id: string, chowdeckOrderId: number): Promise<boolean>;
+  recordCancelRequest(id: string, state: CancelRequestState): Promise<boolean>;
+  recordCancelled(id: string, evidence: OrderEvidence): Promise<boolean>;
 };
 
 export const bindOrderSubmissions = (
@@ -220,6 +258,14 @@ export const bindOrderSubmissions = (
     store.listRecentlyReleased(userId, vendorId),
   recordPaidAfterRelease: (id, evidence) =>
     store.recordPaidAfterRelease(userId, id, evidence),
+  supersedeQuotes: (cartId, keepId) =>
+    store.supersedeQuotes(userId, cartId, keepId),
+  markCancelRequested: (id, chowdeckOrderId) =>
+    store.markCancelRequested(userId, id, chowdeckOrderId),
+  recordCancelRequest: (id, state) =>
+    store.recordCancelRequest(userId, id, state),
+  recordCancelled: (id, evidence) =>
+    store.recordCancelled(userId, id, evidence),
 });
 
 export const QUOTE_LIFETIME_SECONDS = 5 * 60;

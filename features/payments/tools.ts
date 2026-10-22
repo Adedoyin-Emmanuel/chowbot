@@ -33,9 +33,21 @@ export const registerPaymentTools = (
     {
       title: "Start payment",
       description:
-        "Start the online payment for an unpaid order ChowBot placed (quote_ref from place_order). On success the result contains a payment_link (https) from Chowdeck: show it to the user as a clickable link to open and pay, then check payment with get_order_submission. ChowBot starts at most one payment per order and never retries: if Chowdeck refuses, or the outcome is unknown, there is no link and the user pays in the Chowdeck app. Payment is confirmed only from Chowdeck's order record, never from the link.",
+        "Start the online payment for an unpaid order ChowBot placed (quote_ref from place_order), in two calls. The first call sends nothing: it reads the order from Chowdeck and returns the total Chowdeck's order record shows (with any discount) as confirmed_total. Show it to the user; only if they accept it, call again with the same quote_ref and confirmed_total. If Chowdeck's total changed in between, nothing is started and the new total must be confirmed. On success the result contains a payment_link (https) from Chowdeck: show it to the user as a clickable link to open and pay, then check payment with get_order_submission. For a pocket order the second call also needs the payer's pocket_tag, and the user approves the payment in their Pocket app. ChowBot starts at most one payment per order and never retries: if Chowdeck refuses, or the outcome is unknown, there is no link and the user pays in the Chowdeck app. Payment is confirmed only from Chowdeck's order record, never from the link.",
       inputSchema: z.object({
         quote_ref: z.string().uuid().describe("quote_ref of the order placed with place_order"),
+        confirmed_total: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Only in the second call: the confirmed_total from the first call, after the user accepted that amount"),
+        pocket_tag: z
+          .string()
+          .trim()
+          .regex(/^@?[A-Za-z0-9_.]{1,40}$/, "a Pocket tag has letters, digits, underscores or dots")
+          .optional()
+          .describe("Only for an order placed with the pocket channel, in the second call: the payer's PocketApp tag, as the user gives it"),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },

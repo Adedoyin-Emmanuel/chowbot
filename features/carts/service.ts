@@ -102,6 +102,8 @@ export type NoteUpdate = {
 export type SetCartNotesResult = {
   restaurant_id: number;
   updated: Partial<Record<NoteKind, NoteUpdate>>;
+  confirmed_by_chowdeck: boolean;
+  message: string;
   notes?: CartNotes;
   verification_error?: string;
 };
@@ -214,6 +216,32 @@ const parseValidationIssues = (value: unknown): CartRow[] => {
   });
 };
 
+/*
+ * Whether Chowdeck still treats a cart as an editable basket. Observed
+ * 2026-10-22: a cart stays active with order_id null after unpaid orders are
+ * created from it (cart 31006911 was reused for six orders), so an order is a
+ * copy of the cart and later edits do not reach it. A cart Chowdeck links to
+ * an order (order_id set) or reports as not active was never observed; ChowBot
+ * does not edit one.
+ */
+export const cartEditability = (value: Record<string, unknown>): Record<string, ScalarValue> | undefined => {
+  const orderId = value.order_id;
+  if (orderId !== null && orderId !== undefined) {
+    return {
+      editable: false,
+      linked_order_id: typeof orderId === "number" || typeof orderId === "string" ? orderId : null,
+      not_editable_reason: `Chowdeck links this cart to order ${String(orderId)}`,
+    };
+  }
+  if (value.is_active === false || (typeof value.status === "string" && value.status !== "active")) {
+    return {
+      editable: false,
+      not_editable_reason: `Chowdeck reports this cart as ${typeof value.status === "string" ? value.status : "not active"}`,
+    };
+  }
+  return undefined;
+};
+
 const parseCart = (value: unknown): CartDetail | undefined => {
   if (
     !isRecord(value) ||
@@ -233,6 +261,7 @@ const parseCart = (value: unknown): CartDetail | undefined => {
   return {
     ...pickScalarFields(value, CART_FIELDS),
     ...(vendorName !== undefined && { vendor_name: vendorName }),
+    ...cartEditability(value),
     packs,
     validation_issues: parseValidationIssues(value.validation_result),
   };
@@ -255,6 +284,17 @@ export const cartFingerprint = (cart: CartDetail) => {
   return new Bun.CryptoHasher("sha256")
     .update(JSON.stringify({ packs, total: cart.total_price ?? null }))
     .digest("hex");
+};
+
+/*
+ * Refuses a change to a cart Chowdeck no longer treats as editable.
+ */
+const assertEditable = (cart: CartDetail) => {
+  if (cart.editable === false) {
+    throw new CartRequestError(
+      `${cart.not_editable_reason}; ChowBot does not change it, because editing this cart would not change that order. Check the order with get_order or get_order_submission`,
+    );
+  }
 };
 
 const summarizeCart = (cart: CartDetail): CartSummary => {
@@ -418,6 +458,7 @@ class CartService {
     if (!before.exists) {
       throw new CartRequestError("there is no cart for this restaurant; add an item first");
     }
+    assertEditable(before.cart);
 
     const path = vendorCartPath(restaurantId);
     const updated: SetCartNotesResult["updated"] = {};
@@ -457,11 +498,23 @@ class CartService {
         update.stored = kind === "vendor" ? after.vendor_note : after.delivery_note;
         update.verification = update.stored === update.sent ? "verified" : "mismatch";
       }
-      return { restaurant_id: restaurantId, updated, notes: after };
+      const confirmed = Object.values(updated).every((update) => update.verification === "verified");
+      return {
+        restaurant_id: restaurantId,
+        updated,
+        confirmed_by_chowdeck: confirmed,
+        message: confirmed
+          ? "Chowdeck's cart, read again after the change, holds exactly these notes; an order placed from this cart carries them."
+          : "Chowdeck's cart, read again after the change, holds a different value for at least one note (see updated); do not tell the user it was saved as written.",
+        notes: after,
+      };
     } catch (error) {
       return {
         restaurant_id: restaurantId,
         updated,
+        confirmed_by_chowdeck: false,
+        message:
+          "Chowdeck answered the change with success, but the cart could not be read again, so the saved notes are not confirmed. Check them with get_cart_notes before ordering; do not tell the user they were saved.",
         verification_error: `the cart could not be re-read to confirm the notes (${error instanceof Error ? error.message : "unexpected error"})`,
       };
     }
@@ -576,6 +629,7 @@ class CartService {
     const modifiers = await this.resolveModifiers(params);
 
     const existing = await this.getVendorCart(params.restaurantId);
+    if (existing.exists) assertEditable(existing.cart);
     const path = existing.exists
       ? vendorCartPath(params.restaurantId)
       : CART_LIST_PATH;
@@ -644,6 +698,7 @@ class CartService {
     if (!before.exists) {
       throw new CartRequestError("there is no cart for this restaurant");
     }
+    assertEditable(before.cart);
     const original = before.cart.packs.find(
       (pack) => pack.pack_reference === packReference,
     );
@@ -761,6 +816,7 @@ class CartService {
     if (!before.exists) {
       throw new CartRequestError("there is no cart for this restaurant");
     }
+    assertEditable(before.cart);
     if (
       !before.cart.packs.some((pack) => pack.pack_reference === packReference)
     ) {
@@ -815,6 +871,7 @@ class CartService {
         removed_packs: 0,
       };
     }
+    assertEditable(before.cart);
 
     await this.sendCartDeletion(
       cartPath(before.cart.id as number),
