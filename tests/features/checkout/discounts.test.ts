@@ -11,7 +11,7 @@ import {
 
 /*
  * The website's discount/apply request, reproduced from cart rows as the
- * storefront code builds it (docs/chowdeck-checkout-evidence.md). Rows are
+ * storefront code builds it. Rows are
  * fictional.
  */
 

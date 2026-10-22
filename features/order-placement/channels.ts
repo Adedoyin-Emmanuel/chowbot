@@ -11,30 +11,25 @@ export type PaymentChannelQuery = {
   countryIdentifier: string;
 };
 
-/*
- * Captured read-only on 2026-10-21 from the website's "Pay online" picker:
- * GET /customer/payment/channel?methods=&country_identifier=NG, with methods
- * present and empty, and no other parameters. Non-empty methods values were
- * never observed. Production configuration must match these exactly.
- */
-export const CAPTURED_PAYMENT_CHANNEL_QUERY: Readonly<PaymentChannelQuery> = Object.freeze({
-  methods: "",
-  countryIdentifier: "NG",
-});
+export const CAPTURED_PAYMENT_CHANNEL_QUERY: Readonly<PaymentChannelQuery> =
+  Object.freeze({
+    methods: "",
+    countryIdentifier: "NG",
+  });
 
 export type PaymentChannel = { id: number; name: string };
 
-/*
- * Channels whose order path has been observed end to end (2026-10-22): each
- * order carried payment_method_id (the channel's id) and no payment_method,
- * and POST /customer/payment/start/v2 with method set to the channel's name
- * returned an authorization_url. card, bank_transfer, bank, ussd and zap
- * start Paystack (zap through joinzap.com); pocket needs the payer's Pocket
- * tag and is approved in the Pocket app. qr is left out: it fails, in the
- * app too.
- */
-export const SUPPORTED_PAYMENT_CHANNELS = ["card", "bank_transfer", "opay", "bank", "ussd", "pocket", "zap"] as const;
-export type SupportedPaymentChannel = (typeof SUPPORTED_PAYMENT_CHANNELS)[number];
+export const SUPPORTED_PAYMENT_CHANNELS = [
+  "card",
+  "bank_transfer",
+  "opay",
+  "bank",
+  "ussd",
+  "pocket",
+  "zap",
+] as const;
+export type SupportedPaymentChannel =
+  (typeof SUPPORTED_PAYMENT_CHANNELS)[number];
 
 /*
  * Every observed channel carried is_active: 1. A channel that does not say
@@ -56,10 +51,14 @@ export const resolvePaymentChannel = async (
 ): Promise<PaymentChannel | undefined> => {
   const body = await client.request(PAYMENT_CHANNEL_PATH, {
     headers,
-    query: { methods: query.methods, country_identifier: query.countryIdentifier },
+    query: {
+      methods: query.methods,
+      country_identifier: query.countryIdentifier,
+    },
   });
 
-  const channels = isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
+  const channels =
+    isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
   const wellFormed = channels?.every(
     (channel) =>
       isRecord(channel) &&

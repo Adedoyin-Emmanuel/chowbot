@@ -4,7 +4,7 @@ import { ChowdeckApiError } from "../../lib/client";
 /*
  * Chowdeck's discount calculation, built exactly as the storefront builds it
  * (chunk 6117 module 64269 `P` for the packs; chunk 3488 for the request;
- * read 2026-10-21; see docs/chowdeck-checkout-evidence.md). The website runs
+ * read 2026-10-21). The website runs
  * it on every cart, fee or promo change and on window focus, which is why it
  * is treated as a calculation rather than a change to anything.
  *

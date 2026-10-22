@@ -134,12 +134,13 @@ type Call = {
   baseUrl: string;
   quoteRef: string;
   confirmedTotal?: number;
+  pocketTag?: string;
   token?: string;
   capabilities?: Record<string, unknown>;
   legacy?: boolean;
 };
 
-const call = async ({ baseUrl, quoteRef, confirmedTotal, token = alice.token, capabilities = NO_CAPS, legacy }: Call) => {
+const call = async ({ baseUrl, quoteRef, confirmedTotal, pocketTag, token = alice.token, capabilities = NO_CAPS, legacy }: Call) => {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: {
@@ -156,7 +157,11 @@ const call = async ({ baseUrl, quoteRef, confirmedTotal, token = alice.token, ca
       method: "tools/call",
       params: {
         name: "start_payment",
-        arguments: { quote_ref: quoteRef, ...(confirmedTotal !== undefined && { confirmed_total: confirmedTotal }) },
+        arguments: {
+          quote_ref: quoteRef,
+          ...(confirmedTotal !== undefined && { confirmed_total: confirmedTotal }),
+          ...(pocketTag !== undefined && { pocket_tag: pocketTag }),
+        },
         ...(!legacy && {
           _meta: {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -394,6 +399,86 @@ describePostgres("start_payment over the hosted stack (PostgreSQL)", () => {
 
       expect(posts()).toHaveLength(1);
       expect(results.filter((r) => textOf(r).includes("PRIVATE-PAYMENT-LINK"))).toHaveLength(1);
+    });
+  });
+
+  /*
+   * Observed 2026-10-22: every channel but OPay sends callback_url and
+   * return_url (both the ongoing-order page), and Paystack's start answers
+   * only authorization_url, access_code, reference and processor.
+   */
+  describe("channels other than OPay", () => {
+    const ongoingOrder = `https://chowdeck.com/store/ongoing-order?orderId=${ORDER_ID}`;
+
+    test.each([["card"], ["bank_transfer"], ["bank"], ["ussd"], ["zap"]])("%s sends the website's callback_url and return_url", async (channel) => {
+      scriptUnpaidOrder();
+      route(`POST ${START_PATH}`, () =>
+        Response.json({ status: "success", data: { authorization_url: PAYMENT_LINK, access_code: "x", reference: "PRIVATE-reference", processor: "paystack" } }),
+      );
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { payment_channel_name: channel });
+
+      const result = startedResult(await pay({ baseUrl, quoteRef }));
+
+      expect(result.payment_link).toBe(PAYMENT_LINK);
+      expect(result.message).toBe(`Open this link to pay for Chowdeck order ${ORDER_ID} with ${channel}: ${PAYMENT_LINK}`);
+      expect(result.amount).toEqual({ confirmed_total: "₦5,540.00" });
+      expect(posts().map((p) => p.body)).toEqual([{ method: channel, order_id: ORDER_ID, callback_url: ongoingOrder, return_url: ongoingOrder }]);
+    });
+
+    test("refuses a channel ChowBot does not support, sending nothing", async () => {
+      scriptUnpaidOrder();
+      const baseUrl = await startApp();
+      const quoteRef = await seedCreated(alice.userId, { payment_channel_name: "qr" });
+
+      expect(messageOf(await call({ baseUrl, quoteRef, confirmedTotal: TOTAL }))).toContain("payment channel is not supported");
+      expect(received).toHaveLength(0);
+    });
+
+    describe("pocket", () => {
+      const scriptPocket = () => {
+        scriptUnpaidOrder();
+        route(`POST ${START_PATH}`, started({ processor: "pocket", display_type: "inapp", processor_meta: { message: "Please open your Pocket App to complete this payment" } }));
+      };
+
+      test("asks for the Pocket tag, and refuses the second call without it, sending nothing", async () => {
+        scriptPocket();
+        const baseUrl = await startApp();
+        const quoteRef = await seedCreated(alice.userId, { payment_channel_name: "pocket" });
+
+        expect(reportOf(await call({ baseUrl, quoteRef })).next_step).toContain("pocket_tag");
+        const refusedStart = reportOf(await call({ baseUrl, quoteRef, confirmedTotal: TOTAL }));
+
+        expect(refusedStart.outcome).toBe("not_sent");
+        expect(refusedStart.message).toContain("Pocket tag");
+        expect(posts()).toHaveLength(0);
+        expect((await row(quoteRef)).payment_started_at).toBeNull();
+      });
+
+      test("sends the tag without its @ and tells the user to approve in the Pocket app", async () => {
+        scriptPocket();
+        const baseUrl = await startApp();
+        const quoteRef = await seedCreated(alice.userId, { payment_channel_name: "pocket" });
+
+        const result = startedResult(await pay({ baseUrl, quoteRef, pocketTag: "@emmysoft" }));
+
+        expect(posts().map((p) => p.body)).toEqual([
+          { method: "pocket", order_id: ORDER_ID, callback_url: ongoingOrder, return_url: ongoingOrder, pocket_tag: "emmysoft" },
+        ]);
+        expect(result.message).toContain("Pocket tag emmysoft");
+        expect(result.next_step).toContain("open their Pocket app");
+      });
+
+      test("refuses a malformed Pocket tag before any Chowdeck request", async () => {
+        scriptPocket();
+        const baseUrl = await startApp();
+        const quoteRef = await seedCreated(alice.userId, { payment_channel_name: "pocket" });
+
+        const body = await call({ baseUrl, quoteRef, confirmedTotal: TOTAL, pocketTag: "not a tag" });
+
+        expect(JSON.stringify(body)).toContain("Pocket tag");
+        expect(received).toHaveLength(0);
+      });
     });
   });
 
