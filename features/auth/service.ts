@@ -10,6 +10,13 @@ const VERIFY_OTP_PATH = "/auth/login/validate-otp";
 const LOGIN_DEFAULTS = { country_code: "NG", role: "customer" } as const;
 
 /*
+ * Since 2026-10-22 Chowdeck asks callers that identify as the website for a
+ * Turnstile token on login, so login is sent without the website headers.
+ * The session token it returns works with them on every other request.
+ */
+const LOGIN_REQUEST = { method: "POST", storefront: false } as const;
+
+/*
  * The reference implementation reports that Chowdeck rejects E.164 numbers
  * on these endpoints and expects the local 0XXXXXXXXXX format.
  */
@@ -32,7 +39,7 @@ const sessionToken = (body: unknown) => {
 export const sendLoginOtp = async (client: ChowdeckClient, phone: string) => {
   const localPhone = toLocalPhone(phone);
   await client.request(LOGIN_PATH, {
-    method: "POST",
+    ...LOGIN_REQUEST,
     body: { phone: localPhone, ...LOGIN_DEFAULTS },
   });
   return localPhone;
@@ -45,7 +52,7 @@ export const verifyLoginOtpToken = async (
 ) => {
   const localPhone = toLocalPhone(phone);
   const body = await client.request(VERIFY_OTP_PATH, {
-    method: "POST",
+    ...LOGIN_REQUEST,
     body: { otp, phone: localPhone, ...LOGIN_DEFAULTS },
   });
 

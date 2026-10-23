@@ -4,7 +4,7 @@ import {
   readDatabaseConfig,
   deleteExpiredRecords,
 } from "./lib/postgres/database";
-import { PORT } from "./constants/app";
+import { PORT, parseTrustProxyHops } from "./constants/app";
 import { logger } from "./utils/logger";
 import { createHttpApp } from "./mcp/http-app";
 import { migrate } from "./lib/postgres/migrations";
@@ -70,6 +70,7 @@ const start = async () => {
     // start_payment follows the same switch, with the website's redirect pages.
     ...(placeOrderEnabled && { paymentStartConfig: createPaymentStartConfig() }),
     lifecycle: { isShuttingDown: () => shuttingDown(), checkDatabase },
+    trustProxyHops: parseTrustProxyHops(process.env.CHOWBOT_TRUST_PROXY_HOPS),
   });
 
   const server = app.listen(Number(PORT), () => {

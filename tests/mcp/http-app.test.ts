@@ -328,3 +328,54 @@ describe("health and shutdown", () => {
     }
   });
 });
+
+/*
+ * Behind Cloudflare and Caddy every request reaches the app from the proxy.
+ * The per-address limits must key on the visitor in X-Forwarded-For, and only
+ * when proxies are trusted.
+ */
+describe("trusted reverse proxies", () => {
+  const appWith = (trustProxyHops?: number) =>
+    listen(
+      createHttpApp({
+        serverUrl: SERVER_URL,
+        issuerUrl: ISSUER_URL,
+        users: new InMemoryUserStore(),
+        clients: new InMemoryClientStore(),
+        codes: new InMemoryAuthorizationCodeStore(),
+        tokens,
+        sessions,
+        serverFactory: probeServer,
+        authorizeLimits: { otpRequestsPerIp: 1 },
+        ...(trustProxyHops !== undefined && { trustProxyHops }),
+      }),
+    );
+
+  const requestCode = (app: Listening, forwardedFor: string) =>
+    fetch(`${app.baseUrl}/authorize/phone`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": forwardedFor },
+      body: "phone=08012345678",
+    }).then((response) => response.status);
+
+  test("with trusted hops, each visitor gets their own limit", async () => {
+    const app = await appWith(1);
+    try {
+      expect(await requestCode(app, "198.51.100.1")).not.toBe(429);
+      expect(await requestCode(app, "198.51.100.2")).not.toBe(429);
+      expect(await requestCode(app, "198.51.100.1")).toBe(429);
+    } finally {
+      app.server.close();
+    }
+  });
+
+  test("without them, a forwarded address is ignored and cannot dodge the limit", async () => {
+    const app = await appWith();
+    try {
+      expect(await requestCode(app, "198.51.100.1")).not.toBe(429);
+      expect(await requestCode(app, "198.51.100.2")).toBe(429);
+    } finally {
+      app.server.close();
+    }
+  });
+});

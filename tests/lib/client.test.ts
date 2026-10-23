@@ -96,6 +96,14 @@ describe("ChowdeckClient", () => {
     expect(received?.headers.has("content-type")).toBe(false);
   });
 
+  test("leaves out the storefront headers when asked to", async () => {
+    await createClient().request("/ok", { storefront: false });
+
+    expect(received?.headers.has("x-app-name")).toBe(false);
+    expect(received?.headers.has("x-app-os")).toBe(false);
+    expect(received?.headers.get("accept")).toBe("application/json");
+  });
+
   test("serialises a JSON body", async () => {
     await createClient().request("/ok", {
       method: "POST",

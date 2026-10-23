@@ -62,6 +62,7 @@ export type HttpAppOptions = {
   paymentStartConfig?: PaymentStartConfig;
   paymentChannelQuery?: PaymentChannelQuery;
   authorizeLimits?: Partial<AuthorizeLimits>;
+  trustProxyHops?: number;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
 
@@ -122,6 +123,7 @@ export const createHttpApp = ({
   paymentStartConfig,
   placeOrderEnabled,
   lifecycle,
+  trustProxyHops = 0,
 }: HttpAppOptions) => {
   assertIssuerHostedBy(issuerUrl, serverUrl);
 
@@ -165,6 +167,7 @@ export const createHttpApp = ({
   );
 
   const app = express();
+  if (trustProxyHops > 0) app.set("trust proxy", trustProxyHops);
 
   /*
    * Liveness never touches the database, so a database outage does not get

@@ -13,6 +13,11 @@ export type ChowdeckRequestOptions = {
   method?: HttpMethod;
   headers?: Record<string, string>;
   query?: Record<string, QueryValue>;
+  /*
+   * false leaves out the website's app headers. Chowdeck requires a Cloudflare
+   * Turnstile token from callers that send them to /auth/login.
+   */
+  storefront?: boolean;
 };
 
 export type ChowdeckClientConfig = {
@@ -72,7 +77,7 @@ export class ChowdeckClient {
 
   async request<T = unknown>(
     path: string,
-    { method = "GET", query, body, headers }: ChowdeckRequestOptions = {},
+    { method = "GET", query, body, headers, storefront = true }: ChowdeckRequestOptions = {},
   ): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(query ?? {})) {
@@ -87,7 +92,7 @@ export class ChowdeckClient {
       response = await fetch(url, {
         method,
         headers: {
-          ...CHOWDECK_STOREFRONT_HEADERS,
+          ...(storefront && CHOWDECK_STOREFRONT_HEADERS),
           accept: "application/json",
           ...(body !== undefined && { "content-type": "application/json" }),
           ...headers,
