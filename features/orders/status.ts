@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
 
-import { formatNaira } from "../checkout/draft";
+import { formatNaira, toNairaJson } from "../../utils/money";
 import type { OrderDetail } from "./service";
 
 /*
@@ -176,7 +176,7 @@ export type ActionReport = {
 } & Record<string, unknown>;
 
 export const reportResult = (report: ActionReport, isError = false): CallToolResult => ({
-  content: [{ type: "text", text: JSON.stringify(report) }],
+  content: [{ type: "text", text: toNairaJson(report) }],
   ...(isError && { isError }),
 });
 

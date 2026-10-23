@@ -1,3 +1,4 @@
+import { inNaira } from "../../helpers/naira";
 import {
   test,
   expect,
@@ -267,7 +268,7 @@ describe("get_checkout_quote", () => {
     expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
 
     const parsed = JSON.parse(textOf(result));
-    expect(parsed.restaurant).toEqual({
+    expect(parsed.restaurant).toEqual(inNaira({
       id: 102555,
       name: "Chicken Republic - Opebi",
       minimum_order_amount: 250000,
@@ -276,10 +277,10 @@ describe("get_checkout_quote", () => {
       operationally_open: 1,
       is_closed_by_operations: false,
       is_temporarily_unavailable: false,
-    });
-    expect(parsed.cart).toMatchObject({ id: 30742921, total_price: 440000, is_valid: true });
+    }));
+    expect(parsed.cart).toMatchObject({ id: 30742921, total_price: "₦4,400.00", is_valid: true });
     expect(parsed.cart.packs.map((p: { pack_reference: string }) => p.pack_reference)).toEqual([PACK_1, PACK_2]);
-    expect(parsed.quote).toEqual({
+    expect(parsed.quote).toEqual(inNaira({
       currency: "NGN",
       amount: 70000,
       final_delivery_amount: 70000,
@@ -289,11 +290,11 @@ describe("get_checkout_quote", () => {
       small_order_reason: null,
       safety_fee: 0,
       additional_order_fees: quoteData().additional_order_fees,
-    });
+    }));
     expect(parsed.computed_total).toEqual({
-      amount: 554000,
+      amount: "₦5,540.00",
       formula: "cart.total_price + quote.final_delivery_amount + quote.final_service_amount",
-      source: "computed by ChowBot from raw Chowdeck amounts; not a total returned by Chowdeck",
+      source: "computed by ChowBot from Chowdeck's cart total and fees; not a total returned by Chowdeck",
     });
     expect(parsed.payment_methods).toEqual([
       { type: "wallet", pretty_name: "Wallet", is_current_active: false },
@@ -371,8 +372,8 @@ describe("get_checkout_quote", () => {
     const parsed = JSON.parse(textOf(result));
 
     expect(result.isError).toBeUndefined();
-    expect(parsed.computed_total.amount).toBe(554000);
-    expect(parsed.quote.final_delivery_amount).toBe(70000);
+    expect(parsed.computed_total.amount).toBe("₦5,540.00");
+    expect(parsed.quote.final_delivery_amount).toBe("₦700.00");
     expect(parsed.payment_methods).toBeNull();
     expect(parsed.payment_methods_error).toBe(
       "payment methods could not be retrieved (GET /customer/payment/methods failed with status 500: Server Error); the quote above is still valid",
@@ -398,7 +399,7 @@ describe("get_checkout_quote", () => {
     expect(parsed.computed_total_unavailable_reason).toBe(
       "small_order_amount or safety_fee is non-zero, and how Chowdeck combines them is unknown",
     );
-    expect(parsed.quote.small_order_amount).toBe(15000);
+    expect(parsed.quote.small_order_amount).toBe("₦150.00");
     expect(received.some((r) => r.path === "/customer/payment/methods")).toBe(false);
   });
 
@@ -500,7 +501,7 @@ describe("get_checkout_quote", () => {
       const result = await quote();
 
       expect(textOf(result)).toBe(
-        "Failed to get checkout quote: the cart total_price (220000) is below this restaurant's minimum_order_amount (250000); both are raw Chowdeck amounts",
+        "Failed to get checkout quote: the cart total (₦2,200.00) is below this restaurant's minimum order (₦2,500.00)",
       );
       expect(quotePosts()).toHaveLength(0);
     });
@@ -668,7 +669,7 @@ describe("get_checkout_quote orderable quotes", () => {
 
     expect(parsed.orderable).toBe(true);
     expect(parsed.not_orderable_reasons).toBeUndefined();
-    expect(parsed.computed_total.amount).toBe(554000);
+    expect(parsed.computed_total.amount).toBe("₦5,540.00");
     expect(parsed).not.toHaveProperty("quote_ref");
     expect(parsed).not.toHaveProperty("quote_valid_until");
   });
@@ -744,16 +745,16 @@ describe("promo codes in a quote", () => {
 
     expect(result.isError).toBeUndefined();
     expect(parsed.orderable).toBe(true);
-    expect(parsed.promo).toMatchObject({
+    expect(parsed.promo).toMatchObject(inNaira({
       promo_code: "5FOR5",
       status: "applied",
       discount: "₦700.00",
       discount_raw: 70000,
       estimated_total_after_discount: { amount: 484000, display: "₦4,840.00" },
-    });
+    }));
     expect(parsed.promo.chowdeck_discounts[0]).toMatchObject({ title: "5FOR5", description: "Free delivery", promo_code: "5FOR5", amount: "₦700.00" });
     expect(parsed.promo.estimated_total_after_discount.source).toContain("read from Chowdeck's order record before payment");
-    expect(parsed.computed_total.amount).toBe(554000);
+    expect(parsed.computed_total.amount).toBe("₦5,540.00");
 
     const [apply] = applyCalls();
     expect(apply!.body).toMatchObject({ promo_codes: ["5FOR5"], fee_id: FEE_ID, delivery_fee: 70000, cart_id: 30742921, order_class: "delivery" });
@@ -847,7 +848,7 @@ describe("list_promo_codes", () => {
 
     expect(result.isError).toBeUndefined();
     expect(parsed.promo_codes.map((p: { code: string }) => p.code)).toEqual(["DECK11", "OLD", "ELSEWHERE"]);
-    expect(parsed.promo_codes[0]).toMatchObject({ title: "N500 off", minimum_order_amount: 250000, chowbot_check: { looks_usable: true, problems: [] } });
+    expect(parsed.promo_codes[0]).toMatchObject({ title: "N500 off", minimum_order_amount: "₦2,500.00", chowbot_check: { looks_usable: true, problems: [] } });
     expect(parsed.promo_codes[1].chowbot_check.problems).toEqual(["it expired at 2020-01-01T00:00:00.000Z"]);
     expect(parsed.promo_codes[2].chowbot_check.problems).toEqual(["it is limited to other restaurants"]);
     expect(parsed.discounts).toEqual([]);

@@ -62,6 +62,13 @@ export type AddressCreateResult = {
     | { status: "not_listed" | "unavailable"; detail: string };
 };
 
+export type SetActiveResult = {
+  address_id: number;
+  status: "activated" | "already_active" | "not_saved" | "rejected" | "unconfirmed";
+  message: string;
+  address?: AddressSummary;
+};
+
 const CREATED_FIELDS = ["pretty_name", "street", "city", "state", "country", "is_active", "is_current"] as const;
 
 // For a write, only a 4xx other than 401 proves nothing happened.
@@ -247,6 +254,53 @@ class AddressService {
       );
     }
     return addresses;
+  }
+
+  /*
+   * Makes a saved address the account's current one. Sent once; it counts
+   * only when the re-read list shows that address as is_current.
+   */
+  async setActive(addressId: number): Promise<SetActiveResult> {
+    const headers = await this.authHeaders();
+    const before = (await this.fetchSavedAddresses(headers)).find((address) => address.id === addressId);
+    if (!before) {
+      return {
+        address_id: addressId,
+        status: "not_saved",
+        message: "That is not one of your saved addresses, so nothing was changed. Call list_addresses to choose one.",
+      };
+    }
+    const address = pickScalarFields(before, SUMMARY_FIELDS);
+    if (before.is_current === true) {
+      return { address_id: addressId, status: "already_active", message: "This is already your active delivery address. Nothing was changed.", address };
+    }
+
+    const activation = await this.activate(addressId, headers);
+    if (activation.status === "failed") {
+      return { address_id: addressId, status: "rejected", message: `Chowdeck refused to switch the address (${activation.detail}).`, address };
+    }
+    let after: Record<string, unknown> | undefined;
+    try {
+      after = (await this.fetchSavedAddresses(headers)).find((entry) => entry.id === addressId);
+    } catch {
+      after = undefined;
+    }
+    if (after?.is_current === true) {
+      return {
+        address_id: addressId,
+        status: "activated",
+        message: "This is now your active delivery address: Chowdeck's address list confirms it.",
+        address: pickScalarFields(after, SUMMARY_FIELDS),
+      };
+    }
+    return {
+      address_id: addressId,
+      status: "unconfirmed",
+      message: `The switch is not confirmed${activation.status === "unknown" ? ` (${activation.detail})` : ""}: ${
+        after ? "Chowdeck's address list does not show it as current" : "the address list could not be read again"
+      }. Check list_addresses before trying again.`,
+      address,
+    };
   }
 
   async list(): Promise<AddressListResult> {

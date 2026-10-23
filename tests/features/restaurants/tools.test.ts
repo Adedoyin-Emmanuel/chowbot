@@ -1,3 +1,4 @@
+import { inNaira } from "../../helpers/naira";
 import {
   test,
   expect,
@@ -98,7 +99,7 @@ describe("search_restaurants", () => {
     expect(receivedUrl?.searchParams.get("q")).toBe("rice");
     expect(receivedUrl?.searchParams.get("page")).toBe("2");
 
-    expect(JSON.parse(result.content[0]!.text)).toEqual({
+    expect(JSON.parse(result.content[0]!.text)).toEqual(inNaira({
       address_id: 42,
       page: 2,
       returned: 3,
@@ -107,7 +108,7 @@ describe("search_restaurants", () => {
         { id: 11, name: "Mama Put", rating: 4.6, is_open: true, delivery_fee: 50000 },
         { id: 12, name: "Suya Spot" },
       ],
-    });
+    }));
   });
 
   test("rejects a call without address_id before contacting Chowdeck", async () => {

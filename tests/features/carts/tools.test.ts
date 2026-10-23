@@ -1,3 +1,4 @@
+import { inNaira } from "../../helpers/naira";
 import {
   test,
   expect,
@@ -267,7 +268,7 @@ describe("get_cart", () => {
     const result = await callTool(serverFor(await signedIn()), "get_cart", { restaurant_id: 102555 });
     const text = textOf(result);
 
-    expect(JSON.parse(text)).toEqual({
+    expect(JSON.parse(text)).toEqual(inNaira({
       restaurant_id: 102555,
       exists: true,
       cart: {
@@ -293,7 +294,7 @@ describe("get_cart", () => {
           },
         ],
       },
-    });
+    }));
     for (const secret of ["redacted-user", "redacted-address", "redacted note", "secret-token-alice"]) {
       expect(text).not.toContain(secret);
     }
@@ -377,8 +378,8 @@ describe("list_carts", () => {
     expect(JSON.parse(textOf(result))).toEqual({
       returned: 2,
       carts: [
-        expect.objectContaining({ id: 30725140, vendor_id: 102555, total_price: 220000, pack_count: 1, row_count: 3 }),
-        expect.objectContaining({ id: 26876618, vendor_id: 102556, total_price: 825000, is_valid: false, pack_count: 1, row_count: 3 }),
+        expect.objectContaining({ id: 30725140, vendor_id: 102555, total_price: "₦2,200.00", pack_count: 1, row_count: 3 }),
+        expect.objectContaining({ id: 26876618, vendor_id: 102556, total_price: "₦8,250.00", is_valid: false, pack_count: 1, row_count: 3 }),
       ],
     });
   });
@@ -426,11 +427,11 @@ describe("add_to_cart", () => {
     expect(writes()[0]!.body).toEqual(expectedWriteBody);
 
     const parsed = JSON.parse(textOf(result));
-    expect(parsed).toMatchObject({
+    expect(parsed).toMatchObject(inNaira({
       created_cart: true,
       added: { menu_item_id: 880557, quantity: 1, modifiers: 2 },
       cart: { id: 30725140, total_price: 220000 },
-    });
+    }));
     expect(parsed.cart.packs).toHaveLength(1);
   });
 
@@ -448,7 +449,7 @@ describe("add_to_cart", () => {
     expect(writes().map((r) => r.path)).toEqual(["/customer/cart/vendor/102555"]);
     expect(writes()[0]!.body).toEqual(expectedWriteBody);
     expect(parsed.created_cart).toBe(false);
-    expect(parsed.cart.total_price).toBe(440000);
+    expect(parsed.cart.total_price).toBe("₦4,400.00");
     expect(parsed.cart.packs.map((p: { pack_reference: string }) => p.pack_reference)).toEqual([PACK_A, PACK_B]);
   });
 
@@ -626,11 +627,11 @@ describe("duplicate_cart_pack", () => {
     expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
 
     const parsed = JSON.parse(textOf(result));
-    expect(parsed).toMatchObject({
+    expect(parsed).toMatchObject(inNaira({
       duplicated_pack_reference: PACK_B,
       new_pack_reference: PACK_C,
       cart: { id: 30725140, total_price: 440000 },
-    });
+    }));
     expect(parsed.cart.packs.map((p: { pack_reference: string }) => p.pack_reference)).toEqual([
       PACK_B,
       PACK_C,
@@ -856,12 +857,12 @@ describe("remove_cart_pack", () => {
     expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
 
     const parsed = JSON.parse(textOf(result));
-    expect(parsed).toMatchObject({
+    expect(parsed).toMatchObject(inNaira({
       restaurant_id: 102555,
       removed_pack_reference: PACK_2,
       cart_exists: true,
       cart: { id: CART_ID, total_price: 220000 },
-    });
+    }));
     expect(parsed.cart.packs).toHaveLength(1);
     expect(parsed.cart.packs[0].pack_reference).toBe(PACK_1);
     expect(parsed.cart.packs[0].rows.map((r: { cart_item_id: number }) => r.cart_item_id)).toEqual([
@@ -1066,14 +1067,15 @@ describe("clear_cart", () => {
     expect(deletes()[0]!.body).toBeUndefined();
     expect(deletes()[0]!.contentType).toBeNull();
     expect(received.every((r) => r.authorization === "Bearer secret-token-alice")).toBe(true);
-    expect(JSON.parse(textOf(result))).toEqual({
+    expect(JSON.parse(textOf(result))).toEqual(inNaira({
       restaurant_id: 102555,
       cart_existed: true,
       cleared: true,
       removed_packs: 2,
+      message: "The cart is cleared: Chowdeck confirms no cart remains for this restaurant. Nothing else needs checking.",
       active_orders_at_restaurant: [],
       active_orders_note: "Chowdeck lists no active orders at this restaurant.",
-    });
+    }));
   });
 
   test("takes the cart ID from the user's cart, not from the caller", async () => {
@@ -1323,10 +1325,10 @@ describe("add_to_cart uncertain outcomes", () => {
     expect(result.isError).toBeUndefined();
     expect(writes()[0]!.body).toEqual(expectedWriteBody);
     expect(received).toHaveLength(5);
-    expect(JSON.parse(textOf(result))).toMatchObject({
+    expect(JSON.parse(textOf(result))).toMatchObject(inNaira({
       created_cart: true,
       cart: { id: 30725140, total_price: 220000 },
-    });
+    }));
   });
 });
 
@@ -1397,10 +1399,11 @@ describe("cart editability and orders already placed", () => {
     const cleared = JSON.parse(textOf(result));
 
     expect(cleared.cleared).toBe(true);
-    expect(cleared.active_orders_at_restaurant).toEqual([
+    expect(cleared.active_orders_at_restaurant).toEqual(inNaira([
       { id: 43606940, vendor_id: 102555, status: "abandoned", total_price: 554000 },
-    ]);
-    expect(cleared.active_orders_note).toContain("Clearing the cart did not change or cancel them");
+    ]));
+    expect(cleared.active_orders_note).toContain("clearing the cart does not change them");
+    expect(cleared.active_orders_note).not.toContain("Chowdeck app");
     expect(textOf(result)).not.toContain("PRIVATE");
     expect(received.filter((r) => r.method !== "GET").map((r) => r.path)).toEqual(["/customer/cart/30725140"]);
   });

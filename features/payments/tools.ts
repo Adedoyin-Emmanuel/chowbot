@@ -36,7 +36,7 @@ export const registerPaymentTools = (
     {
       title: "Start payment",
       description:
-        "Get a new payment link for one of the signed-in user's unpaid Chowdeck orders (order_id from place_order or list_orders). place_order already returns a link for online channels, so use this only when that link is missing, failed or lost. Chowdeck's order record is read first: a paid, cancelled or pay-for-me order gets no payment. Use the payment channel the order was placed with; pocket needs the payer's pocket_tag. Sent once and never retried: after an unknown outcome, check the order with get_order before calling it again. Payment is confirmed only when get_order shows it.",
+        "Get a new payment link for one of the signed-in user's unpaid Chowdeck orders (order_id from place_order or list_orders). place_order already returns a link for online channels, so use this only when that link is missing, failed or lost. To pay with a different channel, place the order again with that payment_channel instead. Chowdeck's order record is read first: a paid, cancelled or pay-for-me order gets no payment. Use the payment channel the order was placed with; pocket needs the payer's pocket_tag. Sent once and never retried: after an unknown outcome, check the order with get_order before calling it again. Payment is confirmed only when get_order shows it.",
       inputSchema: z.object({
         order_id: z.number().int().positive().describe("The Chowdeck order id"),
         payment_channel: z.enum(SUPPORTED_PAYMENT_CHANNELS).describe("The online channel the order was placed with"),

@@ -43,7 +43,7 @@ const serverFor = (session: UserSession, options: { timeoutMs?: number; enabled?
   return server;
 };
 
-const ORDER_ARGS = { restaurant_id: VENDOR_ID, address_id: ADDRESS_ID, quoted_total: QUOTED_TOTAL, payment_channel: "card" };
+const ORDER_ARGS = { restaurant_id: VENDOR_ID, address_id: ADDRESS_ID, quoted_total: QUOTED_TOTAL / 100, payment_channel: "card" };
 
 const place = async (args: Record<string, unknown> = {}, options: { timeoutMs?: number } = {}) =>
   callTool(serverFor(await signedIn(), options), "place_order", { ...ORDER_ARGS, ...args });
@@ -145,8 +145,34 @@ describe("place_order", () => {
     expect(result.isError).toBe(true);
     expect(report.outcome).toBe("not_sent");
     expect(report.message).toContain("the total is now ₦5,740.00, not the ₦5,540.00 quoted");
-    expect(report.next_step).toContain("quoted_total: 574000");
+    expect(report.next_step).toContain("quoted_total: 5740.");
     expect(orderPosts()).toHaveLength(0);
+  });
+
+  test("takes the quoted total in naira, to the kobo", async () => {
+    scriptOrder();
+    route("POST /customer/delivery/amount", () =>
+      Response.json({ status: "success", data: { id: FEE_ID, final_delivery_amount: 70000, final_service_amount: 66937, small_order_amount: 0, safety_fee: 0 } }),
+    );
+    route(`GET /customer/order/${ORDER_ID}`, orderRecord({ total_price: 576937 }));
+
+    const report = parse(await place({ quoted_total: 5769.37 }));
+
+    expect(report.outcome).toBe("order_created");
+    expect(report.amount.total).toBe("₦5,769.37");
+  });
+
+  test("lets the user change an unpaid order by placing it again, and shows amounts in naira", async () => {
+    scriptOrder();
+
+    const result = await place();
+    const report = parse(result);
+
+    expect(report.next_step).toContain("Until it is paid, the user can change anything");
+    expect(report.next_step).toContain("call place_order again");
+    expect(report.next_step).not.toContain("Do not place this order again");
+    expect(report.amount.total).toBe("₦5,540.00");
+    expect(result.content[0]!.text).not.toContain("554000");
   });
 
   test("sends nothing for a pocket order without a Pocket tag", async () => {
@@ -265,9 +291,21 @@ describe("place_order with an unclear outcome", () => {
     expect(result.isError).toBe(true);
     expect(report).toMatchObject({ outcome: "unknown_outcome", outcome_uncertain: true, safe_to_retry: false });
     expect(report.message).toContain("does not prove none was created");
-    expect(report.next_step).toContain("Do not place the order again");
+    expect(report.next_step).toContain("Check list_orders with status active");
     expect(orderPosts()).toHaveLength(1);
     expect(paymentStarts()).toHaveLength(0);
+  });
+
+  test("an unclear wallet order is never placed again until checked, since wallet pays at creation", async () => {
+    scriptOrder();
+    route("GET /customer/wallet", () => Response.json({ status: "success", data: { total_balance: 900000, currency: "NGN" } }));
+    route("GET /customer/order", activeOrders([]));
+    route("POST /customer/order", () => Response.json({ message: "Server Error" }, { status: 500 }));
+
+    const report = parse(await place({ payment_channel: "wallet" }));
+
+    expect(report.outcome).toBe("unknown_outcome");
+    expect(report.next_step).toContain("do not place it again until");
   });
 
   test("two new orders at the restaurant leave the outcome unknown and list both", async () => {

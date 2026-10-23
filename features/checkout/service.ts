@@ -534,7 +534,7 @@ class CheckoutService {
       basis: [
         `promo_codes from GET ${PROMO_CODE_LIST_PATH}; discounts (vouchers) from GET ${DISCOUNT_LIST_PATH}, whose entries have only been observed empty`,
         "chowbot_check is ChowBot's reading of validity, expiry, usage and restaurant limits; it is not a promise of a discount",
-        "a minimum order amount is left to Chowdeck's calculation; amounts are raw Chowdeck values (divide by 100 for naira)",
+        "a minimum order amount is left to Chowdeck's calculation; amounts are in naira",
         "to apply one, call get_checkout_quote with promo_code: Chowdeck's calculation then gives the discount, which is shown before ordering",
       ],
       ...(lists.errors.length > 0 && { errors: lists.errors }),
@@ -658,7 +658,7 @@ class CheckoutService {
     const total = cart.total_price;
     if (isAmount(minimum) && isAmount(total) && total < minimum) {
       throw new CheckoutRefusedError(
-        `the cart total_price (${total}) is below this restaurant's minimum_order_amount (${minimum}); both are raw Chowdeck amounts`,
+        `the cart total (${formatNaira(total)}) is below this restaurant's minimum order (${formatNaira(minimum)})`,
       );
     }
 
@@ -700,7 +700,7 @@ class CheckoutService {
             formula:
               "cart.total_price + quote.final_delivery_amount + quote.final_service_amount",
             source:
-              "computed by ChowBot from raw Chowdeck amounts; not a total returned by Chowdeck",
+              "computed by ChowBot from Chowdeck's cart total and fees; not a total returned by Chowdeck",
           }
         : null;
 

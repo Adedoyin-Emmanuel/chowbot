@@ -17,9 +17,8 @@ const placeOrderSchema = {
   address_id: z.number().int().positive().describe("The delivery address used for the quote, from list_addresses"),
   quoted_total: z
     .number()
-    .int()
     .positive()
-    .describe("computed_total.amount from get_checkout_quote, as shown to the user; nothing is sent if the total has changed"),
+    .describe("The computed_total from get_checkout_quote in naira, as shown to the user (e.g. 6518.37); nothing is sent if the total has changed"),
   payment_channel: z
     .enum(ORDER_PAYMENT_CHOICES)
     .describe(
@@ -65,7 +64,7 @@ export const registerOrderPlacementTools = (
     {
       title: "Place order",
       description:
-        "Place a real Chowdeck delivery order from the signed-in user's cart at a restaurant. Call it only when the user has asked to place the order, after they have seen the get_checkout_quote total; do not ask them to confirm again. The cart, address, restaurant, fees and any promo code are re-checked with Chowdeck first, and nothing is sent if the total differs from quoted_total. The order carries the notes saved on the cart (set_cart_notes) and any tip or gift given here; never choose a tip for the user. For an online channel the result includes a payment_link to give the user; pay_for_me returns pay_for_me_link; wallet is charged by Chowdeck at creation. Statuses and totals come from Chowdeck's order record. Sent once and never retried: after outcome unknown_outcome, never call it again until the user has checked their Chowdeck orders.",
+        "Place a real Chowdeck delivery order from the signed-in user's cart at a restaurant. Call it only when the user has asked to place the order, after they have seen the get_checkout_quote total; do not ask them to confirm again. The cart, address, restaurant, fees and any promo code are re-checked with Chowdeck first, and nothing is sent if the total differs from quoted_total. The order carries the notes saved on the cart (set_cart_notes) and any tip or gift given here; never choose a tip for the user. For an online channel the result includes a payment_link to give the user; pay_for_me returns pay_for_me_link; wallet is charged by Chowdeck at creation. Statuses and totals come from Chowdeck's order record. Until an order is paid the user can change anything (notes, tip, bags, items, address, payment channel): update the cart and call place_order again; the unpaid order stays unpaid and is never charged, as on the Chowdeck website. A paid order is final. Sent once and never retried; after unknown_outcome, follow its next_step.",
       inputSchema: z.object(placeOrderSchema),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },

@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
-import { textResult } from "../../utils/tool-result";
+import { jsonResult, textResult } from "../../utils/tool-result";
 import { NotSignedInError } from "../addresses/service";
 import CheckoutService, { CheckoutRefusedError } from "./service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
@@ -79,7 +79,7 @@ export const registerCheckoutTools = (
     {
       title: "Get checkout quote",
       description:
-        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Show the user computed_total (and any promo discount and tip); place_order needs computed_total.amount as quoted_total. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. Amounts are Chowdeck's raw values without unit conversion; computed_total and estimated_total_after_discount are calculated by ChowBot, not returned by Chowdeck.",
+        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Show the user computed_total (and any promo discount and tip); place_order takes that total as quoted_total. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. Amounts are in naira; computed_total and estimated_total_after_discount are calculated by ChowBot from Chowdeck's fees.",
       inputSchema: z.object({
         ...getCheckoutQuoteSchema,
         promo_code: promoCodeInput.optional().describe("A promo code on the user's account to apply in this quote"),
@@ -94,9 +94,7 @@ export const registerCheckoutTools = (
     async ({ restaurant_id, address_id, promo_code }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(
-          JSON.stringify(await service.getQuote(restaurant_id, address_id, promo_code)),
-        );
+        return jsonResult(await service.getQuote(restaurant_id, address_id, promo_code));
       } catch (error) {
         return failure("get checkout quote", "get_checkout_quote", error);
       }
@@ -117,7 +115,7 @@ export const registerCheckoutTools = (
     async ({ restaurant_id }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(JSON.stringify(await service.listPromoCodes(restaurant_id)));
+        return jsonResult(await service.listPromoCodes(restaurant_id));
       } catch (error) {
         return failure("list promo codes", "list_promo_codes", error);
       }

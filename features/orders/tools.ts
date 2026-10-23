@@ -1,21 +1,32 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/server";
 
-import OrderService, { ORDER_LIST_STATUSES, type LiveTracking, type OrderDetail, type OrderTimelineResult } from "./service";
-import { classifyOrder, orderAmounts, reportResult, notSentReport, stateFromChowdeck, stateUnavailable } from "./status";
-import { validateNote } from "../carts/notes";
-import { isRecord } from "../../utils/object";
+import OrderService, {
+  ORDER_LIST_STATUSES,
+  type LiveTracking,
+  type OrderDetail,
+  type OrderTimelineResult,
+} from "./service";
+import {
+  classifyOrder,
+  orderAmounts,
+  reportResult,
+  notSentReport,
+  stateUnavailable,
+  stateFromChowdeck,
+} from "./status";
 import { logger } from "../../utils/logger";
-import { textResult } from "../../utils/tool-result";
+import { isRecord } from "../../utils/object";
+import { validateNote } from "../carts/notes";
 import type { UserSession } from "../../lib/session";
 import { NotSignedInError } from "../addresses/service";
+import { jsonResult, textResult } from "../../utils/tool-result";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
 const SESSION_UNAVAILABLE =
   "Orders are not available on this connection: the server cannot identify individual users on this transport.";
 
-const AMOUNTS_NOTE =
-  "Amounts are Chowdeck's raw values, passed through without unit conversion.";
+const AMOUNTS_NOTE = "Amounts are in naira.";
 
 /*
  * A positive integer or a short path-safe string, normalized to a string.
@@ -66,14 +77,17 @@ export const registerOrderTools = (
       title: "List orders",
       description: `List the signed-in user's Chowdeck orders as summaries: completed orders (the default), or active ones (orders in progress; Chowdeck also lists unpaid orders here, with status "abandoned"). Statuses are passed through as Chowdeck reports them; use track_order for one order's progress. ${AMOUNTS_NOTE}`,
       inputSchema: z.object({
-        status: z.enum(ORDER_LIST_STATUSES).default("completed").describe("completed (order history) or active (orders in progress)"),
+        status: z
+          .enum(ORDER_LIST_STATUSES)
+          .default("completed")
+          .describe("completed (order history) or active (orders in progress)"),
       }),
       annotations: READ_ONLY,
     },
     async ({ status }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(JSON.stringify(await service.listOrders(status)));
+        return jsonResult(await service.listOrders(status));
       } catch (error) {
         return failure("list orders", "list_orders", error);
       }
@@ -95,18 +109,20 @@ export const registerOrderTools = (
         const classification = classifyOrder(order);
         const amounts = orderAmounts(order);
         // Notes are used internally to verify placed orders, not listed.
-        const { customer_vendor_note: _vendorNote, customer_delivery_note: _deliveryNote, ...listed } = order;
-        return textResult(
-          JSON.stringify({
-            order: listed,
-            payment_state: {
-              state: classification.state,
-              detail: classification.reason,
-              source: "Chowdeck's order record, read just now",
-            },
-            ...(amounts && { amount: amounts }),
-          }),
-        );
+        const {
+          customer_vendor_note: _vendorNote,
+          customer_delivery_note: _deliveryNote,
+          ...listed
+        } = order;
+        return jsonResult({
+          order: listed,
+          payment_state: {
+            state: classification.state,
+            detail: classification.reason,
+            source: "Chowdeck's order record, read just now",
+          },
+          ...(amounts && { amount: amounts }),
+        });
       } catch (error) {
         return failure("get order", "get_order", error);
       }
@@ -125,9 +141,7 @@ export const registerOrderTools = (
     async ({ order_id }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(
-          JSON.stringify(await service.getOrderTimeline(String(order_id))),
-        );
+        return jsonResult(await service.getOrderTimeline(String(order_id)));
       } catch (error) {
         return failure("get order timeline", "get_order_timeline", error);
       }
@@ -152,18 +166,31 @@ export const registerOrderTools = (
           return await read();
         } catch (error) {
           if (error instanceof NotSignedInError) throw error;
-          unavailable.push(`${part}: ${error instanceof ChowdeckApiError ? error.message : "unexpected error"}`);
+          unavailable.push(
+            `${part}: ${error instanceof ChowdeckApiError ? error.message : "unexpected error"}`,
+          );
           return undefined;
         }
       };
       try {
-        const detail = await attempt("order record", () => service.getOrder(id));
-        const timeline = await attempt("progress steps", () => service.getOrderTimeline(id));
-        const live = await attempt("live tracking", () => service.getLiveTracking(id));
+        const detail = await attempt("order record", () =>
+          service.getOrder(id),
+        );
+        const timeline = await attempt("progress steps", () =>
+          service.getOrderTimeline(id),
+        );
+        const live = await attempt("live tracking", () =>
+          service.getLiveTracking(id),
+        );
         if (!detail && !timeline && !live) {
-          return textResult(`Failed to track order: Chowdeck gave none of the order's details (${unavailable.join("; ")}).`, true);
+          return textResult(
+            `Failed to track order: Chowdeck gave none of the order's details (${unavailable.join("; ")}).`,
+            true,
+          );
         }
-        return textResult(JSON.stringify(trackingReport(order_id, detail?.order, timeline, live, unavailable)));
+        return jsonResult(
+          trackingReport(order_id, detail?.order, timeline, live, unavailable),
+        );
       } catch (error) {
         return failure("track order", "track_order", error);
       }
@@ -177,16 +204,33 @@ export const registerOrderTools = (
         "Change or clear the delivery (rider) note on one of the signed-in user's Chowdeck orders that was already placed, as the Chowdeck website does. Sent once; the change counts only when Chowdeck's order record, read again, shows the new note. A cancelled order is refused, and Chowdeck may refuse others (for example once the order is delivered). Up to 500 characters (ChowBot's limit). For an order not yet placed, use set_cart_notes instead.",
       inputSchema: z.object({
         ...orderIdSchema,
-        delivery_note: z.string().max(4000).nullable().describe("The new note for the rider; null or \"\" clears it"),
+        delivery_note: z
+          .string()
+          .max(4000)
+          .nullable()
+          .describe('The new note for the rider; null or "" clears it'),
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
     async ({ order_id, delivery_note }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return await updateDeliveryNote(service, String(order_id), delivery_note);
+        return await updateDeliveryNote(
+          service,
+          String(order_id),
+          delivery_note,
+        );
       } catch (error) {
-        return failure("change the rider note", "update_order_delivery_note", error);
+        return failure(
+          "change the rider note",
+          "update_order_delivery_note",
+          error,
+        );
       }
     },
   );
@@ -194,43 +238,66 @@ export const registerOrderTools = (
 
 const ACTION = "update_order_delivery_note";
 const quoted = (note: string) => (note ? `"${note}"` : "none");
-const noteOf = (order: OrderDetail) => (typeof order.customer_delivery_note === "string" ? order.customer_delivery_note : "");
+const noteOf = (order: OrderDetail) =>
+  typeof order.customer_delivery_note === "string"
+    ? order.customer_delivery_note
+    : "";
 
 /*
  * Only a re-read of the order after the change confirms the note.
  */
-const updateDeliveryNote = async (service: OrderService, orderId: string, input: string | null) => {
+const updateDeliveryNote = async (
+  service: OrderService,
+  orderId: string,
+  input: string | null,
+) => {
   const checked = validateNote(input);
   if (!checked.ok) {
-    return notSentReport(ACTION, `Rider note not changed: the note ${checked.error}.`, "Shorten or correct the note and try again.");
+    return notSentReport(
+      ACTION,
+      `Rider note not changed: the note ${checked.error}.`,
+      "Shorten or correct the note and try again.",
+    );
   }
   const note = checked.value;
   const numericId = Number(orderId);
   const stateOf = (order: OrderDetail) =>
-    Number.isSafeInteger(numericId) ? stateFromChowdeck(numericId, classifyOrder(order)) : null;
+    Number.isSafeInteger(numericId)
+      ? stateFromChowdeck(numericId, classifyOrder(order))
+      : null;
 
   let before: OrderDetail;
   try {
     ({ order: before } = await service.getOrder(orderId));
   } catch (error) {
     if (error instanceof NotSignedInError) throw error;
-    const reason = error instanceof ChowdeckApiError ? error.message : "unexpected error";
+    const reason =
+      error instanceof ChowdeckApiError ? error.message : "unexpected error";
     return notSentReport(
       ACTION,
       `Rider note not changed: ChowBot could not read the order from Chowdeck (${reason}). Nothing was sent.`,
       "Try again later.",
-      Number.isSafeInteger(numericId) ? stateUnavailable(numericId, reason) : null,
+      Number.isSafeInteger(numericId)
+        ? stateUnavailable(numericId, reason)
+        : null,
     );
   }
   if (classifyOrder(before).state === "cancelled") {
-    return notSentReport(ACTION, "Rider note not changed: Chowdeck's order record shows this order cancelled. Nothing was sent.", "Nothing to change.", stateOf(before));
+    return notSentReport(
+      ACTION,
+      "Rider note not changed: Chowdeck's order record shows this order cancelled. Nothing was sent.",
+      "Nothing to change.",
+      stateOf(before),
+    );
   }
   if (noteOf(before) === note) {
     return reportResult({
       action: ACTION,
       outcome: "unchanged",
       message: `Chowdeck's order record already has the rider note ${quoted(note)}. Nothing was sent.`,
-      chowdeck_confirmed: [`the rider note on Chowdeck's order record is ${quoted(note)}`],
+      chowdeck_confirmed: [
+        `the rider note on Chowdeck's order record is ${quoted(note)}`,
+      ],
       status: stateOf(before),
       next_step: "Nothing to change.",
       outcome_uncertain: false,
@@ -242,13 +309,19 @@ const updateDeliveryNote = async (service: OrderService, orderId: string, input:
   let rejected = false;
   try {
     const response = await service.sendDeliveryNote(orderId, note);
-    if (!isRecord(response) || response.status !== "success") requestDetail = "Chowdeck's answer was not a success";
+    if (!isRecord(response) || response.status !== "success")
+      requestDetail = "Chowdeck's answer was not a success";
   } catch (error) {
     if (error instanceof NotSignedInError) throw error;
     const definite =
-      error instanceof ChowdeckApiError && error.kind === "http" && error.status !== undefined && error.status < 500 && error.status !== 401;
+      error instanceof ChowdeckApiError &&
+      error.kind === "http" &&
+      error.status !== undefined &&
+      error.status < 500 &&
+      error.status !== 401;
     rejected = definite;
-    requestDetail = error instanceof ChowdeckApiError ? error.message : "unexpected error";
+    requestDetail =
+      error instanceof ChowdeckApiError ? error.message : "unexpected error";
   }
   if (rejected) {
     return reportResult(
@@ -258,7 +331,8 @@ const updateDeliveryNote = async (service: OrderService, orderId: string, input:
         message: `Rider note not changed: Chowdeck refused the change (${requestDetail}).`,
         chowdeck_confirmed: [`Chowdeck refused the change (${requestDetail})`],
         status: stateOf(before),
-        next_step: "Tell the user Chowdeck did not accept the change; they can contact the rider or Chowdeck from the app.",
+        next_step:
+          "Tell the user Chowdeck did not accept the change; they can contact the rider or Chowdeck from the app.",
         outcome_uncertain: false,
         safe_to_retry: false,
       },
@@ -277,7 +351,9 @@ const updateDeliveryNote = async (service: OrderService, orderId: string, input:
       action: ACTION,
       outcome: "note_changed",
       message: `The rider note on order ${orderId} is now ${quoted(note)}: Chowdeck's order record confirms it.`,
-      chowdeck_confirmed: [`the rider note on Chowdeck's order record is ${quoted(note)}`],
+      chowdeck_confirmed: [
+        `the rider note on Chowdeck's order record is ${quoted(note)}`,
+      ],
       status: stateOf(after),
       next_step: "Tell the user the rider note was changed.",
       outcome_uncertain: false,
@@ -289,7 +365,11 @@ const updateDeliveryNote = async (service: OrderService, orderId: string, input:
       action: ACTION,
       outcome: "unconfirmed",
       message: `The rider note change is not confirmed${requestDetail ? ` (${requestDetail})` : ""}: ${after ? `Chowdeck's order record still shows ${quoted(noteOf(after))}` : "the order could not be read again"}.`,
-      chowdeck_confirmed: after ? [`the rider note on Chowdeck's order record is ${quoted(noteOf(after))}`] : [],
+      chowdeck_confirmed: after
+        ? [
+            `the rider note on Chowdeck's order record is ${quoted(noteOf(after))}`,
+          ]
+        : [],
       status: after ? stateOf(after) : null,
       next_step:
         "Do not tell the user the note was changed. They can check the order in the Chowdeck app; sending the same note again only repeats the same change.",
@@ -313,7 +393,10 @@ const trackingReport = (
 ) => {
   const classification = order && classifyOrder(order);
   const numericId = Number(orderId);
-  const status = classification && Number.isSafeInteger(numericId) ? stateFromChowdeck(numericId, classification) : undefined;
+  const status =
+    classification && Number.isSafeInteger(numericId)
+      ? stateFromChowdeck(numericId, classification)
+      : undefined;
   const link = order?.tracking_url;
   const nextStep = !classification
     ? "Chowdeck's order record could not be read, so the payment state is unknown. Try again later, or use the Chowdeck app."
@@ -329,16 +412,24 @@ const trackingReport = (
     status: status ?? {
       order_state: "unknown",
       source: "none: Chowdeck's order record could not be read",
-      detail: "the payment state is unknown; this does not mean the order is unpaid, paid or cancelled",
+      detail:
+        "the payment state is unknown; this does not mean the order is unpaid, paid or cancelled",
     },
     ...(order && {
       order_status: order.status ?? null,
       ...(order.vendor_name !== undefined && { restaurant: order.vendor_name }),
-      ...(order.estimated_delivery_time !== undefined && { estimated_delivery_time: order.estimated_delivery_time }),
-      ...(order.actual_delivery_time !== undefined && { actual_delivery_time: order.actual_delivery_time }),
+      ...(order.estimated_delivery_time !== undefined && {
+        estimated_delivery_time: order.estimated_delivery_time,
+      }),
+      ...(order.actual_delivery_time !== undefined && {
+        actual_delivery_time: order.actual_delivery_time,
+      }),
     }),
     tracking_link: link
-      ? { url: link, note: "Chowdeck's own tracking page for this order; share it only with people the user chooses" }
+      ? {
+          url: link,
+          note: "Chowdeck's own tracking page for this order; share it only with people the user chooses",
+        }
       : null,
     ...(live && { live_tracking: live }),
     ...(timeline && {
@@ -347,7 +438,8 @@ const trackingReport = (
         "These are Chowdeck's stages for the order, in order. Chowdeck lists every stage even before it happens (an unpaid order listed them all, with no times), so a listed stage is not proof it was reached.",
     }),
     ...(unavailable.length > 0 && { unavailable }),
-    source: "Chowdeck: GET /customer/order/{id}, /timeline and /live-tracking, read just now",
+    source:
+      "Chowdeck: GET /customer/order/{id}, /timeline and /live-tracking, read just now",
     next_step: nextStep,
   };
 };

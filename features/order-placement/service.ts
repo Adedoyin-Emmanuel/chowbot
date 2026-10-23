@@ -72,6 +72,14 @@ const isDefiniteRejection = (error: unknown): error is ChowdeckApiError =>
 const isPositiveId = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) > 0;
 
+/*
+ * As on the website, an unpaid order is changed by placing a new one from the
+ * cart: each attempt in the user's capture was a new order, and Chowdeck
+ * leaves the earlier unpaid one unpaid ("abandoned").
+ */
+const CHANGE_BEFORE_PAYING =
+  "Until it is paid, the user can change anything (restaurant or rider note, tip, bags, items, address or payment channel): update the cart or arguments and call place_order again. The earlier unpaid order stays unpaid and is never charged; give the user only the newest payment link.";
+
 const refused = (message: string, nextStep: string) => notSentReport("place_order", message, nextStep);
 
 const quotedNote = (value: unknown) =>
@@ -133,10 +141,10 @@ class OrderPlacementService {
       throw error;
     }
 
-    if (quote.computedTotal !== args.quoted_total) {
+    if (quote.computedTotal !== Math.round(args.quoted_total * 100)) {
       return refused(
-        `Order not placed: the total is now ${formatNaira(quote.computedTotal)}, not the ${formatNaira(args.quoted_total)} quoted. Nothing was sent.`,
-        `Tell the user the new total. Only if they still want the order, call place_order again with quoted_total: ${quote.computedTotal}.`,
+        `Order not placed: the total is now ${formatNaira(quote.computedTotal)}, not the ${formatNaira(Math.round(args.quoted_total * 100))} quoted. Nothing was sent.`,
+        `Tell the user the new total. Only if they still want the order, call place_order again with quoted_total: ${quote.computedTotal / 100}.`,
       );
     }
 
@@ -307,7 +315,9 @@ class OrderPlacementService {
         status: null,
         ...(found && found.length > 1 && { possible_orders: found }),
         next_step:
-          "Do not place the order again. Ask the user to check their orders in the Chowdeck app (or list_orders with status active) first; only if no new order is there should they try again.",
+          placed.args.payment_channel === "wallet"
+            ? "A wallet order is charged when it is created, so do not place it again until list_orders (status active) or the wallet balance shows whether this one went through."
+            : "No payment was taken. Check list_orders with status active: if this order is there, use it (start_payment gives its payment link); if not, place it again. An extra unpaid order is never charged.",
         outcome_uncertain: true,
         safe_to_retry: false,
       },
@@ -382,22 +392,22 @@ class OrderPlacementService {
     if (choice === "pay_for_me") {
       if (!payForMeLink) warnings.push("Chowdeck returned no pay-for-me link in the expected form; the user can share it from the Chowdeck app.");
       nextStep =
-        "Give the user pay_for_me_link to share with the person who will pay (anyone with it can pay the order). Check payment later with get_order. Do not place this order again.";
+        `Give the user pay_for_me_link to share with the person who will pay (anyone with it can pay the order). Check payment later with get_order. ${CHANGE_BEFORE_PAYING} A pay-for-me link already shared can still be paid, so tell the payer which link to use.`;
     } else if (choice === "wallet") {
       if (!paid) warnings.push("Chowdeck's order record does not show the wallet payment as successful yet.");
       nextStep = paid
-        ? "Tell the user the order is placed and paid from their wallet. Follow it with track_order. Do not place this order again."
-        : "Do not pay this order another way and do not place it again. Check it with get_order until Chowdeck shows whether the wallet payment went through.";
+        ? "Tell the user the order is placed and paid from their wallet. Follow it with track_order. Do not place it again: it is paid."
+        : "Do not pay this order another way or place it again yet: a wallet order is charged at creation. Check it with get_order until Chowdeck shows whether the wallet payment went through.";
     } else if (read && totalMatches) {
       payment = await this.payments.startFor(orderId, choice as SupportedPaymentChannel, read, undefined, pocketTag);
       nextStep =
         payment.outcome === "payment_link_generated"
-          ? `${payment.next_step} Do not place this order again.`
-          : `The order exists but no payment link was generated (see payment). ${payment.next_step} Do not place this order again.`;
+          ? `${payment.next_step} ${CHANGE_BEFORE_PAYING}`
+          : `The order exists but no payment link was generated (see payment). ${payment.next_step} ${CHANGE_BEFORE_PAYING}`;
     } else {
       nextStep = `The order exists and is unpaid; no payment was started. ${
         read ? "Show the user Chowdeck's total; if they want to pay it" : "Once get_order shows its total"
-      }, call start_payment with order_id ${orderId} and payment_channel ${choice}. Do not place this order again.`;
+      }, call start_payment with order_id ${orderId} and payment_channel ${choice}. ${CHANGE_BEFORE_PAYING}`;
     }
 
     const linked = payment?.outcome === "payment_link_generated";

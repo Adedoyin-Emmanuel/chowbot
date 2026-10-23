@@ -1,3 +1,4 @@
+import { inNaira } from "../../helpers/naira";
 import {
   test,
   expect,
@@ -439,7 +440,7 @@ describe("list_orders", () => {
     expect(Object.fromEntries(received[0]!.query)).toEqual({
       status: "completed",
     });
-    expect(JSON.parse(text)).toEqual({
+    expect(JSON.parse(text)).toEqual(inNaira({
       status_filter: "completed",
       returned: 2,
       orders: [
@@ -468,7 +469,7 @@ describe("list_orders", () => {
           created_at: "2026-10-01T12:00:00.000Z",
         },
       ],
-    });
+    }));
     expectNoPrivateData(text);
   });
 
@@ -555,9 +556,10 @@ describe("get_order", () => {
       detail: "Chowdeck's order record shows the payment succeeded (order status success, payment status success)",
       source: "Chowdeck's order record, read just now",
     });
-    expect(parsed.amount).toMatchObject({ total: "₦11,040.00", total_raw: 1104000, discounts: { discount_price: "₦800.00" } });
+    expect(parsed.amount).toMatchObject({ total: "₦11,040.00", discounts: { discount_price: "₦800.00" } });
+    expect(parsed.amount).not.toHaveProperty("total_raw");
     const { payment_state: _state, amount: _amount, ...rest } = parsed;
-    expect(rest).toEqual({
+    expect(rest).toEqual(inNaira({
       order: {
         id: ORDER_ID,
         vendor_id: 4401,
@@ -642,7 +644,7 @@ describe("get_order", () => {
           },
         ],
       },
-    });
+    }));
     expectNoPrivateData(text);
     expect(text).not.toContain("vendor_price_per_quantity");
     expect(text).not.toContain("ORDER_CREATED");
@@ -690,10 +692,10 @@ describe("get_order", () => {
     const parsed = JSON.parse(textOf(await getOrder()));
 
     expect(parsed.order.status).toBe("some_new_status");
-    expect(parsed.order.payment).toEqual({
+    expect(parsed.order.payment).toEqual(inNaira({
       status: "pending",
       amount: 1104000,
-    });
+    }));
   });
 
   test.each([

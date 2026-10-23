@@ -864,3 +864,83 @@ describe("add_address duplicate handling", () => {
     expect(received).toHaveLength(0);
   });
 });
+
+/*
+ * The website's address switcher (from the user's capture): POST
+ * /customer/address/set-active {addressId}, then the list shows is_current.
+ */
+describe("set_active_address", () => {
+  const HOME = 1870516;
+  const WORK = 3976486;
+  const addresses = (current: number) => () =>
+    Response.json({
+      status: "success",
+      data: [HOME, WORK].map((id) => ({ id, pretty_name: `Address ${id}`, is_active: true, is_current: id === current, coordinate: { x: 3.28, y: 6.68 } })),
+    });
+  const switchTo = async (address_id: number, timeoutMs?: number) =>
+    callTool(serverWith(await signedInSession(), timeoutMs), "set_active_address", { address_id });
+
+  test("switches with the website's payload and confirms it from the re-read list", async () => {
+    let current = HOME;
+    routeAll({
+      "GET /customer/address": () => addresses(current)(),
+      "POST /customer/address/set-active": () => {
+        current = (received.at(-1)!.body as { addressId: number }).addressId;
+        return Response.json({ status: "success", message: "Address set as current active address successfully" });
+      },
+    });
+
+    const result = await switchTo(WORK);
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(calls("POST", "/customer/address/set-active").map((r) => r.body)).toEqual([{ addressId: WORK }]);
+    expect(parsed).toMatchObject({ address_id: WORK, status: "activated", address: { id: WORK, is_current: true } });
+    expect(textOf(result)).not.toContain("coordinate");
+  });
+
+  test("sends nothing when the address is already active", async () => {
+    routeAll({ "GET /customer/address": addresses(WORK) });
+
+    const parsed = JSON.parse(textOf(await switchTo(WORK)));
+
+    expect(parsed.status).toBe("already_active");
+    expect(calls("POST", "/customer/address/set-active")).toHaveLength(0);
+  });
+
+  test("refuses an address that is not saved on the account, sending nothing", async () => {
+    routeAll({ "GET /customer/address": addresses(HOME) });
+
+    const result = await switchTo(999);
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(textOf(result)).status).toBe("not_saved");
+    expect(calls("POST", "/customer/address/set-active")).toHaveLength(0);
+  });
+
+  test("does not claim the switch when the re-read list still shows another address current", async () => {
+    routeAll({
+      "GET /customer/address": addresses(HOME),
+      "POST /customer/address/set-active": () => Response.json({ status: "success", message: "Address set as current active address successfully" }),
+    });
+
+    const result = await switchTo(WORK);
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(textOf(result))).toMatchObject({ status: "unconfirmed" });
+    expect(calls("POST", "/customer/address/set-active")).toHaveLength(1);
+  });
+
+  test("reports Chowdeck's refusal without retrying", async () => {
+    routeAll({
+      "GET /customer/address": addresses(HOME),
+      "POST /customer/address/set-active": () => Response.json({ status: "failed", message: "Address not found" }, { status: 404 }),
+    });
+
+    const parsed = JSON.parse(textOf(await switchTo(WORK)));
+
+    expect(parsed.status).toBe("rejected");
+    expect(parsed.message).toContain("Address not found");
+    expect(calls("POST", "/customer/address/set-active")).toHaveLength(1);
+  });
+});

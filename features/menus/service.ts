@@ -61,7 +61,7 @@ const summarizeItem = (item: Record<string, unknown>) => {
   return summary;
 };
 
-// description is passed through only when present. Amounts are raw.
+// description is passed through only when present. Amounts are kobo; tool results show naira.
 const DETAIL_ITEM_FIELDS = [
   "id",
   "name",

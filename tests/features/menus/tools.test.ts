@@ -1,3 +1,4 @@
+import { inNaira } from "../../helpers/naira";
 import {
   test,
   expect,
@@ -98,7 +99,7 @@ describe("get_restaurant_menu", () => {
     expect(tool.annotations.readOnlyHint).toBe(true);
   });
 
-  test("returns concise menu items without inventing or converting fields", async () => {
+  test("returns concise menu items without inventing fields, prices in naira", async () => {
     upstreamResponse = menuResponse;
 
     const result = await callGetMenu({ restaurant_id: 11 });
@@ -107,7 +108,7 @@ describe("get_restaurant_menu", () => {
     expect(receivedUrl?.pathname).toBe("/customer/vendor/11/menu");
     expect([...(receivedUrl?.searchParams.keys() ?? [])]).toEqual([]);
 
-    expect(JSON.parse(result.content[0]!.text)).toEqual({
+    expect(JSON.parse(result.content[0]!.text)).toEqual(inNaira({
       restaurant_id: 11,
       returned: 4,
       truncated: false,
@@ -124,7 +125,7 @@ describe("get_restaurant_menu", () => {
         { id: 201, name: "Chapman", price: 150000, category: "Drinks" },
         { id: 301, name: "Uncategorised Item" },
       ],
-    });
+    }));
   });
 
   test("filters by category name and applies the limit", async () => {
@@ -355,7 +356,7 @@ describe("get_menu_item", () => {
     expect(tool.annotations.readOnlyHint).toBe(true);
   });
 
-  test("returns the item and its option groups with raw prices and selection limits", async () => {
+  test("returns the item and its option groups with naira prices and selection limits", async () => {
     upstreamResponse = () => Response.json(menuItemDetail());
 
     const result = await callGetMenuItem({ restaurant_id: 102556, menu_item_id: 4582971 });
@@ -363,7 +364,7 @@ describe("get_menu_item", () => {
     expect(result.isError).toBeUndefined();
     expect(receivedUrl?.pathname).toBe("/customer/vendor/102556/menu/4582971");
     expect([...(receivedUrl?.searchParams.keys() ?? [])]).toEqual([]);
-    expect(JSON.parse(result.content[0]!.text)).toEqual({
+    expect(JSON.parse(result.content[0]!.text)).toEqual(inNaira({
       restaurant_id: 102556,
       item: {
         id: 4582971,
@@ -408,7 +409,7 @@ describe("get_menu_item", () => {
           ],
         },
       ],
-    });
+    }));
   });
 
   test("returns an empty option list for an item without modifiers", async () => {

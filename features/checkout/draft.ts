@@ -1,3 +1,4 @@
+import { formatNaira } from "../../utils/money";
 import { isRecord } from "../../utils/object";
 
 /*
@@ -44,8 +45,7 @@ export type TipChoice =
   | { kind: "none"; reason: string }
   | { kind: "amount"; raw: number; naira: number; display: string };
 
-export const formatNaira = (raw: number) =>
-  `₦${(raw / 100).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export { formatNaira } from "../../utils/money";
 
 /*
  * Naira converted to raw x100 exactly once. More than two decimals are

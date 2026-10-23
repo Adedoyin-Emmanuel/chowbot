@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import RestaurantService from "./service";
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
-import { textResult } from "../../utils/tool-result";
+import { jsonResult, textResult } from "../../utils/tool-result";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
 const searchRestaurantsSchema = {
@@ -54,7 +54,7 @@ export const registerRestaurantTools = (
           page,
           limit,
         });
-        return textResult(JSON.stringify(result));
+        return jsonResult(result);
       } catch (error) {
         if (error instanceof ChowdeckApiError) {
           return textResult(`Failed to search restaurants: ${error.message}`, true);

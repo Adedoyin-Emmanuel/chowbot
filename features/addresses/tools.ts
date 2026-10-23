@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
-import { textResult } from "../../utils/tool-result";
+import { jsonResult, textResult } from "../../utils/tool-result";
 import AddressService, { NotSignedInError } from "./service";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import { MIN_PLACE_QUERY_LENGTH } from "./places";
@@ -48,7 +48,7 @@ export const registerAddressTools = (
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
         const result = await service.list();
-        return textResult(JSON.stringify(result));
+        return jsonResult(result);
       } catch (error) {
         if (error instanceof NotSignedInError) return textResult(NOT_SIGNED_IN, true);
         if (error instanceof ChowdeckApiError) {
@@ -59,6 +59,28 @@ export const registerAddressTools = (
           error instanceof Error ? error.name : typeof error,
         );
         return textResult("Failed to list addresses: unexpected error", true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_active_address",
+    {
+      title: "Switch the active delivery address",
+      description:
+        "Make one of the signed-in user's saved addresses (address_id from list_addresses) their active Chowdeck delivery address, as the website's address switcher does. Use it when the user asks to switch or change their address. Confirmed only when Chowdeck's address list, read again, shows it as current. Restaurant search, carts and quotes still take address_id explicitly, so pass the same address there.",
+      inputSchema: z.object({
+        address_id: z.number().int().positive().describe("The saved address to make active, from list_addresses"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ address_id }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        const result = await service.setActive(address_id);
+        return jsonResult(result, !["activated", "already_active"].includes(result.status));
+      } catch (error) {
+        return failure("switch the address", "set_active_address", error);
       }
     },
   );
@@ -82,7 +104,7 @@ export const registerAddressTools = (
     async ({ query }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(JSON.stringify(await service.searchPlaces(query)));
+        return jsonResult(await service.searchPlaces(query));
       } catch (error) {
         return failure("search for places", "search_address_places", error);
       }
@@ -119,7 +141,7 @@ export const registerAddressTools = (
     async ({ place_id, activate, confirm_duplicate }) => {
       if (!service) return textResult(SESSION_UNAVAILABLE, true);
       try {
-        return textResult(JSON.stringify(await service.create(place_id, activate, confirm_duplicate)));
+        return jsonResult(await service.create(place_id, activate, confirm_duplicate));
       } catch (error) {
         return failure("add the address", "add_address", error);
       }

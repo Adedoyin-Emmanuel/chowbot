@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import MenuService from "./service";
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
-import { textResult } from "../../utils/tool-result";
+import { jsonResult, textResult } from "../../utils/tool-result";
 import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 
 const getRestaurantMenuSchema = {
@@ -65,7 +65,7 @@ export const registerMenuTools = (
           category,
           limit,
         });
-        return textResult(JSON.stringify(result));
+        return jsonResult(result);
       } catch (error) {
         if (error instanceof ChowdeckApiError) {
           return textResult(`Failed to get restaurant menu: ${error.message}`, true);
@@ -84,7 +84,7 @@ export const registerMenuTools = (
     {
       title: "Get menu item details",
       description:
-        "Get one Chowdeck menu item with its option groups. minimum_selection > 0 marks a required group; minimum_selection and maximum_selection bound how many options may be chosen. Availability flags and prices are passed through as Chowdeck sends them, without unit conversion.",
+        "Get one Chowdeck menu item with its option groups. minimum_selection > 0 marks a required group; minimum_selection and maximum_selection bound how many options may be chosen. Availability flags are passed through as Chowdeck sends them; prices are in naira.",
       inputSchema: z.object(getMenuItemSchema),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -94,7 +94,7 @@ export const registerMenuTools = (
           restaurantId: restaurant_id,
           menuItemId: menu_item_id,
         });
-        return textResult(JSON.stringify(result));
+        return jsonResult(result);
       } catch (error) {
         if (error instanceof ChowdeckApiError) {
           return textResult(`Failed to get menu item: ${error.message}`, true);
