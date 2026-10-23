@@ -165,7 +165,7 @@ describe("start_payment", () => {
 
     expect(result.isError).toBe(true);
     expect(report).toMatchObject({ outcome: "unknown_outcome", outcome_uncertain: true, safe_to_retry: false, status: { order_state: "payment_pending" } });
-    expect(report.message).toContain("probably started");
+    expect(report.message).toContain("now shows an unfinished payment");
     expect(report.next_step).toContain("Do not start another payment straight away");
     expect(starts()).toHaveLength(1);
     expect(sent("GET", ORDER_PATH)).toHaveLength(2);

@@ -236,6 +236,40 @@ describe("place_order", () => {
     expect(sent("GET", "/customer/payment/channel")).toHaveLength(0);
   });
 
+  test("a gift to a saved beneficiary fills in their details from Chowdeck", async () => {
+    scriptOrder();
+    route("GET /customer/beneficiary", () =>
+      Response.json({ status: "success", data: [{ id: 83041, full_name: "Aderonke", phone: "08146383826", email: "ronke@example.com", country_code: "NG", type: "gift_order" }] }),
+    );
+    route("POST /auth/phone/validate", () => Response.json({ status: "success", data: { is_valid: true } }));
+
+    const report = parse(await place({ gift: { beneficiary_id: 83041, donor_name: "Adedoyin", message: "Enjoy" } }));
+
+    expect(report.outcome).toBe("order_created");
+    expect(orderPosts()[0]!.body).toMatchObject({
+      gift_recipient: { name: "Aderonke", phone: "08146383826", email: "ronke@example.com", country_code: "NG", donor_name: "Adedoyin", message: "Enjoy" },
+    });
+    expect(report.gift_for).toBe("Aderonke");
+  });
+
+  test("an unknown beneficiary sends nothing", async () => {
+    scriptOrder();
+    route("GET /customer/beneficiary", () => Response.json({ status: "success", data: [] }));
+
+    const report = parse(await place({ gift: { beneficiary_id: 1, donor_name: "Adedoyin" } }));
+
+    expect(report.outcome).toBe("not_sent");
+    expect(report.message).toContain("list_beneficiaries");
+    expect(orderPosts()).toHaveLength(0);
+  });
+
+  test("a gift needs a beneficiary or the recipient's name and phone", async () => {
+    const result = await place({ gift: { donor_name: "Adedoyin" } });
+
+    expect(result.isError).toBe(true);
+    expect(mock.received).toHaveLength(0);
+  });
+
   test("wallet checks the balance first and reports payment only from the order record", async () => {
     scriptOrder();
     route("GET /customer/wallet", () => Response.json({ status: "success", data: { total_balance: 900000, currency: "NGN" } }));

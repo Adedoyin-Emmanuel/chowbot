@@ -35,15 +35,24 @@ export const orderOptionsSchema = {
     .describe('"none", or the tip amount the user chose. Never choose a tip for the user.'),
   gift: z
     .object({
+      beneficiary_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("A saved recipient from list_beneficiaries; their name, phone and email are filled in"),
       donor_name: z.string().max(400).describe("Sender's name"),
-      name: z.string().max(400).describe("Recipient's name"),
-      phone: z.string().max(40).describe("Recipient's phone number"),
+      name: z.string().max(400).optional().describe("Recipient's name; not needed with beneficiary_id"),
+      phone: z.string().max(40).optional().describe("Recipient's phone number; not needed with beneficiary_id"),
       country_code: z.string().max(10).optional().describe("Recipient's phone country, two letters; default NG"),
       email: z.string().max(400).optional(),
       message: z.string().max(2000).optional().describe("Gift message"),
       save_as_beneficiary: z.boolean().optional().describe("Save the recipient as a beneficiary; only if the user asks"),
     })
     .strict()
+    .refine((gift) => gift.beneficiary_id !== undefined || (gift.name !== undefined && gift.phone !== undefined), {
+      message: "give beneficiary_id, or the recipient's name and phone",
+    })
     .optional()
     .describe("Send this order as a gift, delivered to the cart's address"),
 };
@@ -79,7 +88,7 @@ export const registerCheckoutTools = (
     {
       title: "Get checkout quote",
       description:
-        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Show the user computed_total (and any promo discount and tip); place_order takes that total as quoted_total. Each call asks Chowdeck for a new delivery-fee quote, which appears to create a fee record on Chowdeck's side, so call it once per checkout rather than repeatedly. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. Amounts are in naira; computed_total and estimated_total_after_discount are calculated by ChowBot from Chowdeck's fees.",
+        "Quote delivery and service fees for the signed-in user's cart at a restaurant, delivered to one of their saved addresses. Does not place an order or take payment. Show the user computed_total (and any promo discount and tip), then ask about everything in checkout_details.ask_the_user_about in one message, saying what is already set; place_order takes the total as quoted_total. Each call asks Chowdeck for a new delivery-fee quote, so call it once per checkout rather than repeatedly. With promo_code (a code on the user's account, see list_promo_codes), Chowdeck's discount calculation runs with this quote's delivery fee and the result is shown in promo; the quote is orderable only if Chowdeck returns a discount for the code. Amounts are in naira; computed_total and estimated_total_after_discount are calculated by ChowBot from Chowdeck's fees.",
       inputSchema: z.object({
         ...getCheckoutQuoteSchema,
         promo_code: promoCodeInput.optional().describe("A promo code on the user's account to apply in this quote"),
@@ -97,6 +106,26 @@ export const registerCheckoutTools = (
         return jsonResult(await service.getQuote(restaurant_id, address_id, promo_code));
       } catch (error) {
         return failure("get checkout quote", "get_checkout_quote", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_beneficiaries",
+    {
+      title: "List gift recipients",
+      description:
+        "List the people saved on the signed-in user's Chowdeck account as gift recipients (beneficiaries). To send an order to one, pass their id as gift.beneficiary_id to place_order with the sender's name; the order is delivered to the cart's address. Read-only.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        const beneficiaries = await service.listBeneficiaries();
+        return jsonResult({ returned: beneficiaries.length, beneficiaries });
+      } catch (error) {
+        return failure("list gift recipients", "list_beneficiaries", error);
       }
     },
   );

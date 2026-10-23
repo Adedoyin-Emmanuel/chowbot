@@ -64,6 +64,18 @@ const failure = (action: string, tool: string, error: unknown) => {
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
 
+/*
+ * Shown only once Chowdeck's record shows the order paid: before that there
+ * is nothing to deliver.
+ */
+const deliveryPinOf = (order: OrderDetail, state: string) =>
+  state === "payment_confirmed" && typeof order.delivery_pin === "string"
+    ? {
+        pin: order.delivery_pin,
+        note: "The rider asks for this PIN when handing over the order. The user should give it only to the rider, at delivery.",
+      }
+    : undefined;
+
 export const registerOrderTools = (
   server: McpServer,
   session?: UserSession,
@@ -98,7 +110,7 @@ export const registerOrderTools = (
     "get_order",
     {
       title: "Get order",
-      description: `Get one of the signed-in user's Chowdeck orders, freshly read from Chowdeck: status, items, amounts and payment state. Statuses are passed through as Chowdeck reports them; payment_state is ChowBot's reading of that record (paid only when Chowdeck's payment status is success). ${AMOUNTS_NOTE}`,
+      description: `Get one of the signed-in user's Chowdeck orders, freshly read from Chowdeck: status, items, amounts and payment state. Statuses are passed through as Chowdeck reports them; payment_state is ChowBot's reading of that record (paid only when Chowdeck's payment status is success). Once paid, delivery_pin is the PIN the rider asks for at handover. ${AMOUNTS_NOTE}`,
       inputSchema: z.object(orderIdSchema),
       annotations: READ_ONLY,
     },
@@ -112,10 +124,13 @@ export const registerOrderTools = (
         const {
           customer_vendor_note: _vendorNote,
           customer_delivery_note: _deliveryNote,
+          delivery_pin: _pin,
           ...listed
         } = order;
+        const pin = deliveryPinOf(order, classification.state);
         return jsonResult({
           order: listed,
+          ...(pin && { delivery_pin: pin }),
           payment_state: {
             state: classification.state,
             detail: classification.reason,
@@ -125,6 +140,39 @@ export const registerOrderTools = (
         });
       } catch (error) {
         return failure("get order", "get_order", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_delivery_pin",
+    {
+      title: "Get delivery PIN",
+      description:
+        "Get the delivery PIN for one of the signed-in user's paid Chowdeck orders: the code the rider asks for at handover. Read freshly from Chowdeck's order record; an unpaid or cancelled order has none to give.",
+      inputSchema: z.object(orderIdSchema),
+      annotations: READ_ONLY,
+    },
+    async ({ order_id }) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        const { order } = await service.getOrder(String(order_id));
+        const { state, reason } = classifyOrder(order);
+        const pin = deliveryPinOf(order, state);
+        if (pin) return jsonResult({ order_id, delivery_pin: pin.pin, note: pin.note });
+        return jsonResult(
+          {
+            order_id,
+            delivery_pin: null,
+            reason:
+              state === "payment_confirmed"
+                ? "Chowdeck's order record has no delivery PIN for this order"
+                : `there is no PIN to give before the order is paid: ${reason}`,
+          },
+          true,
+        );
+      } catch (error) {
+        return failure("get the delivery PIN", "get_delivery_pin", error);
       }
     },
   );
@@ -153,7 +201,7 @@ export const registerOrderTools = (
     {
       title: "Track order",
       description:
-        "Follow one of the signed-in user's Chowdeck orders, read freshly from Chowdeck: its payment state, Chowdeck's order status, the progress steps, the live delivery details (delivery status, rider and rider location when Chowdeck gives them) and the order's tracking link on chowdeck.com. Show the tracking link to the user as a clickable link; it is private to them, as anyone with it can follow the order. Each part is read once; a part Chowdeck cannot give is listed under unavailable, never guessed.",
+        "Follow one of the signed-in user's Chowdeck orders, read freshly from Chowdeck: its payment state, Chowdeck's order status, the progress steps, the live delivery details (delivery status, rider and rider location when Chowdeck gives them) the order's tracking link on chowdeck.com and, once Chowdeck shows the order paid, the delivery PIN the rider asks for at handover. Show the tracking link to the user as a clickable link; it is private to them, as anyone with it can follow the order. Each part is read once; a part Chowdeck cannot give is listed under unavailable, never guessed.",
       inputSchema: z.object(orderIdSchema),
       annotations: READ_ONLY,
     },
@@ -398,10 +446,11 @@ const trackingReport = (
       ? stateFromChowdeck(numericId, classification)
       : undefined;
   const link = order?.tracking_url;
+  const pin = order && classification ? deliveryPinOf(order, classification.state) : undefined;
   const nextStep = !classification
     ? "Chowdeck's order record could not be read, so the payment state is unknown. Try again later, or use the Chowdeck app."
     : classification.state === "payment_confirmed"
-      ? `Tell the user the order's status and delivery details as Chowdeck reports them${link ? ", and give them the tracking link as a clickable link" : ""}.`
+      ? `Tell the user the order's status and delivery details as Chowdeck reports them${link ? ", and give them the tracking link as a clickable link" : ""}${pin ? ", and their delivery PIN for the rider" : ""}.`
       : classification.state === "awaiting_payment"
         ? "Chowdeck shows no payment for this order yet. Tell the user it is unpaid; they can pay with start_payment or in the Chowdeck app, or leave it unpaid."
         : classification.state === "cancelled"
@@ -425,6 +474,7 @@ const trackingReport = (
         actual_delivery_time: order.actual_delivery_time,
       }),
     }),
+    ...(pin && { delivery_pin: pin }),
     tracking_link: link
       ? {
           url: link,

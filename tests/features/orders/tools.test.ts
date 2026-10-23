@@ -1215,3 +1215,61 @@ describe("pay-for-me link in get_order", () => {
     expect(parsed.order.pay_for_me_url).toBe(expected);
   });
 });
+
+/*
+ * The order record carries order_pin, the PIN the rider asks for (equal to
+ * the create response's delivery_pin in the user's capture).
+ */
+describe("delivery PIN", () => {
+  const paid = { order_pin: 7719, payment: { status: "success" } };
+  const unpaid = { order_pin: 7719, status: "abandoned", payment: {}, time_payment_confirmed: null };
+  const get = async () => JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+  const track = async () => JSON.parse(textOf(await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID })));
+
+  test("get_order and track_order give the PIN once Chowdeck shows the order paid", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse(paid));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+
+    const order = await get();
+    const tracked = await track();
+
+    expect(order.delivery_pin).toMatchObject({ pin: "7719" });
+    expect(order.order).not.toHaveProperty("delivery_pin");
+    expect(tracked.delivery_pin).toMatchObject({ pin: "7719", note: expect.stringContaining("only to the rider") });
+    expect(tracked.next_step).toContain("delivery PIN");
+  });
+
+  test("an unpaid order shows no PIN", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse(unpaid));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+
+    expect(await get()).not.toHaveProperty("delivery_pin");
+    expect(JSON.stringify(await track())).not.toContain("7719");
+  });
+});
+
+describe("get_delivery_pin", () => {
+  const pin = async () => callTool(serverFor(await signedIn()), "get_delivery_pin", { order_id: ORDER_ID });
+
+  test("gives the PIN of a paid order", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ order_pin: 7719, payment: { status: "success" } }));
+
+    const result = await pin();
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(textOf(result))).toMatchObject({ order_id: ORDER_ID, delivery_pin: "7719" });
+    expectOnlyGets();
+  });
+
+  test("gives none for an unpaid order, saying why", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ order_pin: 7719, status: "abandoned", payment: {}, time_payment_confirmed: null }));
+
+    const result = await pin();
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).not.toContain("7719");
+    expect(JSON.parse(textOf(result)).reason).toContain("before the order is paid");
+  });
+});

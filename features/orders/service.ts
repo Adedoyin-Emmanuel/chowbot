@@ -21,8 +21,9 @@ export type OrderListStatus = (typeof ORDER_LIST_STATUSES)[number];
 type Fields = Record<string, ScalarValue>;
 
 /*
- * Allowlists: nested objects, fee_id, order_pin, code, references and
- * user/customer/address IDs are never listed.
+ * Allowlists: nested objects, fee_id, code, references and
+ * user/customer/address IDs are never listed. order_pin is kept only as
+ * delivery_pin, which the tools show once the order is paid.
  */
 const SUMMARY_FIELDS = [
   "id",
@@ -239,6 +240,11 @@ class OrderService {
     }
     if (isRecord(data.payment)) {
       order.payment = pickScalarFields(data.payment, PAYMENT_FIELDS);
+    }
+    // The PIN the rider asks for at handover: order_pin, equal to the create response's delivery_pin.
+    const pin = data.order_pin ?? data.delivery_pin;
+    if ((Number.isSafeInteger(pin) && (pin as number) >= 0) || (typeof pin === "string" && /^\d{4,8}$/.test(pin))) {
+      order.delivery_pin = String(pin);
     }
     const tracking = trackingLinkOf(data.tracking_url);
     if (tracking) order.tracking_url = tracking;

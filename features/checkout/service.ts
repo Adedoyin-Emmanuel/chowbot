@@ -34,6 +34,10 @@ export const DISCOUNT_LIST_PATH = "/customer/discount";
 const PAYMENT_METHODS_PATH = "/customer/payment/methods";
 const DELIVERY_AMOUNT_PATH = "/customer/delivery/amount";
 export const PROMO_CODE_LIST_PATH = "/customer/promo-code";
+export const BENEFICIARY_PATH = "/customer/beneficiary";
+
+// The user's saved gift recipients (captured: GET /customer/beneficiary).
+const BENEFICIARY_FIELDS = ["id", "full_name", "phone", "email", "country_code", "type"] as const;
 const vendorPath = (restaurantId: number) => `/customer/vendor/${restaurantId}`;
 
 // The vendor's address_id is needed for the quote but is never returned.
@@ -90,7 +94,39 @@ export type CheckoutQuoteResult = {
   computed_total_unavailable_reason?: string;
   payment_methods: Record<string, ScalarValue>[] | null;
   quote: Record<string, ScalarValue | Record<string, ScalarValue>[]>;
+  checkout_details?: CheckoutDetails;
 };
+
+/*
+ * What the order would carry as things stand, and what the user has not
+ * been asked about yet. There is no checkout screen, so the assistant walks
+ * the user through these before placing the order.
+ */
+export type CheckoutDetails = {
+  restaurant_note: string | null;
+  rider_note: string | null;
+  brown_bags: number;
+  promo_code: string | null;
+  ask_the_user_about: string[];
+};
+
+const noteOf = (value: unknown) => (typeof value === "string" && value.trim() ? value : null);
+
+const checkoutDetailsOf = (raw: Record<string, unknown>, promoCode: string | undefined): CheckoutDetails => ({
+  restaurant_note: noteOf(raw.customer_vendor_note),
+  rider_note: noteOf(raw.customer_delivery_note),
+  brown_bags: typeof raw.bag_quantity === "number" ? raw.bag_quantity : 0,
+  promo_code: promoCode ?? null,
+  ask_the_user_about: [
+    "a note for the restaurant (set_cart_notes)",
+    "a note for the rider (set_cart_notes)",
+    "a tip for the rider, or none (place_order tip)",
+    "a promo code or voucher (list_promo_codes, then get_checkout_quote with promo_code)",
+    "brown bags (set_cart_bags)",
+    "whether it is a gift, e.g. for a saved beneficiary (list_beneficiaries)",
+    "how to pay: an online channel, wallet or pay for me (place_order payment_channel)",
+  ],
+});
 
 export type QuotePromo = {
   detail: string;
@@ -454,7 +490,12 @@ class CheckoutService {
     }
     const reasons = orderabilityProblems(result, cart, raw, vendor.fields.currency, quoteData.id);
     return {
-      result: { ...result, orderable: reasons.length === 0, ...(reasons.length > 0 && { not_orderable_reasons: reasons }) },
+      result: {
+        ...result,
+        orderable: reasons.length === 0,
+        ...(reasons.length > 0 && { not_orderable_reasons: reasons }),
+        checkout_details: checkoutDetailsOf(raw, result.promo?.status === "applied" ? result.promo.promo_code : undefined),
+      },
       feeId: quoteData.id,
       cart,
       raw,
@@ -744,6 +785,15 @@ class CheckoutService {
   }
 
   // The order is compared with total_balance, as the website displays it.
+  async listBeneficiaries() {
+    const body = await this.client.request(BENEFICIARY_PATH, { headers: await this.authHeaders() });
+    const entries = isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord) : undefined;
+    if (!entries || !entries.every((entry) => isPositiveId(entry.id) && typeof entry.full_name === "string")) {
+      throw new ChowdeckApiError("invalid_response", `GET ${BENEFICIARY_PATH} returned an unexpected response shape`);
+    }
+    return entries.map((entry) => pickScalarFields(entry, BENEFICIARY_FIELDS));
+  }
+
   async readWalletBalance() {
     const body = await this.client.request(WALLET_PATH, {
       headers: await this.authHeaders(),

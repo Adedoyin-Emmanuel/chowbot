@@ -871,3 +871,49 @@ describe("list_promo_codes", () => {
     expect(textOf(failed)).toContain("neither promo list could be read");
   });
 });
+
+/*
+ * Saved gift recipients, as captured: GET /customer/beneficiary.
+ */
+describe("list_beneficiaries", () => {
+  test("lists the account's saved recipients without account ids or timestamps", async () => {
+    route("GET /customer/beneficiary", () =>
+      Response.json({
+        status: "success",
+        message: "Beneficiaries fetched successfully",
+        data: [
+          { id: 83041, user_id: 523668, email: "ronke@example.com", full_name: "Aderonke", country_code: "NG", phone: "08146383826", created_at: "2026-08-13T13:12:46.000Z", type: "gift_order", metadata: null },
+        ],
+      }),
+    );
+
+    const result = await callTool(serverFor(await signedIn()), "list_beneficiaries", {});
+    const parsed = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed).toEqual({
+      returned: 1,
+      beneficiaries: [{ id: 83041, full_name: "Aderonke", phone: "08146383826", email: "ronke@example.com", country_code: "NG", type: "gift_order" }],
+    });
+    expect(textOf(result)).not.toContain("523668");
+  });
+
+  test("reports an unexpected shape as an error", async () => {
+    route("GET /customer/beneficiary", () => Response.json({ status: "success", data: {} }));
+
+    const result = await callTool(serverFor(await signedIn()), "list_beneficiaries", {});
+
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("checkout details in a quote", () => {
+  test("show what the order carries now and what to ask the user", async () => {
+    scriptCheckout({ cart: cartResponse({ bag_quantity: 1, customer_vendor_note: "No pepper", customer_delivery_note: "" }) });
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_checkout_quote", { restaurant_id: 102555, address_id: ADDRESS_ID })));
+
+    expect(parsed.checkout_details).toMatchObject({ restaurant_note: "No pepper", rider_note: null, brown_bags: 1, promo_code: null });
+    expect(parsed.checkout_details.ask_the_user_about.join(" ")).toMatch(/restaurant.*rider.*tip.*promo.*brown bags.*gift.*pay/s);
+  });
+});

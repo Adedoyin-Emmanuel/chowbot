@@ -280,7 +280,7 @@ class PaymentService {
         ? `The payment start's response was unclear (${detail}), but Chowdeck's order record now shows order ${orderId} paid.`
         : `The payment start's outcome is unknown (${detail}): a payment page may or may not exist, and ChowBot has no link to give. ${
             status.order_state === "payment_pending"
-              ? "Chowdeck's order record now shows an unfinished payment, so one was probably started."
+              ? "Chowdeck's order record now shows an unfinished payment for this order."
               : "Chowdeck's order record shows no payment in progress, which does not prove none was started."
           }`,
       chowdeck_confirmed: status.order_state === "unknown" ? [] : [status.detail],

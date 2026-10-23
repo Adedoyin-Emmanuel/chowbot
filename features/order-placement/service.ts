@@ -48,7 +48,14 @@ export type PlaceOrderArgs = {
   pocket_tag?: string;
   promo_code?: string;
   tip?: "none" | { amount_naira: number };
-  gift?: GiftRecipientInput;
+  gift?: GiftArg;
+};
+
+// A gift as place_order takes it: the recipient's details, or a saved beneficiary.
+export type GiftArg = Omit<GiftRecipientInput, "name" | "phone"> & {
+  beneficiary_id?: number;
+  name?: string;
+  phone?: string;
 };
 
 type Extras = { tipRaw?: number; gift?: GiftRecipient };
@@ -132,7 +139,7 @@ class OrderPlacementService {
     let extras: Extras;
     let quote: OrderQuote;
     try {
-      extras = this.extrasFromArgs(args);
+      extras = this.extrasFromArgs(args, await this.giftRecipient(args.gift));
       quote = await this.checkout.quoteForOrder(args.restaurant_id, args.address_id, args.promo_code);
     } catch (error) {
       if (error instanceof CheckoutRefusedError || error instanceof ChowdeckApiError) {
@@ -254,15 +261,41 @@ class OrderPlacementService {
     return this.createdReport(placed, data.id, data);
   }
 
-  private extrasFromArgs(args: PlaceOrderArgs): Extras {
+  /*
+   * Fills a beneficiary's name, phone, email and country from the user's
+   * saved list; the sender's name and message come from the arguments.
+   */
+  private async giftRecipient(gift: GiftArg | undefined): Promise<GiftRecipientInput | undefined> {
+    if (!gift) return undefined;
+    const { beneficiary_id: beneficiaryId, ...given } = gift;
+    if (beneficiaryId === undefined) {
+      if (given.name === undefined || given.phone === undefined) {
+        throw new CheckoutRefusedError("a gift needs a beneficiary_id, or the recipient's name and phone");
+      }
+      return { ...given, name: given.name, phone: given.phone };
+    }
+    const saved = (await this.checkout.listBeneficiaries()).find((entry) => entry.id === beneficiaryId);
+    if (!saved) throw new CheckoutRefusedError("that beneficiary is not saved on your account; call list_beneficiaries");
+    const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+    return {
+      donor_name: given.donor_name,
+      name: text(saved.full_name) ?? "",
+      phone: text(saved.phone) ?? "",
+      country_code: text(saved.country_code) ?? "NG",
+      ...(text(saved.email) && { email: text(saved.email) }),
+      ...(given.message !== undefined && { message: given.message }),
+    };
+  }
+
+  private extrasFromArgs(args: PlaceOrderArgs, giftInput: GiftRecipientInput | undefined): Extras {
     const extras: Extras = {};
     if (typeof args.tip === "object") {
       const tip = tipFromNaira(args.tip.amount_naira, { available: true, minimum: 0, maximum: 0 });
       if (!tip.ok) throw new CheckoutRefusedError(`the tip ${tip.error}`);
       if (tip.value.kind === "amount") extras.tipRaw = tip.value.raw;
     }
-    if (args.gift !== undefined) {
-      const gift = validateGiftRecipient(args.gift);
+    if (giftInput !== undefined) {
+      const gift = validateGiftRecipient(giftInput);
       if (!gift.ok) throw new CheckoutRefusedError(`the gift recipient's ${gift.error}`);
       extras.gift = gift.value;
     }
@@ -432,6 +465,7 @@ class OrderPlacementService {
       ...(payment && { payment }),
       ...(trackingLink && { tracking_link: trackingLink }),
       ...(payForMeLink && { pay_for_me_link: payForMeLink }),
+      ...(paid && typeof read?.order.delivery_pin === "string" && { delivery_pin: read.order.delivery_pin }),
       ...(warnings.length > 0 && { warnings }),
       next_step: nextStep,
       outcome_uncertain: false,
