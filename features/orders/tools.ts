@@ -69,6 +69,24 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
  * Shown only once Chowdeck's record shows the order paid: before that there
  * is nothing to deliver.
  */
+/*
+ * Delivered once Chowdeck records a delivery or receipt time (both null in
+ * transit, as captured). Not yet rated while vendor_rate_state is unset or
+ * "not-yet" (captured on an undelivered order).
+ */
+const isDelivered = (order: OrderDetail, live?: LiveTracking) =>
+  [order.actual_delivery_time, order.time_customer_received_order, live?.delivered_at].some(
+    (time) => typeof time === "string" && time.length > 0,
+  );
+const notYetRated = (order: OrderDetail) =>
+  order.vendor_rate_state === undefined || order.vendor_rate_state === null || order.vendor_rate_state === "not-yet";
+
+export const RATE_PROMPT =
+  "The order is delivered: ask the user how it was and offer to rate the restaurant and its items with rate_order (a 1-5 rating, reasons, a review and a thumbs up or down per item). Use only what they say.";
+
+const ratePromptFor = (order: OrderDetail | undefined, live?: LiveTracking) =>
+  order && isDelivered(order, live) && notYetRated(order) ? RATE_PROMPT : undefined;
+
 const deliveryPinOf = (order: OrderDetail, state: string) =>
   state === "payment_confirmed" && typeof order.delivery_pin === "string"
     ? {
@@ -138,6 +156,7 @@ export const registerOrderTools = (
             source: "Chowdeck's order record, read just now",
           },
           ...(amounts && { amount: amounts }),
+          ...(ratePromptFor(order) && { next_step: ratePromptFor(order) }),
         });
       } catch (error) {
         return failure("get order", "get_order", error);
@@ -189,6 +208,36 @@ export const registerOrderTools = (
         );
       } catch (error) {
         return failure("get the delivery PIN", "get_delivery_pin", error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "rate_order",
+    {
+      title: "Rate the restaurant and items",
+      description:
+        "Rate the restaurant of one of the signed-in user's delivered Chowdeck orders, as the website's rating screen does: a 1-5 rating, optional reasons, an optional written review, and a thumbs up or down per item (item_id from get_order). On the website the reasons shown for 5 are Worth it, Very tasty, Nice packaging, High quality and Highly recommend. Offer it once an order is delivered, and use only what the user said; never rate for them. Sent once. This rates the restaurant, not the rider.",
+      inputSchema: z.object({
+        ...orderIdSchema,
+        rating: z.number().int().min(1).max(5).describe("The user's rating of the restaurant, 1 (worst) to 5 (loved it)"),
+        reasons: z.array(z.string().trim().min(1).max(60)).max(10).optional().describe("Why, in the user's words or the website's options"),
+        review: z.string().trim().max(1000).optional().describe("A written review, if the user gave one"),
+        items: z
+          .array(z.object({ item_id: z.number().int().positive(), liked: z.boolean() }).strict())
+          .max(50)
+          .optional()
+          .describe("Thumbs up (liked: true) or down per item the user rated"),
+        public: z.boolean().default(true).describe("Show the review publicly, as the website does by default"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      if (!service) return textResult(SESSION_UNAVAILABLE, true);
+      try {
+        return await rateOrder(service, String(args.order_id), args);
+      } catch (error) {
+        return failure("rate the order", "rate_order", error);
       }
     },
   );
@@ -303,6 +352,102 @@ export const registerOrderTools = (
       }
     },
   );
+};
+
+type RatingArgs = {
+  rating: number;
+  reasons?: string[];
+  review?: string;
+  items?: { item_id: number; liked: boolean }[];
+  public: boolean;
+};
+
+/*
+ * Checks the order and its items with Chowdeck, then sends the rating once.
+ * A thumbs up is item_rating 5, as captured; a thumbs down is sent as 1,
+ * which was not captured.
+ */
+const rateOrder = async (service: OrderService, orderId: string, args: RatingArgs) => {
+  const refuse = (message: string, nextStep: string) => notSentReport("rate_order", message, nextStep);
+  let order: OrderDetail;
+  try {
+    ({ order } = await service.getOrder(orderId));
+  } catch (error) {
+    if (error instanceof NotSignedInError) throw error;
+    return refuse(
+      `Rating not sent: ChowBot could not read the order from Chowdeck (${error instanceof ChowdeckApiError ? error.message : "unexpected error"}).`,
+      "Try again later.",
+    );
+  }
+  if (classifyOrder(order).state !== "payment_confirmed") {
+    return refuse("Rating not sent: Chowdeck's record does not show this order paid, so there is nothing to rate.", "Rate an order once it has been delivered.");
+  }
+  const orderItems = new Set((order.items ?? []).map((item) => item.item_id));
+  const unknown = (args.items ?? []).filter((item) => !orderItems.has(item.item_id));
+  if (unknown.length > 0) {
+    return refuse(
+      `Rating not sent: item ${unknown.map((item) => item.item_id).join(", ")} is not part of this order.`,
+      "Use item_id values from get_order for this order.",
+    );
+  }
+
+  const body = {
+    vendor_rating: args.rating,
+    vendor_rating_reasons: args.reasons ?? [],
+    vendor_review: args.review ?? "",
+    order_items_rating: (args.items ?? []).map((item) => ({ item_id: item.item_id, item_rating: item.liked ? 5 : 1 })),
+    is_public: args.public,
+  };
+  let response: unknown;
+  try {
+    response = await service.sendRating(orderId, body);
+  } catch (error) {
+    if (error instanceof NotSignedInError) throw error;
+    const definite =
+      error instanceof ChowdeckApiError && error.kind === "http" && error.status !== undefined && error.status < 500 && error.status !== 401;
+    const detail = error instanceof ChowdeckApiError ? error.message : "unexpected error";
+    return reportResult(
+      {
+        action: "rate_order",
+        outcome: definite ? "rejected_by_chowdeck" : "unknown_outcome",
+        message: definite ? `Chowdeck did not accept the rating (${detail}).` : `The rating's outcome is unknown (${detail}).`,
+        chowdeck_confirmed: definite ? [`Chowdeck refused the rating (${detail})`] : [],
+        status: null,
+        next_step: definite
+          ? "Tell the user Chowdeck did not accept the rating, with its reason."
+          : "Do not send it again: Chowdeck may already have it. The user can see their rating in the Chowdeck app.",
+        outcome_uncertain: !definite,
+        safe_to_retry: definite,
+      },
+      true,
+    );
+  }
+  if (!isRecord(response) || response.status !== "success") {
+    return reportResult(
+      {
+        action: "rate_order",
+        outcome: "unknown_outcome",
+        message: "Chowdeck's answer to the rating was not a success, so it is not confirmed.",
+        chowdeck_confirmed: [],
+        status: null,
+        next_step: "Do not send it again: Chowdeck may already have it.",
+        outcome_uncertain: true,
+        safe_to_retry: false,
+      },
+      true,
+    );
+  }
+  return reportResult({
+    action: "rate_order",
+    outcome: "rated",
+    message: `The rating for order ${orderId} was added: Chowdeck answered${typeof response.message === "string" ? ` "${response.message}"` : " success"}.`,
+    chowdeck_confirmed: ["Chowdeck accepted the rating"],
+    status: null,
+    rating: args.rating,
+    next_step: "Tell the user their rating was added.",
+    outcome_uncertain: false,
+    safe_to_retry: false,
+  });
 };
 
 const ACTION = "update_order_delivery_note";
@@ -472,7 +617,8 @@ const trackingReport = (
   const nextStep = !classification
     ? "Chowdeck's order record could not be read, so the payment state is unknown. Try again later, or use the Chowdeck app."
     : classification.state === "payment_confirmed"
-      ? `Tell the user the order's status and delivery details as Chowdeck reports them${link ? ", and give them the tracking link as a clickable link" : ""}${pin ? ", and their delivery PIN for the rider" : ""}.`
+      ? ratePromptFor(order, live) ??
+        `Tell the user the order's status and delivery details as Chowdeck reports them${link ? ", and give them the tracking link as a clickable link" : ""}${pin ? ", and their delivery PIN for the rider" : ""}.`
       : classification.state === "awaiting_payment"
         ? "Chowdeck shows no payment for this order yet. Tell the user it is unpaid; they can pay with start_payment or in the Chowdeck app, or leave it unpaid."
         : classification.state === "cancelled"

@@ -70,6 +70,7 @@ const ORDER_FIELDS = [
   "estimated_delivery_time",
   "actual_delivery_time",
   "time_customer_received_order",
+  "vendor_rate_state",
   "is_failed_delivery",
   "customer_vendor_note",
   "customer_delivery_note",
@@ -316,6 +317,20 @@ class OrderService {
       method: "PUT",
       headers: await this.authHeaders(),
       body: { customer_delivery_note: note },
+    });
+  }
+
+  /*
+   * The website's restaurant rating (captured 2026-10-23): POST
+   * /customer/order/{id}/rate-or-review with vendor_rating, its reasons and
+   * review, per-item ratings and is_public, answered "successfully added
+   * rating/review". Sent once.
+   */
+  async sendRating(orderId: string, body: Record<string, unknown>) {
+    return this.client.request(`${orderPath(orderId)}/rate-or-review`, {
+      method: "POST",
+      headers: await this.authHeaders(),
+      body,
     });
   }
 

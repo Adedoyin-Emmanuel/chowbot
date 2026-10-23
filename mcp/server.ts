@@ -41,6 +41,7 @@ export const SERVER_INSTRUCTIONS = [
   "When the user says to place the order, call place_order once with the quoted total; do not ask them to confirm again. Give them the payment link from the result.",
   "Until an order is paid the user can change anything by updating the cart and placing it again; the unpaid order is never charged.",
   "After payment, track_order gives the status, rider details, tracking link and delivery PIN (get_delivery_pin gives the PIN alone). Remind the user to give the PIN only to the rider.",
+  "Once an order is delivered, offer to rate the restaurant and its items (rate_order): a 1-5 rating, reasons, a review and a thumbs up or down per item. Use only what the user says.",
   "Amounts in results are already in naira. Report what Chowdeck confirms, and only that.",
   "Do not add uncertainty of your own. When a result confirms something (a cart cleared, an order placed, a payment confirmed, a note saved), state it as done, with no hedging, guesses or advice to double-check in the Chowdeck app. Mention uncertainty only when a result itself says so (outcome_uncertain: true, an unknown state or an unconfirmed outcome), and then follow its next_step. Never speculate about units, internals or why Chowdeck answered as it did.",
 ].join("\n\n");

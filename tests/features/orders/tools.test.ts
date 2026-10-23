@@ -18,7 +18,7 @@ import {
 import { callTool, rpc } from "../../helpers/mcp";
 import { createServer } from "../../../mcp/server";
 import { ChowdeckClient } from "../../../lib/client";
-import { registerOrderTools } from "../../../features/orders/tools";
+import { RATE_PROMPT, registerOrderTools } from "../../../features/orders/tools";
 
 type ReceivedRequest = {
   path: string;
@@ -558,7 +558,8 @@ describe("get_order", () => {
     });
     expect(parsed.amount).toMatchObject({ total: "₦11,040.00", discounts: { discount_price: "₦800.00" } });
     expect(parsed.amount).not.toHaveProperty("total_raw");
-    const { payment_state: _state, amount: _amount, ...rest } = parsed;
+    expect(parsed.next_step).toBe(RATE_PROMPT);
+    const { payment_state: _state, amount: _amount, next_step: _next, ...rest } = parsed;
     expect(rest).toEqual(inNaira({
       order: {
         id: ORDER_ID,
@@ -919,6 +920,9 @@ const TRACKING_LINK = "https://chowdeck.com/store/track/Y3B4SkhTQ3dXL3E2S3VnU3hw
 const LIVE_PATH = `${ORDER_PATH}/live-tracking`;
 const DELIVERY_PATH = `${ORDER_PATH}/delivery`;
 
+// A paid order on its way: Chowdeck has no delivery or receipt time yet.
+const IN_TRANSIT = { actual_delivery_time: null, time_customer_received_order: null };
+
 /*
  * The delivery record as captured: the driver object carries the rider's
  * licence, bank details, next of kin, date of birth and more. Fictional
@@ -1028,7 +1032,7 @@ describe("track_order", () => {
   const track = async () => callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID });
 
   test("combines the order record, progress steps and live tracking, with the tracking link and nothing private", async () => {
-    route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK }));
+    route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK, ...IN_TRANSIT }));
     route(`GET ${TIMELINE_PATH}`, timelineResponse());
     route(`GET ${LIVE_PATH}`, liveResponse());
     route(`GET ${DELIVERY_PATH}`, deliveryResponse());
@@ -1257,7 +1261,7 @@ describe("pay-for-me link in get_order", () => {
  * the create response's delivery_pin in the user's capture).
  */
 describe("delivery PIN", () => {
-  const paid = { order_pin: 7719, payment: { status: "success" } };
+  const paid = { order_pin: 7719, payment: { status: "success" }, ...IN_TRANSIT };
   const unpaid = { order_pin: 7719, status: "abandoned", payment: {}, time_payment_confirmed: null };
   const get = async () => JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
   const track = async () => JSON.parse(textOf(await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID })));
@@ -1353,5 +1357,41 @@ describe("rider details", () => {
     await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID });
 
     expect(received.some((r) => r.path === DELIVERY_PATH)).toBe(false);
+  });
+});
+
+describe("rating prompt once delivered", () => {
+  test("track_order and get_order ask the user to rate a delivered order not yet rated", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ vendor_rate_state: "not-yet" }));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
+
+    const tracked = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID })));
+    const order = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+
+    expect(tracked.next_step).toBe(RATE_PROMPT);
+    expect(order.next_step).toBe(RATE_PROMPT);
+  });
+
+  test("live tracking's delivered_at counts as delivered", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse(IN_TRANSIT));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse({ delivered_at: "2026-10-23T15:10:00.000Z" }));
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
+
+    const tracked = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID })));
+
+    expect(tracked.next_step).toBe(RATE_PROMPT);
+  });
+
+  test("no prompt while the order is on its way, or once it is rated", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse(IN_TRANSIT));
+    const onTheWay = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+    route(`GET ${ORDER_PATH}`, orderResponse({ vendor_rate_state: "rated" }));
+    const rated = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_order", { order_id: ORDER_ID })));
+
+    expect(onTheWay).not.toHaveProperty("next_step");
+    expect(rated).not.toHaveProperty("next_step");
   });
 });
