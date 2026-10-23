@@ -18,7 +18,7 @@ const restaurantId = z
   .number()
   .int()
   .positive()
-  .describe("Chowdeck restaurant ID, as returned by search_restaurants");
+  .describe("Chowdeck restaurant ID, from search_restaurants or browse_restaurants");
 
 const addToCartSchema = {
   restaurant_id: restaurantId,

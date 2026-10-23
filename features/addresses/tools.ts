@@ -40,7 +40,7 @@ export const registerAddressTools = (
     {
       title: "List delivery addresses",
       description:
-        "List the signed-in user's saved Chowdeck delivery addresses. Use an address id as address_id for search_restaurants. Fields are passed through from Chowdeck only when present.",
+        "List the signed-in user's saved Chowdeck delivery addresses. Use an address id as address_id for search_restaurants, browse_restaurants, carts and quotes. Fields are passed through from Chowdeck only when present.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

@@ -2,9 +2,19 @@ import { ChowdeckApiError, ChowdeckClient } from "../../lib/client";
 import { chowdeckAuthHeaders, type UserSession } from "../../lib/session";
 import { isRecord, pickScalarFields, type ScalarValue } from "../../utils/object";
 
+/*
+ * The website's menu sections (captured 2026-10-23): GET
+ * /customer/vendor/{id}/menu/sections?sections=order_again,popular&type=restaurant,
+ * answering data[] of { name: "Order Again" | "Popular", items[] }.
+ */
+export const MENU_SECTIONS = ["popular", "order_again"] as const;
+export type MenuSection = (typeof MENU_SECTIONS)[number];
+const SECTION_NAMES: Record<MenuSection, string> = { popular: "popular", order_again: "order again" };
+
 export type RestaurantMenuParams = {
   limit: number;
   category?: string;
+  section?: MenuSection;
   restaurantId: number;
 };
 
@@ -30,6 +40,7 @@ export type MenuItemDetailResult = {
 
 export type RestaurantMenuResult = {
   category?: string;
+  section?: MenuSection;
   returned: number;
   truncated: boolean;
   restaurant_id: number;
@@ -124,14 +135,22 @@ class MenuService {
   async getRestaurantMenu({
     restaurantId,
     category,
+    section,
     limit,
   }: RestaurantMenuParams): Promise<RestaurantMenuResult> {
-    const path = `/customer/vendor/${restaurantId}/menu`;
+    const path = section ? `/customer/vendor/${restaurantId}/menu/sections` : `/customer/vendor/${restaurantId}/menu`;
     const body = await this.client.request(path, {
       headers: await chowdeckAuthHeaders(this.session),
+      ...(section && { query: { sections: section, type: "restaurant" } }),
     });
 
-    const rawItems = isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
+    const sections = section && isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord) : undefined;
+    const sectionItems = sections?.find(
+      (entry) => typeof entry.name === "string" && entry.name.toLowerCase() === SECTION_NAMES[section!],
+    )?.items;
+    const rawItems = section
+      ? sections && (Array.isArray(sectionItems) ? sectionItems : [])
+      : isRecord(body) && Array.isArray(body.data) ? body.data : undefined;
     const items = rawItems?.filter(isRecord);
 
     if (!rawItems || !items || (rawItems.length > 0 && items.length === 0)) {
@@ -149,6 +168,7 @@ class MenuService {
     return {
       restaurant_id: restaurantId,
       ...(category !== undefined && { category }),
+      ...(section && { section }),
       returned: matching.length,
       truncated: matching.length > limit,
       items: matching.slice(0, limit).map(summarizeItem),

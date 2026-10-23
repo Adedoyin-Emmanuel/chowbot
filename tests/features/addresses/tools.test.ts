@@ -265,7 +265,7 @@ describe("list_addresses", () => {
     }
   });
 
-  test("returns ids that search_restaurants accepts and forwards unchanged", async () => {
+  test("returns ids that browse_restaurants accepts and forwards unchanged", async () => {
     let searchUrl: URL | undefined;
     upstreamResponse = (req) => {
       const url = new URL(req.url);
@@ -292,7 +292,7 @@ describe("list_addresses", () => {
     const [address] = JSON.parse(textOf(listed)).addresses;
     const searched = await callTool(
       createDiscoveryServer,
-      "search_restaurants",
+      "browse_restaurants",
       {
         address_id: address.id,
       },

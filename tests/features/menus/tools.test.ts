@@ -500,3 +500,46 @@ describe("get_menu_item", () => {
     expect(anonymous.content[0]!.text).not.toContain("secret-token");
   });
 });
+
+/*
+ * The website's menu sections (captured 2026-10-23): data[] of named
+ * sections, each with its items.
+ */
+describe("get_restaurant_menu sections", () => {
+  const sections = () =>
+    Response.json({
+      status: "success",
+      message: "Menu sections fetched successfully",
+      data: [
+        { id: 1, name: "Order Again", item_count: 1, items: [{ id: 1110010, name: "A plate of rice with chicken", price: 420000, in_stock: true, category: { name: "Rice" } }] },
+        { id: 2, name: "Popular", item_count: 2, items: [
+          { id: 1110011, name: "A plate of rice with chicken + a drink", price: 420000, in_stock: true },
+          { id: 1110012, name: "A plate of rice with beef", price: 320000, in_stock: true },
+        ] },
+      ],
+    });
+
+  test.each([
+    ["popular", [1110011, 1110012]],
+    ["order_again", [1110010]],
+  ] as const)("returns the %s section from Chowdeck's menu sections", async (section, ids) => {
+    upstreamResponse = sections;
+
+    const result = await callGetMenu({ restaurant_id: 118195, section });
+    const parsed = JSON.parse(result.content[0]!.text);
+
+    expect(receivedUrl?.pathname).toBe("/customer/vendor/118195/menu/sections");
+    expect(Object.fromEntries(receivedUrl!.searchParams)).toEqual({ sections: section, type: "restaurant" });
+    expect(parsed.section).toBe(section);
+    expect(parsed.items.map((item: { id: number }) => item.id)).toEqual(ids);
+    expect(parsed.items[0].price).toBe("₦4,200.00");
+  });
+
+  test("an absent section is an empty list, not an error", async () => {
+    upstreamResponse = () => Response.json({ status: "success", data: [] });
+
+    const parsed = JSON.parse((await callGetMenu({ restaurant_id: 118195, section: "order_again" })).content[0]!.text);
+
+    expect(parsed).toMatchObject({ returned: 0, items: [] });
+  });
+});

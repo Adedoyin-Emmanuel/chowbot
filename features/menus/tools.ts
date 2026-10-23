@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/server";
 
-import MenuService from "./service";
+import MenuService, { MENU_SECTIONS } from "./service";
 import { logger } from "../../utils/logger";
 import type { UserSession } from "../../lib/session";
 import { jsonResult, textResult } from "../../utils/tool-result";
@@ -12,7 +12,7 @@ const getRestaurantMenuSchema = {
     .number()
     .int()
     .positive()
-    .describe("Chowdeck restaurant ID, as returned by search_restaurants"),
+    .describe("Chowdeck restaurant ID, from search_restaurants or browse_restaurants"),
   category: z
     .string()
     .trim()
@@ -20,6 +20,10 @@ const getRestaurantMenuSchema = {
     .max(100)
     .optional()
     .describe("Only return items whose category name contains this text"),
+  section: z
+    .enum(MENU_SECTIONS)
+    .optional()
+    .describe("popular: the restaurant's popular items; order_again: what the signed-in user ordered there before"),
   limit: z
     .number()
     .int()
@@ -34,7 +38,7 @@ const getMenuItemSchema = {
     .number()
     .int()
     .positive()
-    .describe("Chowdeck restaurant ID, as returned by search_restaurants"),
+    .describe("Chowdeck restaurant ID, from search_restaurants or browse_restaurants"),
   menu_item_id: z
     .number()
     .int()
@@ -54,15 +58,16 @@ export const registerMenuTools = (
     {
       title: "Get restaurant menu",
       description:
-        "List menu items for a Chowdeck restaurant. Fields are passed through from Chowdeck only when present; prices are returned as Chowdeck sends them.",
+        "List menu items for a Chowdeck restaurant (restaurant_id from search_restaurants or browse_restaurants). Use section popular for what the restaurant is known for, or order_again for what the user ordered there before. Fields are passed through from Chowdeck only when present; prices are in naira.",
       inputSchema: z.object(getRestaurantMenuSchema),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ restaurant_id, category, limit }) => {
+    async ({ restaurant_id, category, section, limit }) => {
       try {
         const result = await service.getRestaurantMenu({
           restaurantId: restaurant_id,
           category,
+          section,
           limit,
         });
         return jsonResult(result);
