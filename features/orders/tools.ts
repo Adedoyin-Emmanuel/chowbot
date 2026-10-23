@@ -6,6 +6,7 @@ import OrderService, {
   type LiveTracking,
   type OrderDetail,
   type OrderTimelineResult,
+  type Rider,
 } from "./service";
 import {
   classifyOrder,
@@ -149,7 +150,7 @@ export const registerOrderTools = (
     {
       title: "Get delivery PIN",
       description:
-        "Get the delivery PIN for one of the signed-in user's paid Chowdeck orders: the code the rider asks for at handover. Read freshly from Chowdeck's order record; an unpaid or cancelled order has none to give.",
+        "Get the delivery PIN for one of the signed-in user's paid Chowdeck orders (the code the rider asks for at handover), with the assigned rider's name and average rating. Read freshly from Chowdeck; an unpaid or cancelled order has no PIN to give.",
       inputSchema: z.object(orderIdSchema),
       annotations: READ_ONLY,
     },
@@ -159,7 +160,22 @@ export const registerOrderTools = (
         const { order } = await service.getOrder(String(order_id));
         const { state, reason } = classifyOrder(order);
         const pin = deliveryPinOf(order, state);
-        if (pin) return jsonResult({ order_id, delivery_pin: pin.pin, note: pin.note });
+        if (pin) {
+          let rider: Rider | undefined;
+          let riderUnavailable: string | undefined;
+          try {
+            rider = await service.getRider(String(order_id));
+          } catch (error) {
+            if (error instanceof NotSignedInError) throw error;
+            riderUnavailable = error instanceof ChowdeckApiError ? error.message : "unexpected error";
+          }
+          return jsonResult({
+            order_id,
+            delivery_pin: pin.pin,
+            note: pin.note,
+            rider: rider ?? (riderUnavailable ? `could not be read (${riderUnavailable})` : "not assigned yet"),
+          });
+        }
         return jsonResult(
           {
             order_id,
@@ -201,7 +217,7 @@ export const registerOrderTools = (
     {
       title: "Track order",
       description:
-        "Follow one of the signed-in user's Chowdeck orders, read freshly from Chowdeck: its payment state, Chowdeck's order status, the progress steps, the live delivery details (delivery status, rider and rider location when Chowdeck gives them) the order's tracking link on chowdeck.com and, once Chowdeck shows the order paid, the delivery PIN the rider asks for at handover. Show the tracking link to the user as a clickable link; it is private to them, as anyone with it can follow the order. Each part is read once; a part Chowdeck cannot give is listed under unavailable, never guessed.",
+        "Follow one of the signed-in user's Chowdeck orders, read freshly from Chowdeck: its payment state, Chowdeck's order status, the progress steps, the live delivery details (delivery status, ETA and rider location), the rider's name and average rating once one is assigned, the order's tracking link on chowdeck.com and, once Chowdeck shows the order paid, the delivery PIN the rider asks for at handover. Show the tracking link to the user as a clickable link; it is private to them, as anyone with it can follow the order. Each part is read once; a part Chowdeck cannot give is listed under unavailable, never guessed.",
       inputSchema: z.object(orderIdSchema),
       annotations: READ_ONLY,
     },
@@ -230,6 +246,11 @@ export const registerOrderTools = (
         const live = await attempt("live tracking", () =>
           service.getLiveTracking(id),
         );
+        // A rider is only assigned to a paid order.
+        const rider =
+          detail && classifyOrder(detail.order).state === "payment_confirmed"
+            ? await attempt("rider", () => service.getRider(id))
+            : undefined;
         if (!detail && !timeline && !live) {
           return textResult(
             `Failed to track order: Chowdeck gave none of the order's details (${unavailable.join("; ")}).`,
@@ -237,7 +258,7 @@ export const registerOrderTools = (
           );
         }
         return jsonResult(
-          trackingReport(order_id, detail?.order, timeline, live, unavailable),
+          trackingReport(order_id, detail?.order, timeline, live, unavailable, rider),
         );
       } catch (error) {
         return failure("track order", "track_order", error);
@@ -438,6 +459,7 @@ const trackingReport = (
   timeline: OrderTimelineResult | undefined,
   live: LiveTracking | undefined,
   unavailable: string[],
+  rider?: Rider,
 ) => {
   const classification = order && classifyOrder(order);
   const numericId = Number(orderId);
@@ -481,6 +503,7 @@ const trackingReport = (
           note: "Chowdeck's own tracking page for this order; share it only with people the user chooses",
         }
       : null,
+    ...(rider && { rider }),
     ...(live && { live_tracking: live }),
     ...(timeline && {
       progress_steps: timeline.timeline,

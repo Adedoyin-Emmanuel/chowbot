@@ -113,8 +113,10 @@ export type OrderListResult = {
 export type OrderDetail = Fields & { payment?: Fields; items?: Fields[] };
 
 /*
- * Rider and rider_location fields are likely names, not confirmed ones; only
- * scalars are kept.
+ * Live tracking (captured 2026-10-23): rider was null even in transit, so the
+ * rider comes from the delivery record (getRider). rider_location is
+ * latitude/longitude; route carries the ETA. customer_location, vendor
+ * location, the route polyline and socket channels are left out.
  */
 const LIVE_FIELDS = [
   "order_status",
@@ -124,10 +126,31 @@ const LIVE_FIELDS = [
   "delivery_status",
   "delivery_is_terminal",
 ] as const;
-const RIDER_FIELDS = ["name", "first_name", "last_name", "phone", "rating", "vehicle_type", "plate_number"] as const;
-const RIDER_LOCATION_FIELDS = ["latitude", "longitude", "lat", "lng", "heading", "updated_at"] as const;
+const RIDER_LOCATION_FIELDS = ["latitude", "longitude"] as const;
+const ROUTE_FIELDS = ["eta_text", "eta_minutes", "distance_km"] as const;
 
-export type LiveTracking = Fields & { rider?: Fields; rider_location?: Fields };
+export type LiveTracking = Fields & { rider_location?: Fields; eta?: Fields };
+
+/*
+ * GET /customer/order/{id}/delivery (captured 2026-10-23) returns the whole
+ * driver record: driving licence, bank account, date of birth, next of kin,
+ * guarantor and KYC details. Only the rider's name and average rating are
+ * ever kept.
+ */
+export type Rider = { name: string; average_rating?: string };
+
+const riderOf = (driver: Record<string, unknown>): Rider | undefined => {
+  const name = [driver.first_name, driver.last_name]
+    .filter((part): part is string => typeof part === "string" && part.trim() !== "")
+    .map((part) => part.trim())
+    .join(" ");
+  if (!name) return undefined;
+  const rating = driver.average_rating;
+  return {
+    name,
+    ...((typeof rating === "string" || typeof rating === "number") && String(rating).trim() && { average_rating: String(rating) }),
+  };
+};
 
 /*
  * Only https://chowdeck.com/store/track/<token> is passed on. Anyone with the
@@ -268,9 +291,21 @@ class OrderService {
       throw unexpectedShape(path);
     }
     const live: LiveTracking = pickScalarFields(data, LIVE_FIELDS);
-    if (isRecord(data.rider)) live.rider = pickScalarFields(data.rider, RIDER_FIELDS);
     if (isRecord(data.rider_location)) live.rider_location = pickScalarFields(data.rider_location, RIDER_LOCATION_FIELDS);
+    if (isRecord(data.route)) {
+      const eta = pickScalarFields(data.route, ROUTE_FIELDS);
+      if (Object.keys(eta).length > 0) live.eta = eta;
+    }
     return live;
+  }
+
+  // The assigned rider's name and rating, or undefined when none is assigned yet.
+  async getRider(orderId: string): Promise<Rider | undefined> {
+    const path = `${orderPath(orderId)}/delivery`;
+    const body = await this.client.request(path, { headers: await this.authHeaders() });
+    const data = isRecord(body) && isRecord(body.data) ? body.data : undefined;
+    if (!data || (data.order_id !== undefined && String(data.order_id) !== orderId)) throw unexpectedShape(path);
+    return isRecord(data.driver) ? riderOf(data.driver) : undefined;
   }
 
   /*

@@ -917,6 +917,37 @@ describe("order tools never mutate", () => {
 
 const TRACKING_LINK = "https://chowdeck.com/store/track/Y3B4SkhTQ3dXL3E2S3VnU3hwMktKUT09Ojo6OmFMY3FUcmlrOG42TW51ek5Ic2tEY2c9PQ";
 const LIVE_PATH = `${ORDER_PATH}/live-tracking`;
+const DELIVERY_PATH = `${ORDER_PATH}/delivery`;
+
+/*
+ * The delivery record as captured: the driver object carries the rider's
+ * licence, bank details, next of kin, date of birth and more. Fictional
+ * values, marked PRIVATE- where only the name and rating may be shown.
+ */
+const deliveryResponse = (driver: Record<string, unknown> | null = {}) => () =>
+  Response.json({
+    status: "success",
+    message: "Delivery found for order",
+    data: {
+      id: 30723463,
+      order_id: ORDER_ID,
+      status: "in_transit",
+      amount: 65000,
+      destination: { name: "PRIVATE-customer", contact: "PRIVATE-contact", address: { street: "PRIVATE-street" } },
+      driver:
+        driver === null
+          ? null
+          : {
+              id: 1, user_id: 2, first_name: "Tunde", last_name: "Bello", average_rating: "4.85",
+              phone: "PRIVATE-phone", driving_license: "PRIVATE-licence", next_of_kin_name: "PRIVATE-kin",
+              next_of_kin_phone: "PRIVATE-kin-phone", account_number: "PRIVATE-account", bank_code: "PRIVATE-bank",
+              date_of_birth: "PRIVATE-dob", guarantor1_phone: "PRIVATE-guarantor", verified_first_name: "PRIVATE-verified",
+              vehicle_information: "PRIVATE-vehicle", state_of_residence: "PRIVATE-state", kyc_completed_at: "PRIVATE-kyc",
+              ...driver,
+            },
+      driverLastLocation: { latitude: 6.59, longitude: 3.35 },
+    },
+  });
 
 const liveResponse = (overrides: Record<string, unknown> = {}) => () =>
   Response.json({
@@ -936,7 +967,7 @@ const liveResponse = (overrides: Record<string, unknown> = {}) => () =>
       rider_location: { latitude: 6.59, longitude: 3.35, accuracy_token: "PRIVATE-accuracy" },
       customer_location: { latitude: "PRIVATE-customer-lat" },
       vendor_location: { latitude: "PRIVATE-vendor-lat" },
-      route: { polyline: "PRIVATE-route" },
+      route: { polyline: "PRIVATE-route", eta_minutes: "9.00", eta_text: "9 mins", distance_km: "5.012" },
       socket_room: "PRIVATE-socket",
       pusher_channel: "PRIVATE-pusher",
       ...overrides,
@@ -1000,13 +1031,15 @@ describe("track_order", () => {
     route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK }));
     route(`GET ${TIMELINE_PATH}`, timelineResponse());
     route(`GET ${LIVE_PATH}`, liveResponse());
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
 
     const result = await track();
     const text = textOf(result);
     const parsed = JSON.parse(text);
 
     expect(result.isError).toBeUndefined();
-    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([`GET ${ORDER_PATH}`, `GET ${TIMELINE_PATH}`, `GET ${LIVE_PATH}`]);
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([`GET ${ORDER_PATH}`, `GET ${TIMELINE_PATH}`, `GET ${LIVE_PATH}`, `GET ${DELIVERY_PATH}`]);
+    expect(parsed.rider).toEqual({ name: "Tunde Bello", average_rating: "4.85" });
     expect(parsed.status).toMatchObject({ order_state: "payment_confirmed", chowdeck_payment_status: "success" });
     expect(parsed.order_status).toBe("success");
     expect(parsed.restaurant).toBe("Item 7 (Go) - Allen");
@@ -1018,9 +1051,10 @@ describe("track_order", () => {
       delivered_at: null,
       delivery_status: "picked_up",
       delivery_is_terminal: false,
-      rider: { first_name: "Tunde", phone: "08000000000" },
       rider_location: { latitude: 6.59, longitude: 3.35 },
+      eta: { eta_text: "9 mins", eta_minutes: "9.00", distance_km: "5.012" },
     });
+    expect(text).not.toContain("08000000000");
     expect(parsed.progress_steps.length).toBeGreaterThan(0);
     expect(parsed.progress_note).toContain("a listed stage is not proof it was reached");
     expect(parsed.next_step).toContain("give them the tracking link as a clickable link");
@@ -1054,6 +1088,7 @@ describe("track_order", () => {
     route(`GET ${ORDER_PATH}`, orderResponse({ tracking_url: TRACKING_LINK }));
     route(`GET ${TIMELINE_PATH}`, timelineResponse());
     route(`GET ${LIVE_PATH}`, () => Response.json({ message: "Server Error" }, { status: 500 }));
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
 
     const result = await track();
     const parsed = JSON.parse(textOf(result));
@@ -1082,6 +1117,7 @@ describe("track_order", () => {
     route(`GET ${ORDER_PATH}`, orderResponse());
     route(`GET ${TIMELINE_PATH}`, timelineResponse());
     route(`GET ${LIVE_PATH}`, liveResponse({ order_id: 999 }));
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
 
     const parsed = JSON.parse(textOf(await track()));
 
@@ -1271,5 +1307,51 @@ describe("get_delivery_pin", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).not.toContain("7719");
     expect(JSON.parse(textOf(result)).reason).toContain("before the order is paid");
+  });
+});
+
+describe("rider details", () => {
+  const paid = () => route(`GET ${ORDER_PATH}`, orderResponse({ order_pin: 7719, payment: { status: "success" } }));
+
+  test("get_delivery_pin gives the rider's name and rating and nothing else about them", async () => {
+    paid();
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
+
+    const result = await callTool(serverFor(await signedIn()), "get_delivery_pin", { order_id: ORDER_ID });
+
+    expect(JSON.parse(textOf(result))).toMatchObject({ delivery_pin: "7719", rider: { name: "Tunde Bello", average_rating: "4.85" } });
+    expect(textOf(result)).not.toContain("PRIVATE-");
+    expectOnlyGets();
+  });
+
+  test("track_order never shows the rider's private details", async () => {
+    paid();
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse());
+
+    const text = textOf(await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID }));
+
+    expect(JSON.parse(text).rider).toEqual({ name: "Tunde Bello", average_rating: "4.85" });
+    expect(text).not.toContain("PRIVATE-");
+  });
+
+  test("says when no rider is assigned yet", async () => {
+    paid();
+    route(`GET ${DELIVERY_PATH}`, deliveryResponse(null));
+
+    const parsed = JSON.parse(textOf(await callTool(serverFor(await signedIn()), "get_delivery_pin", { order_id: ORDER_ID })));
+
+    expect(parsed.rider).toBe("not assigned yet");
+  });
+
+  test("an unpaid order does not look up a rider", async () => {
+    route(`GET ${ORDER_PATH}`, orderResponse({ status: "abandoned", payment: {}, time_payment_confirmed: null }));
+    route(`GET ${TIMELINE_PATH}`, timelineResponse());
+    route(`GET ${LIVE_PATH}`, liveResponse());
+
+    await callTool(serverFor(await signedIn()), "track_order", { order_id: ORDER_ID });
+
+    expect(received.some((r) => r.path === DELIVERY_PATH)).toBe(false);
   });
 });
