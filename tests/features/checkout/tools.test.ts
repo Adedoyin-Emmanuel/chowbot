@@ -915,5 +915,6 @@ describe("checkout details in a quote", () => {
 
     expect(parsed.checkout_details).toMatchObject({ restaurant_note: "No pepper", rider_note: null, brown_bags: 1, promo_code: null });
     expect(parsed.checkout_details.ask_the_user_about.join(" ")).toMatch(/restaurant.*rider.*tip.*promo.*brown bags.*gift.*pay/s);
+    expect(parsed.checkout_details.ask_the_user_about.join(" ")).toContain("whether to save them as a beneficiary");
   });
 });

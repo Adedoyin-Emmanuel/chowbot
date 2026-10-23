@@ -16,5 +16,6 @@ describe("ChowBot server", () => {
       expect(SERVER_INSTRUCTIONS).toContain(option);
     }
     expect(SERVER_INSTRUCTIONS).toContain("Do not add uncertainty of your own");
+    expect(SERVER_INSTRUCTIONS).toContain("whether to save them as a beneficiary");
   });
 });

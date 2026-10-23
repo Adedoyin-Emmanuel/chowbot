@@ -47,7 +47,10 @@ export const orderOptionsSchema = {
       country_code: z.string().max(10).optional().describe("Recipient's phone country, two letters; default NG"),
       email: z.string().max(400).optional(),
       message: z.string().max(2000).optional().describe("Gift message"),
-      save_as_beneficiary: z.boolean().optional().describe("Save the recipient as a beneficiary; only if the user asks"),
+      save_as_beneficiary: z
+        .boolean()
+        .optional()
+        .describe("Save a new recipient as a beneficiary for next time. Ask the user when the recipient is not already saved; true only if they say yes"),
     })
     .strict()
     .refine((gift) => gift.beneficiary_id !== undefined || (gift.name !== undefined && gift.phone !== undefined), {

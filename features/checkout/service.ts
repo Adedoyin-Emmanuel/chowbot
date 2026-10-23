@@ -123,7 +123,7 @@ const checkoutDetailsOf = (raw: Record<string, unknown>, promoCode: string | und
     "a tip for the rider, or none (place_order tip)",
     "a promo code or voucher (list_promo_codes, then get_checkout_quote with promo_code)",
     "brown bags (set_cart_bags)",
-    "whether it is a gift, e.g. for a saved beneficiary (list_beneficiaries)",
+    "whether it is a gift: a saved beneficiary (list_beneficiaries), or someone new, and if new, whether to save them as a beneficiary (place_order gift.save_as_beneficiary)",
     "how to pay: an online channel, wallet or pay for me (place_order payment_channel)",
   ],
 });
