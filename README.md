@@ -38,3 +38,10 @@ bun run test
 - `web/`: the website
 
 ChowBot is an independent project, not affiliated with Chowdeck. [MIT License](./LICENSE).
+
+## Find me
+
+- Portfolio: https://adedoyin.dev
+- GitHub: https://github.com/Adedoyin-Emmanuel
+- X: https://x.com/Emmysoft_Tm
+- LinkedIn: https://linkedin.com/in/Adedoyin-Emmanuel
