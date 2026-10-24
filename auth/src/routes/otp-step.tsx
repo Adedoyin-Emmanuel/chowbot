@@ -15,12 +15,7 @@ import { StepHeading } from "@/components/sign-in-shell";
 import { SignInError, resendCode, verifyCode } from "@/lib/api";
 import { clearError, showError, showSuccess } from "@/lib/toast";
 
-/*
- * Chowdeck's codes have been six digits in every capture so far; the server
- * accepts 4–8, so a shorter code can still be submitted with the button.
- */
-const CODE_LENGTH = 6;
-const MIN_CODE_LENGTH = 4;
+const CODE_LENGTH = 4;
 const RESEND_COOLDOWN_SECONDS = 30;
 
 const useCountdown = (seconds: number) => {
@@ -34,17 +29,17 @@ const useCountdown = (seconds: number) => {
 };
 
 export function OtpStep() {
-  const store = useSignInStore();
-  const { csrfToken, maskedPhone, sentFromPhoneStep } = useSignIn(store);
-  const navigate = useNavigate();
   const router = useRouter();
+  const store = useSignInStore();
+  const navigate = useNavigate();
+  const { csrfToken, maskedPhone, sentFromPhoneStep } = useSignIn(store);
 
+  const inFlight = useRef(false);
   const [code, setCode] = useState("");
   const [invalid, setInvalid] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [resending, setResending] = useState(false);
   const [cooldown, restartCooldown] = useCountdown(RESEND_COOLDOWN_SECONDS);
-  const inFlight = useRef(false);
 
   const fail = (caught: unknown) => {
     const failure =
@@ -66,7 +61,7 @@ export function OtpStep() {
   };
 
   const verify = async (otp: string) => {
-    if (inFlight.current || otp.length < MIN_CODE_LENGTH) return;
+    if (inFlight.current || otp.length < CODE_LENGTH) return;
     inFlight.current = true;
     setVerifying(true);
     setInvalid(false);
@@ -109,7 +104,7 @@ export function OtpStep() {
 
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (code.length < MIN_CODE_LENGTH) {
+    if (code.length < CODE_LENGTH) {
       setInvalid(true);
       showError("Enter the code Chowdeck sent you.");
       return;
@@ -155,13 +150,13 @@ export function OtpStep() {
             aria-invalid={invalid || undefined}
             containerClassName="gap-2"
           >
-            <InputOTPGroup className="gap-2 sm:gap-2.5">
+            <InputOTPGroup className="gap-3">
               {Array.from({ length: CODE_LENGTH }, (_, index) => (
                 <InputOTPSlot
                   key={index}
                   index={index}
                   aria-invalid={invalid || undefined}
-                  className="size-12 rounded-xl border border-transparent bg-muted text-xl font-bold first:rounded-xl last:rounded-xl data-[active=true]:border-kiwi sm:size-13"
+                  className="size-14 rounded-xl border border-transparent bg-muted text-2xl font-bold first:rounded-xl last:rounded-xl data-[active=true]:border-kiwi sm:size-15"
                 />
               ))}
             </InputOTPGroup>

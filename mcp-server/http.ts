@@ -4,30 +4,26 @@ import {
   readDatabaseConfig,
   deleteExpiredRecords,
 } from "./lib/postgres/database";
-import { PORT, parseTrustProxyHops } from "./constants/app";
-import { logger } from "./utils/logger";
 import { join } from "node:path";
+import { logger } from "./utils/logger";
 import { createHttpApp } from "./mcp/http-app";
-import { createAuthorizeUi } from "./mcp/authorize-ui";
+import { MCP_SERVER_URL } from "./constants/oauth";
 import { migrate } from "./lib/postgres/migrations";
 import { createPostgresStores } from "./lib/postgres";
-import { MCP_SERVER_URL, OAUTH_ISSUER_URL } from "./constants/oauth";
-import { createKeyring, parseEncryptionKey } from "./lib/encryption";
-import { readOrderPlacementConfig } from "./features/order-placement/config";
-import { createPaymentStartConfig } from "./features/payments/service";
+import { createAuthorizeUi } from "./mcp/authorize-ui";
+import { PORT, parseTrustProxyHops } from "./constants/app";
 import { CHOWDECK_REQUEST_TIMEOUT_MS } from "./constants/chowdeck";
+import { createKeyring, parseEncryptionKey } from "./lib/encryption";
+import { createPaymentStartConfig } from "./features/payments/service";
+import { readOrderPlacementConfig } from "./features/order-placement/config";
 import { createGracefulShutdown, readShutdownGraceMs } from "./lib/lifecycle";
 
-/*
- * The built sign-in app. Both this file and the bundled dist/http.js sit one
- * level below a folder that has auth/dist beside them (the repo root, or
- * /app in the container); AUTH_UI_DIR overrides it.
- */
+
 const AUTH_UI_DIR =
   process.env.AUTH_UI_DIR || join(import.meta.dir, "..", "auth", "dist");
 
-const EXPIRED_RECORD_SWEEP_MS = 60 * 60 * 1000;
 const READINESS_DB_TIMEOUT_MS = 2000;
+const EXPIRED_RECORD_SWEEP_MS = 60 * 60 * 1000;
 
 const start = async () => {
   const keyring = createKeyring(
@@ -73,11 +69,9 @@ const start = async () => {
 
   const app = createHttpApp({
     serverUrl: MCP_SERVER_URL,
-    issuerUrl: OAUTH_ISSUER_URL,
     ...createPostgresStores(sql, keyring),
     placeOrderEnabled,
     ...(paymentChannelQuery && { paymentChannelQuery }),
-    // start_payment follows the same switch, with the website's redirect pages.
     ...(placeOrderEnabled && { paymentStartConfig: createPaymentStartConfig() }),
     lifecycle: { isShuttingDown: () => shuttingDown(), checkDatabase },
     authorizeUi: createAuthorizeUi(AUTH_UI_DIR),

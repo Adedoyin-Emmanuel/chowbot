@@ -14,6 +14,7 @@ import { GithubIcon } from "./brand-icons";
 const NAV = [
   { href: "/#features", label: "What it can do" },
   { href: "/#how-it-works", label: "How it works" },
+  { href: "/#connect", label: "Connect" },
   { href: "/#faq", label: "FAQ" },
   { href: "/about", label: "About" },
 ];
@@ -21,7 +22,7 @@ const NAV = [
 /*
  * Chowdeck's header: separate floating pills over the page, not a bar. A
  * green logo pill on the left, the links in one white pill in the middle,
- * the action on the right. On phones, round buttons and a dropdown menu.
+ * GitHub on the right. On phones, round buttons and a dropdown menu.
  */
 export function Header() {
   const [open, setOpen] = useState(false);
@@ -62,9 +63,9 @@ export function Header() {
               <li key={item.href}>
                 <a
                   href={item.href}
-                  className="block rounded-full px-5 py-3 text-base font-semibold xl:px-6 text-ink transition-colors hover:text-cucumber"
+                  className="block rounded-full px-5 py-3 text-base font-semibold text-ink transition-colors hover:text-cucumber xl:px-6"
                 >
-                  {item.label}
+                  <span className="link-underline">{item.label}</span>
                 </a>
               </li>
             ))}
@@ -72,12 +73,6 @@ export function Header() {
         </nav>
 
         <div className="flex items-center gap-2">
-          <a
-            href="/#connect"
-            className="flex h-12 items-center rounded-full bg-white px-6 text-base font-semibold text-chow-green ring-1 ring-ink/5 transition-colors hover:text-cucumber"
-          >
-            Connect
-          </a>
           <a
             href={LINKS.github}
             target="_blank"

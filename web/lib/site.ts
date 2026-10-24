@@ -5,7 +5,7 @@
  */
 export const MCP_SERVER_URL =
   process.env.NEXT_PUBLIC_MCP_SERVER_URL?.trim() ||
-  "https://chowbot.example.com/mcp";
+  "https://chowbot.example.com";
 
 export const SITE = {
   name: "ChowBot",

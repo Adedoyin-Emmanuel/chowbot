@@ -18,8 +18,6 @@ export type SignIn = {
   csrfToken: string;
   clientName: string;
   maskedPhone?: string;
-  // Set once the server has sent a code during this page's lifetime, so
-  // "change number" can go back in history instead of losing the URL.
   sentFromPhoneStep: boolean;
   ended?: Ended;
   redirectingTo?: string;
@@ -67,7 +65,7 @@ export const initialSignIn = (state = readAuthorizeState()): SignIn => {
 
 /*
  * A tiny store shared by the router (to guard the code step) and the
- * components (to render), without pulling in a state library.
+ * components (to render), without using a library.
  */
 export const createSignInStore = (initial: SignIn) => {
   let current = initial;

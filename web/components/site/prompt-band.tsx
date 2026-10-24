@@ -25,8 +25,7 @@ export function PromptBand() {
               key={index}
               className="flex items-center gap-4 text-2xl font-extrabold tracking-tight whitespace-nowrap text-white sm:text-3xl"
             >
-              “{prompt}”
-              <span className="text-sun">✦</span>
+              “{prompt}”<span className="text-sun">✦</span>
             </span>
           ))}
         </div>

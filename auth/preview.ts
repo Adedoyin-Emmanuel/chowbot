@@ -22,7 +22,7 @@ import { InMemoryAccessTokenStore } from "../mcp-server/lib/oauth";
 import { createAuthorizeUi } from "../mcp-server/mcp/authorize-ui";
 import { InMemoryAuthorizationCodeStore } from "../mcp-server/lib/oauth-codes";
 
-const PREVIEW_CODE = "123456";
+const PREVIEW_CODE = "1234";
 const PORT = Number(process.env.PREVIEW_PORT || 2801);
 const origin = `http://localhost:${PORT}`;
 
@@ -58,7 +58,6 @@ const client = await registerClient(clients, {
 
 const app = createHttpApp({
   serverUrl: new URL(`${origin}/mcp`),
-  issuerUrl: new URL(origin),
   users: new InMemoryUserStore(),
   clients,
   sessions: new InMemorySessionStore(),

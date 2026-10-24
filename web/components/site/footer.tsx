@@ -100,7 +100,7 @@ export function Footer() {
                             target: "_blank",
                             rel: "noreferrer",
                           })}
-                          className="transition-colors hover:text-kiwi"
+                          className="link-underline transition-colors hover:text-kiwi"
                         >
                           {link.label}
                         </a>
@@ -127,7 +127,7 @@ export function Footer() {
                   className="flex h-20 items-center justify-center gap-2 text-sm font-bold tracking-[-0.02em] transition-colors hover:bg-white/5 sm:h-24 sm:gap-2.5 sm:text-lg lg:text-xl"
                 >
                   {social.mark}
-                  {social.label}
+                  <span className="link-underline">{social.label}</span>
                 </a>
               </li>
             ))}
@@ -136,15 +136,13 @@ export function Footer() {
 
         <div className="space-y-1.5 border-t border-white/15 py-8 text-center text-sm text-white/50">
           <p>
-            Made with{" "}
-            <HeartArt className="inline size-4 -translate-y-px" />
-            <span className="sr-only">love</span>{" "}
-            by{" "}
+            Made with <HeartArt className="inline size-4 -translate-y-px" />
+            <span className="sr-only">love</span> by{" "}
             <a
               href={LINKS.author.site}
               target="_blank"
               rel="noreferrer"
-              className="font-semibold text-white/80 hover:text-kiwi"
+              className="link-underline font-semibold text-white/80 hover:text-kiwi"
             >
               {LINKS.author.name}
             </a>

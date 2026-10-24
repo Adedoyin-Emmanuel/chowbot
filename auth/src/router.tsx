@@ -8,13 +8,13 @@ import {
 
 import {
   EndedView,
-  RedirectingView,
   SignInShell,
+  RedirectingView,
 } from "@/components/sign-in-shell";
+import { OtpStep } from "@/routes/otp-step";
+import { PhoneStep } from "@/routes/phone-step";
 import { useSignInStore } from "@/lib/sign-in-context";
 import { useSignIn, type SignInStore } from "@/lib/state";
-import { PhoneStep } from "@/routes/phone-step";
-import { OtpStep } from "@/routes/otp-step";
 
 type RouterContext = { signIn: SignInStore };
 

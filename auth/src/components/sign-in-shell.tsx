@@ -11,7 +11,6 @@ import { Spinner } from "@/components/ui/spinner";
 import chowbotLogoUrl from "@/assets/images/chowbot-logo.svg";
 import chowdeckLogoUrl from "@/assets/images/chowdeck-logo.svg";
 
-// Chowdeck, then ChowBot: the account being connected to the assistant.
 function ConnectionMark() {
   return (
     <div
@@ -41,7 +40,6 @@ function ConnectionMark() {
   );
 }
 
-// An ended sign-in drops the connection mark: nothing is being connected.
 export function SignInShell({
   showMark = true,
   children,
@@ -76,7 +74,7 @@ export function SignInShell({
         }}
       />
       <main className="flex flex-1 flex-col items-center px-5 pt-[max(3.5rem,10vh)] pb-8 sm:justify-center sm:pt-8">
-        <div className="w-full max-w-[25.5rem]">
+        <div className="w-full max-w-102">
           {showMark && <ConnectionMark />}
           {children}
         </div>

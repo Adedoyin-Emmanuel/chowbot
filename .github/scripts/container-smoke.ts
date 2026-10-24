@@ -42,7 +42,7 @@ await Bun.write(
     `DATABASE_URL=${appUrl.href}`,
     `CHOWBOT_ENCRYPTION_KEY=${randomBytes(32).toString("base64")}`,
     "PORT=2800",
-    `MCP_SERVER_URL=http://127.0.0.1:${port}/mcp`,
+    `MCP_SERVER_URL=http://127.0.0.1:${port}`,
     "CHOWDECK_API_BASE_URL=http://127.0.0.1:9",
   ].join("\n") + "\n",
 );

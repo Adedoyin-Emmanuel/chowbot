@@ -32,7 +32,6 @@ import {
 } from "../../lib/oauth-codes";
 
 const SERVER_URL = new URL("http://localhost:2800/mcp");
-const ISSUER_URL = new URL("http://localhost:2800");
 const REDIRECT_URI = "https://app.example.com/oauth/callback";
 const VERIFIER = "refresh-verifier-".padEnd(64, "r");
 
@@ -75,7 +74,6 @@ beforeAll(async () => {
   sessions = new InMemorySessionStore();
   const app = createHttpApp({
     serverUrl: SERVER_URL,
-    issuerUrl: ISSUER_URL,
     users: new InMemoryUserStore(),
     clients,
     codes,

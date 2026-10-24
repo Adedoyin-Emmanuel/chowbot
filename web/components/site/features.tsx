@@ -1,11 +1,26 @@
 "use client";
 
-import { BadgePercent, Bike, Search, ShoppingBasket, Star, Wallet, type LucideIcon } from "lucide-react";
+import {
+  BadgePercent,
+  Bike,
+  Search,
+  ShoppingBasket,
+  Star,
+  Wallet,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 import { cn } from "@/lib/utils";
 
-import { BasketArt, JollofArt, NotesArt, ReceiptArt, RiderArt, StarsArt } from "./illustrations";
+import {
+  BasketArt,
+  JollofArt,
+  NotesArt,
+  ReceiptArt,
+  RiderArt,
+  StarsArt,
+} from "./illustrations";
 import { SectionHeading } from "./section-heading";
 
 type Deck = {
@@ -90,7 +105,8 @@ const MAX_OPEN = 760;
 // Scroll distance that moves the deck on by one card.
 const STEP = 420;
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
 
 /*
  * Each card holds fully open for most of its share of the scroll and hands
@@ -124,13 +140,19 @@ export function Features() {
       frame = 0;
       const travel = section.offsetHeight - window.innerHeight;
       if (travel <= 0) return setProgress(0);
-      const scrolled = clamp(-section.getBoundingClientRect().top / travel, 0, 1);
+      const scrolled = clamp(
+        -section.getBoundingClientRect().top / travel,
+        0,
+        1,
+      );
       setProgress(dwell(scrolled * (DECKS.length - 1)));
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(update);
     };
-    const resize = new ResizeObserver(([entry]) => setRowWidth(entry!.contentRect.width));
+    const resize = new ResizeObserver(([entry]) =>
+      setRowWidth(entry!.contentRect.width),
+    );
 
     resize.observe(row);
     update();
@@ -145,8 +167,13 @@ export function Features() {
   }, []);
 
   const open = Math.min(MAX_OPEN, rowWidth - 2 * (CLOSED + GAP));
-  const total = DECKS.length * CLOSED + (open - CLOSED) + (DECKS.length - 1) * GAP;
-  const shift = clamp(progress * (CLOSED + GAP), 0, Math.max(0, total - rowWidth));
+  const total =
+    DECKS.length * CLOSED + (open - CLOSED) + (DECKS.length - 1) * GAP;
+  const shift = clamp(
+    progress * (CLOSED + GAP),
+    0,
+    Math.max(0, total - rowWidth),
+  );
 
   return (
     <section
@@ -161,7 +188,10 @@ export function Features() {
           intro="Everything you'd tap in the Chowdeck app, now in a sentence."
         />
 
-        <div ref={rowRef} className="mx-auto mt-12 w-full max-w-7xl lg:mt-10 lg:overflow-hidden">
+        <div
+          ref={rowRef}
+          className="mx-auto mt-12 w-full max-w-7xl lg:mt-10 lg:overflow-hidden"
+        >
           <ul
             className="flex flex-col gap-4 lg:h-[min(34rem,calc(100vh-17rem))] lg:w-max lg:translate-x-(--shift) lg:flex-row"
             style={{ "--shift": `${-shift}px` } as CSSProperties}
@@ -175,14 +205,32 @@ export function Features() {
               return (
                 <li
                   key={deck.key}
-                  className={cn("relative overflow-hidden rounded-2xl border-4 border-black lg:w-(--width)", deck.card)}
-                  style={{ "--width": `${width}px`, "--open": textOpacity, "--closed": titleOpacity, "--card": `${open}px` } as CSSProperties}
+                  className={cn(
+                    "relative overflow-hidden rounded-2xl border-4 border-black lg:w-(--width)",
+                    deck.card,
+                  )}
+                  style={
+                    {
+                      "--width": `${width}px`,
+                      "--open": textOpacity,
+                      "--closed": titleOpacity,
+                      "--card": `${open}px`,
+                    } as CSSProperties
+                  }
                 >
-                  <deck.icon className="absolute top-7 left-7 size-11 text-black lg:top-8 lg:left-8" strokeWidth={1.75} aria-hidden />
+                  <deck.icon
+                    className="absolute top-7 left-7 size-11 text-black lg:top-8 lg:left-8"
+                    strokeWidth={1.75}
+                    aria-hidden
+                  />
 
                   <div className="flex h-full flex-col p-7 pt-24 lg:w-(--card) lg:p-10 lg:pt-28 lg:opacity-(--open)">
-                    <h3 className="display text-4xl text-black sm:text-[3.25rem]">{deck.title}</h3>
-                    <p className="mt-4 max-w-md text-lg text-ink/85">{deck.body}</p>
+                    <h3 className="display text-4xl text-black sm:text-[3.25rem]">
+                      {deck.title}
+                    </h3>
+                    <p className="mt-4 max-w-md text-lg text-ink/85">
+                      {deck.body}
+                    </p>
                     <p className="mt-6 w-fit max-w-md rounded-2xl rounded-br-sm bg-black px-5 py-3 text-base font-medium text-white">
                       “{deck.prompt}”
                     </p>

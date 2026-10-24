@@ -14,48 +14,49 @@ export function ClosingCta() {
     >
       <div className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-2">
         <div className="flex flex-col rounded-2xl bg-chow-green p-8 sm:p-10">
-          <h2 id="closing" className="display text-5xl text-white sm:text-6xl">
+          <h2 id="closing" className="display text-4xl text-white sm:text-5xl">
             Place your order <br className="hidden sm:block" />
             in a sentence
           </h2>
-          <div className="mt-9 flex flex-col items-start gap-4">
+          <div className="mt-7 flex flex-wrap gap-3">
             <a
               href="#connect"
-              className="inline-flex items-center gap-2 rounded-lg bg-white px-6 py-3 font-semibold text-chow-green transition-colors hover:bg-hero"
+              className="inline-flex items-center gap-2 rounded-lg bg-white px-5 py-3 font-semibold text-chow-green transition-colors hover:bg-hero"
             >
               Connect ChowBot
               <ArrowRight className="size-4" aria-hidden />
             </a>
             <a
               href="#faq"
-              className="inline-flex items-center rounded-lg bg-white px-6 py-3 font-semibold text-chow-green transition-colors hover:bg-hero"
+              className="inline-flex items-center rounded-lg px-5 py-3 font-semibold text-white ring-1 ring-white/40 transition-colors hover:bg-white/10"
             >
               Read the FAQ
             </a>
           </div>
-          <div className="mt-auto pt-14">
-            <p className="inline-flex items-center gap-3 rounded-lg border-4 border-black bg-sun px-5 py-3 text-lg font-bold text-black sm:text-xl">
+          <div className="mt-auto pt-10">
+            <p className="inline-flex items-center gap-3 rounded-lg border-4 border-black bg-sun px-4 py-2.5 text-base font-bold text-black sm:text-lg">
               <Dot className="border-black bg-chow-green" />
               “What&apos;s on my Chowdeck cart?”
             </p>
-            <p className="mt-3 text-white">
+            <p className="mt-2 text-sm text-white/80">
               Try this first once you&apos;re connected.
             </p>
           </div>
         </div>
 
-        <div className="relative min-h-[34rem] overflow-hidden rounded-2xl bg-lavender p-8 sm:p-10">
-          <p className="display max-w-sm text-4xl text-black sm:text-5xl">
+        {/* The phone sits to the right and runs off the bottom edge. */}
+        <div className="relative min-h-[20rem] overflow-hidden rounded-2xl bg-lavender p-8 sm:min-h-[22rem] sm:p-10">
+          <p className="display max-w-[58%] text-3xl text-black sm:text-5xl">
             Works wherever your assistant does
           </p>
-          <p className="mt-4 max-w-xs text-lg text-black/80">
+          <p className="mt-4 max-w-[50%] text-base text-black/80 sm:text-lg">
             Claude, ChatGPT or any MCP app, on the web, desktop or phone.
           </p>
           <Phone
             src={tracking}
             alt="Claude on an iPhone showing an order on its way and the delivery PIN 5051."
-            className="absolute top-64 left-1/2 w-[62%] max-w-[280px] -translate-x-1/2 rotate-6 sm:top-60"
-            sizes="300px"
+            className="absolute top-10 right-5 w-[38%] max-w-[230px] rotate-6 sm:right-10"
+            sizes="230px"
           />
         </div>
       </div>

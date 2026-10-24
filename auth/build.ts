@@ -19,9 +19,11 @@ const build = async () => {
   await rm(OUTDIR, { recursive: true, force: true });
   const result = await Bun.build({
     entrypoints: [`${SRC}/index.html`],
-    // Everything is emitted flat into assets/ because Bun only applies a
-    // naming folder to files the HTML references, not to files imported
-    // from code; index.html is moved up afterwards.
+    /**
+       Everything is emitted flat into assets/ because Bun only applies a
+       naming folder to files the HTML references, not to files imported
+       from code; index.html is moved up afterwards.
+    **/
     outdir: ASSETS_DIR,
     target: "browser",
     minify: true,

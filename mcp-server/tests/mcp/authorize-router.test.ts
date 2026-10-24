@@ -39,7 +39,6 @@ import {
 } from "../../lib/oauth-codes";
 
 const SERVER_URL = new URL("http://localhost:2800/mcp");
-const ISSUER_URL = new URL("http://localhost:2800");
 const COOKIE_NAME = "chowbot_authorization";
 const REDIRECT_URI = "https://app.example.com/oauth/callback";
 const GENEROUS_LIMITS: Partial<AuthorizeLimits> = {
@@ -81,7 +80,6 @@ const startHarness = async (
   const sessions = new InMemorySessionStore();
   const app = createHttpApp({
     serverUrl: SERVER_URL,
-    issuerUrl: ISSUER_URL,
     users,
     codes,
     clients,

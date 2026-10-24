@@ -59,7 +59,7 @@ export function HowItWorks() {
                 href={step.link.href}
                 className="label-caps mt-8 inline-flex items-center gap-2 text-black hover:text-cucumber"
               >
-                {step.link.label}
+                <span className="link-underline">{step.link.label}</span>
                 <ArrowRight className="size-4" aria-hidden />
               </a>
             </li>

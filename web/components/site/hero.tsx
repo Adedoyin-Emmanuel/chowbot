@@ -42,7 +42,7 @@ export function Hero() {
           Paste it into your assistant&apos;s connector settings.{" "}
           <a
             href="#connect"
-            className="font-semibold text-chow-green underline underline-offset-4"
+            className="link-underline font-semibold text-chow-green"
           >
             Show me how
           </a>

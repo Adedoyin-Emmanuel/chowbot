@@ -47,18 +47,24 @@ export function Showcase() {
       <div className="overflow-hidden bg-chow-green pt-20 pb-20 lg:pt-28 lg:pb-28">
         <div className="mx-auto grid max-w-7xl gap-6 px-4 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:px-10">
           <div className="flex items-center gap-5">
-            <h2 id="showcase" className="display text-[2.75rem] text-white sm:text-6xl lg:text-7xl">
+            <h2
+              id="showcase"
+              className="display text-[2.75rem] text-white sm:text-6xl lg:text-7xl"
+            >
               Real chats.
               <br />
               Real food.
             </h2>
-            <span aria-hidden className="hidden size-28 shrink-0 place-items-center rounded-full bg-sun sm:grid lg:size-32">
+            <span
+              aria-hidden
+              className="hidden size-28 shrink-0 place-items-center rounded-full bg-sun sm:grid lg:size-32"
+            >
               <JollofArt className="w-24 lg:w-28" />
             </span>
           </div>
           <p className="text-lg text-white/90 sm:text-2xl lg:pt-2">
-            Screenshots from Claude on an iPhone, ordering shawarma in Lagos with ChowBot. It works the same in any
-            assistant that supports MCP.
+            Screenshots from Claude on an iPhone, ordering shawarma in Lagos
+            with ChowBot. It works the same in any assistant that supports MCP.
           </p>
         </div>
 
@@ -116,8 +122,12 @@ export function Showcase() {
                       sizes="(min-width: 1024px) 280px, 72vw"
                     />
                     <figcaption className="mx-auto mt-6 max-w-[280px] text-center">
-                      <span className="block text-lg font-bold text-white">{stop.prompt}</span>
-                      <span className="mt-1 block text-white/70">{stop.caption}</span>
+                      <span className="block text-lg font-bold text-white">
+                        {stop.prompt}
+                      </span>
+                      <span className="mt-1 block text-white/70">
+                        {stop.caption}
+                      </span>
                     </figcaption>
                   </figure>
                 </li>

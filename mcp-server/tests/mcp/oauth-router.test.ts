@@ -7,9 +7,8 @@ import { InMemorySessionStore } from "../../lib/session";
 import { InMemoryAccessTokenStore } from "../../lib/oauth";
 import { InMemoryClientStore } from "../../lib/oauth-clients";
 import { InMemoryAuthorizationCodeStore } from "../../lib/oauth-codes";
-import { assertIssuerHostedBy, createHttpApp } from "../../mcp/http-app";
+import { createHttpApp } from "../../mcp/http-app";
 
-const ISSUER_URL = new URL("http://localhost:2800");
 const SERVER_URL = new URL("http://localhost:2800/mcp");
 
 let baseUrl: string;
@@ -20,7 +19,6 @@ beforeAll(async () => {
   clients = new InMemoryClientStore();
   const app = createHttpApp({
     serverUrl: SERVER_URL,
-    issuerUrl: ISSUER_URL,
     users: new InMemoryUserStore(),
     clients,
     codes: new InMemoryAuthorizationCodeStore(),
@@ -79,17 +77,6 @@ describe("authorization server metadata", () => {
 
     expect(protectedResource.authorization_servers).toEqual([authorizationServer.issuer]);
     expect(protectedResource.resource).toBe(SERVER_URL.href);
-  });
-
-  test.each([
-    ["a different origin", "https://auth.example.com", "http://localhost:2800/mcp"],
-    ["a different port", "http://localhost:9999", "http://localhost:2800/mcp"],
-    ["a path", "http://localhost:2800/oauth", "http://localhost:2800/mcp"],
-    ["a query", "http://localhost:2800/?tenant=1", "http://localhost:2800/mcp"],
-  ])("refuses an issuer with %s", (_, issuer, serverUrl) => {
-    expect(() => assertIssuerHostedBy(new URL(issuer), new URL(serverUrl))).toThrow(
-      "OAUTH_ISSUER_URL must be the MCP server origin",
-    );
   });
 });
 

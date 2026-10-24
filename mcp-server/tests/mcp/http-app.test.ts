@@ -18,7 +18,6 @@ import {
 } from "../../lib/oauth";
 
 const SERVER_URL = new URL("http://localhost:2800/mcp");
-const ISSUER_URL = new URL("http://localhost:2800");
 const METADATA_URL = "http://localhost:2800/.well-known/oauth-protected-resource/mcp";
 
 type Listening = { server: HttpServer; baseUrl: string };
@@ -103,7 +102,6 @@ beforeAll(async () => {
   sessions = new InMemorySessionStore();
   const options = {
     serverUrl: SERVER_URL,
-    issuerUrl: ISSUER_URL,
     users: new InMemoryUserStore(),
     clients: new InMemoryClientStore(),
     codes: new InMemoryAuthorizationCodeStore(),
@@ -238,12 +236,79 @@ describe("/mcp bearer authentication", () => {
   });
 });
 
+describe("serving MCP at the root of the domain", () => {
+  const ROOT_URL = new URL("http://localhost:2800");
+  const listTools = { method: "tools/list", params: {} };
+  let rootApp: Listening;
+
+  beforeAll(async () => {
+    rootApp = await listen(
+      createHttpApp({
+        serverUrl: ROOT_URL,
+        users: new InMemoryUserStore(),
+        clients: new InMemoryClientStore(),
+        codes: new InMemoryAuthorizationCodeStore(),
+        tokens,
+        sessions,
+        serverFactory: probeServer,
+      }),
+    );
+  });
+
+  afterAll(() => {
+    rootApp.server.close();
+  });
+
+  const listToolsAt = (path: string, authorization?: string) =>
+    fetch(`${rootApp.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2025-06-18",
+        ...(authorization && { authorization }),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, ...listTools }),
+    });
+
+  test("challenges at / with the root metadata URL", async () => {
+    const response = await listToolsAt("/");
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toContain(
+      'resource_metadata="http://localhost:2800/.well-known/oauth-protected-resource"',
+    );
+  });
+
+  test("serves metadata naming the bare origin as the resource", async () => {
+    const response = await fetch(`${rootApp.baseUrl}/.well-known/oauth-protected-resource`);
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { resource: string }).resource).toBe("http://localhost:2800/");
+  });
+
+  test.each(["http://localhost:2800", "http://localhost:2800/"])(
+    "accepts a token issued for %s at /",
+    async (resource) => {
+      const response = await listToolsAt("/", `Bearer ${await issue({ resource })}`);
+
+      expect(response.status).toBe(200);
+      expect((await rpcResult(response)).tools.map((tool: { name: string }) => tool.name)).toContain("read_phone");
+    },
+  );
+
+  test("leaves the other routes where they were", async () => {
+    expect((await fetch(`${rootApp.baseUrl}/healthz`)).status).toBe(200);
+    expect((await fetch(`${rootApp.baseUrl}/.well-known/oauth-authorization-server`)).status).toBe(200);
+    expect((await listToolsAt("/mcp", `Bearer ${await issue({ resource: ROOT_URL.href })}`)).status).toBe(404);
+  });
+});
+
 describe("health and shutdown", () => {
   const appWith = (lifecycle?: { isShuttingDown: () => boolean; checkDatabase: () => Promise<boolean> }) =>
     listen(
       createHttpApp({
         serverUrl: SERVER_URL,
-        issuerUrl: ISSUER_URL,
         users: new InMemoryUserStore(),
         clients: new InMemoryClientStore(),
         codes: new InMemoryAuthorizationCodeStore(),
@@ -339,7 +404,6 @@ describe("trusted reverse proxies", () => {
     listen(
       createHttpApp({
         serverUrl: SERVER_URL,
-        issuerUrl: ISSUER_URL,
         users: new InMemoryUserStore(),
         clients: new InMemoryClientStore(),
         codes: new InMemoryAuthorizationCodeStore(),

@@ -1,14 +1,14 @@
-import { ArrowRightIcon } from "lucide-react";
 import { cn } from "cn";
-import { useState, type ReactNode, type SubmitEvent } from "react";
+import { ArrowRightIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
+import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import {
   COUNTRIES,
-  isValidNational,
   localDigits,
   nationalDigits,
   toInternational,
+  isValidNational,
   type CountryCode,
 } from "@/lib/phone";
 import {
@@ -28,7 +28,6 @@ import { useSignInStore } from "@/lib/sign-in-context";
 import { StepHeading } from "@/components/sign-in-shell";
 import { clearError, showError, showSuccess } from "@/lib/toast";
 
-// Chowdeck form labels: small, bold, spaced capitals with a red asterisk.
 function FieldLabel({
   htmlFor,
   children,
@@ -49,7 +48,6 @@ function FieldLabel({
   );
 }
 
-// Drawn rather than an emoji, which Windows shows as the letters "NG".
 function NigeriaFlag() {
   return (
     <svg viewBox="0 0 3 2" className="h-4 w-6 rounded-[2px]" aria-hidden="true">
@@ -63,13 +61,13 @@ const FIELD = "h-15 rounded-2xl border-0 bg-muted";
 
 export function PhoneStep() {
   const store = useSignInStore();
-  const { csrfToken, clientName } = useSignIn(store);
   const navigate = useNavigate();
+  const { csrfToken, clientName } = useSignIn(store);
 
-  const [country, setCountry] = useState<CountryCode>("NG");
   const [phone, setPhone] = useState("");
   const [invalid, setInvalid] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [country, setCountry] = useState<CountryCode>("NG");
 
   const dialCode = COUNTRIES.find((entry) => entry.code === country)!.dialCode;
 
@@ -163,7 +161,7 @@ export function PhoneStep() {
           <div
             className={cn(
               FIELD,
-              "flex items-center gap-2.5 px-5 transition-[box-shadow] focus-within:ring-[3px] focus-within:ring-ring/50",
+              "flex items-center gap-2.5 px-5 transition-shadow focus-within:ring-[3px] focus-within:ring-ring/50",
               invalid && "ring-2 ring-pepper/40 focus-within:ring-pepper/40",
               submitting && "opacity-50",
             )}

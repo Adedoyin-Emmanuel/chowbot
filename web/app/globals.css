@@ -139,8 +139,35 @@
   /* chowdeck.com's green ribbon with kiwi scallops, used as a section trim. */
   .scallop-band {
     background:
-      radial-gradient(circle at 50% 0, transparent 13px, var(--color-kiwi) 14px, var(--color-kiwi) 17px, transparent 18px) 0 0 / 36px 22px repeat-x,
+      radial-gradient(
+          circle at 50% 0,
+          transparent 13px,
+          var(--color-kiwi) 14px,
+          var(--color-kiwi) 17px,
+          transparent 18px
+        )
+        0 0 / 36px 22px repeat-x,
       var(--color-chow-green);
+  }
+
+  /* An underline that draws in from the left on hover or keyboard focus. Put
+   * it on the link, or on a span inside a padded link. */
+  .link-underline {
+    background: linear-gradient(currentColor, currentColor) 0 100% / 0 2px
+      no-repeat;
+    padding-bottom: 2px;
+    transition: background-size 0.25s ease;
+  }
+  .link-underline:hover,
+  a:focus-visible.link-underline,
+  a:hover > .link-underline,
+  a:focus-visible > .link-underline {
+    background-size: 100% 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .link-underline {
+      transition: none;
+    }
   }
 
   /* Chowdeck's small caps-style link labels ("SEE MORE ->"). */

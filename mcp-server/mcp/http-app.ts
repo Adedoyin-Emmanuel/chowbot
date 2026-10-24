@@ -49,12 +49,13 @@ import type { PaymentChannelQuery } from "../features/order-placement/channels";
  */
 export type HttpAppOptions = {
   serverUrl: URL;
-  issuerUrl: URL;
   users: UserStore;
   clients: ClientStore;
   sessions: SessionStore;
-  tokens: AccessTokenStore;
+  trustProxyHops?: number;
   lifecycle?: AppLifecycle;
+  tokens: AccessTokenStore;
+  authorizeUi?: AuthorizeUi;
   chowdeck?: ChowdeckClient;
   placeOrderEnabled?: boolean;
   codes: AuthorizationCodeStore;
@@ -63,12 +64,9 @@ export type HttpAppOptions = {
   paymentStartConfig?: PaymentStartConfig;
   paymentChannelQuery?: PaymentChannelQuery;
   authorizeLimits?: Partial<AuthorizeLimits>;
-  authorizeUi?: AuthorizeUi;
-  trustProxyHops?: number;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
 
-// Without the built sign-in app, the sign-in pages answer 503 "unavailable".
 const UNAVAILABLE_AUTHORIZE_UI: AuthorizeUi = { shell: async () => undefined };
 
 /*
@@ -93,19 +91,6 @@ const sendWebResponse = async (res: ExpressResponse, response: Response) => {
   res.send(await response.text());
 };
 
-export const assertIssuerHostedBy = (issuerUrl: URL, serverUrl: URL) => {
-  if (
-    issuerUrl.origin !== serverUrl.origin ||
-    issuerUrl.pathname !== "/" ||
-    issuerUrl.search ||
-    issuerUrl.hash
-  ) {
-    throw new Error(
-      `OAUTH_ISSUER_URL must be the MCP server origin (${serverUrl.origin}), got "${issuerUrl.href}"`,
-    );
-  }
-};
-
 const userIdOf = (authInfo?: AuthInfo) => {
   const userId = authInfo?.extra?.userId;
   return typeof userId === "string" && userId ? userId : undefined;
@@ -113,7 +98,6 @@ const userIdOf = (authInfo?: AuthInfo) => {
 
 export const createHttpApp = ({
   serverUrl,
-  issuerUrl,
   users,
   clients,
   tokens,
@@ -131,8 +115,8 @@ export const createHttpApp = ({
   lifecycle,
   trustProxyHops = 0,
 }: HttpAppOptions) => {
-  assertIssuerHostedBy(issuerUrl, serverUrl);
-
+  // The server is its own authorization server, so the issuer is its origin.
+  const issuerUrl = new URL(serverUrl.origin);
   const authorizationServer = buildAuthorizationServerMetadata(issuerUrl);
   const resourceMetadata = buildOAuthProtectedResourceMetadata({
     oauthMetadata: authorizationServer,
@@ -161,7 +145,7 @@ export const createHttpApp = ({
     createMcpHandler(({ authInfo }) => {
       const userId = userIdOf(authInfo);
       if (!userId) {
-        throw new Error("Refusing to serve /mcp without an authenticated user");
+        throw new Error("Refusing to serve MCP without an authenticated user");
       }
       return serverFactory({
         session: bindSession(sessions, userId),
@@ -175,11 +159,7 @@ export const createHttpApp = ({
   const app = express();
   if (trustProxyHops > 0) app.set("trust proxy", trustProxyHops);
 
-  /*
-   * Liveness never touches the database, so a database outage does not get
-   * the process restarted; readiness does, and fails while shutting down.
-   * Neither reveals anything beyond ok / not ready.
-   */
+
   app.get(LIVENESS_PATH, (_req, res) => {
     res.set("cache-control", "no-store").json({ status: "ok" });
   });
@@ -239,6 +219,7 @@ export const createHttpApp = ({
     },
   );
 
+  // MCP lives at MCP_SERVER_URL's path: "/" for a bare origin, else e.g. "/mcp".
   app.all(
     serverUrl.pathname,
     useGolbalRateLimiter,

@@ -1,1 +1,1 @@
-ChowBot: order Chowdeck food by chatting with Claude
+ChowBot: you don chow? Just ask. Someone asks to order their usual from Item 7 and ChowBot replies with their chicken and beef shawarma and a link to pay 11,090 naira with OPay.

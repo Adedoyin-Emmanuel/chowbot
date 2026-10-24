@@ -26,7 +26,6 @@ type Instance = {
 };
 
 const SERVER_URL = new URL("http://localhost:2800/mcp");
-const ISSUER_URL = new URL("http://localhost:2800");
 const REDIRECT_URI = "https://app.example.com/oauth/callback";
 const CODE_CHALLENGE = new Bun.CryptoHasher("sha256").update("v".repeat(64)).digest("base64url");
 const MASTER_KEY = randomBytes(32);
@@ -51,7 +50,6 @@ const startInstance = async () => {
   const stores = createPostgresStores(database.connect(), createKeyring(MASTER_KEY));
   const app = createHttpApp({
     serverUrl: SERVER_URL,
-    issuerUrl: ISSUER_URL,
     ...stores,
     chowdeck: new ChowdeckClient({ baseUrl: chowdeck.url.origin, timeoutMs: 1000 }),
     authorizeLimits: { otpRequestsPerIp: 1000, otpRequestsPerPhone: 1000, otpVerificationsPerIp: 1000 },

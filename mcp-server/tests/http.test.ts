@@ -110,7 +110,6 @@ const toolsWith = async (entry: string, placeOrderEnv: Record<string, string>) =
       DATABASE_URL: database.config.url,
       CHOWBOT_ENCRYPTION_KEY: key.toString("base64"),
       MCP_SERVER_URL: serverUrl,
-      OAUTH_ISSUER_URL: `http://127.0.0.1:${port}`,
       CHOWDECK_API_BASE_URL: "http://127.0.0.1:9",
       ...placeOrderEnv,
     },
