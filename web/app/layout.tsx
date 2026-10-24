@@ -40,19 +40,15 @@ export const metadata: Metadata = {
     description: SITE.description,
     locale: "en_NG",
     images: [
-      {
-        url: "/opengraph-image.png",
-        width: 1200,
-        height: 630,
-        alt: ogImageAlt,
-      },
+      { url: "/og-image.png", width: 1200, height: 630, alt: ogImageAlt },
     ],
   },
   twitter: {
     card: "summary_large_image",
     title: SITE.title,
     description: SITE.description,
-    images: [{ url: "/opengraph-image.png", alt: ogImageAlt }],
+    images: [{ url: "/og-image.png", alt: ogImageAlt }],
+    creator: "@Emmysoft_Tm",
   },
 };
 
