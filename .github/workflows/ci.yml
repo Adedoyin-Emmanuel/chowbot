@@ -57,13 +57,15 @@ jobs:
 
       - name: Typecheck
         run: |
-          bun run typecheck
-          bunx tsc --noEmit -p .github/scripts/tsconfig.json
+          bun run --cwd mcp-server typecheck
+          bun run --cwd mcp-server tsc --noEmit -p ../.github/scripts/tsconfig.json
 
       - name: Check migrations
+        working-directory: mcp-server
         run: bun run db:check
 
       - name: Test (PostgreSQL-backed; skipped tests fail the build)
+        working-directory: mcp-server
         run: |
           set -o pipefail
           bun test 2>&1 | tee "$RUNNER_TEMP/test.log"
@@ -73,15 +75,45 @@ jobs:
           fi
 
       - name: Build
+        working-directory: mcp-server
         run: bun run build
 
       - name: Smoke-test the built HTTP artifact
+        working-directory: mcp-server
         run: CHOWBOT_HTTP_ARTIFACT=dist/http.js bun test tests/http.test.ts -t "built artifact"
+
+  apps:
+    name: Sign-in app and website
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Sign-in app (typecheck, test, build)
+        working-directory: auth
+        run: |
+          bun run typecheck
+          bun test
+          bun run build
+          test -f dist/index.html
+
+      - name: Website (typecheck, build)
+        working-directory: web
+        run: |
+          bun run typecheck
+          bun run build
 
   container:
     name: Container image
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, apps]
     timeout-minutes: 20
     services:
       postgres:
@@ -115,7 +147,7 @@ jobs:
           mkdir -p .artifact-check
           docker cp "$id":/app/dist .artifact-check/dist
           docker rm "$id"
-          CHOWBOT_HTTP_ARTIFACT=.artifact-check/dist/http.js bun test tests/http.test.ts -t "built artifact"
+          CHOWBOT_HTTP_ARTIFACT=../.artifact-check/dist/http.js bun --cwd mcp-server test tests/http.test.ts -t "built artifact"
 
       - name: Run the container (migrations, probes, graceful stop)
         run: bun .github/scripts/container-smoke.ts "chowbot:ci-${GITHUB_SHA}"

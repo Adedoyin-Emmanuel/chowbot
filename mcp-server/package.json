@@ -1,5 +1,5 @@
 {
-  "name": "chowbot",
+  "name": "@chowbot/mcp-server",
   "module": "index.ts",
   "type": "module",
   "private": true,

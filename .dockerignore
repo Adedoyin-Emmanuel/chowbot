@@ -1,10 +1,14 @@
-node_modules
-dist
-.env
-.env.*
-!.env.example
+**/node_modules
+**/dist
+**/.next
+**/.env
+**/.env.*
+!**/.env.example
 .git
-tests
+.github
+**/tests
 coverage
-md-assets
 *.md
+# Only web/package.json is needed, to satisfy the workspace lockfile.
+web/*
+!web/package.json

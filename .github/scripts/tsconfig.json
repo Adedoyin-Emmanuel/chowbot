@@ -1,6 +1,7 @@
 {
-  // The root tsconfig does not reach dot-directories, so CI scripts are
-  // typechecked separately with the same compiler options.
-  "extends": "../../tsconfig.json",
+  // mcp-server's tsconfig does not reach dot-directories, so CI scripts are
+  // typechecked separately with the same compiler options and its types.
+  "extends": "../../mcp-server/tsconfig.json",
+  "compilerOptions": { "typeRoots": ["../../mcp-server/node_modules/@types"] },
   "include": ["./*.ts"]
 }

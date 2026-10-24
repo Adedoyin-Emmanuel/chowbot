@@ -354,8 +354,8 @@ describe("trusted reverse proxies", () => {
   const requestCode = (app: Listening, forwardedFor: string) =>
     fetch(`${app.baseUrl}/authorize/phone`, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": forwardedFor },
-      body: "phone=08012345678",
+      headers: { "content-type": "application/json", "x-forwarded-for": forwardedFor },
+      body: JSON.stringify({ phone: "08012345678" }),
     }).then((response) => response.status);
 
   test("with trusted hops, each visitor gets their own limit", async () => {

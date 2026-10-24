@@ -2,7 +2,7 @@
  * Runs the built image the way production does and checks it, against a
  * throwaway database (created from TEST_DATABASE_URL and dropped afterwards):
  * the container applies every migration itself, answers /healthz and
- * /readyz, has no CHOWBOT_* settings baked in (so place_order is off), and
+ * /readyz, serves the sign-in app, has no CHOWBOT_* settings baked in (so place_order is off), and
  * drains and exits 0 on `docker stop -t 40`. Chowdeck's URL points at a
  * closed port; nothing is sent anywhere. Prints no secrets.
  *
@@ -68,7 +68,15 @@ try {
   const ready = await fetch(`http://127.0.0.1:${port}/readyz`).then(async (r) => ({ status: r.status, body: (await r.json()) as { status?: string } }), () => undefined);
   check(ready?.status === 200 && ready.body?.status === "ready", "GET /readyz answers 200 ready");
 
-  const { entries } = await Bun.file("drizzle/meta/_journal.json").json();
+  // Without a sign-in cookie this answers 403 "expired", rendered by the
+  // built sign-in app; 503 would mean the image is missing auth/dist.
+  const signIn = await fetch(`http://127.0.0.1:${port}/authorize/verify`);
+  const signInHtml = await signIn.text();
+  const script = /src="(\/authorize\/assets\/[^"]+\.js)"/.exec(signInHtml)?.[1];
+  const scriptStatus = script ? (await fetch(`http://127.0.0.1:${port}${script}`)).status : undefined;
+  check(signIn.status === 403 && scriptStatus === 200, "the image serves the built sign-in app and its assets");
+
+  const { entries } = await Bun.file(`${import.meta.dir}/../../mcp-server/drizzle/meta/_journal.json`).json();
   const db = new Bun.SQL(dbUrl.href);
   const [applied] = await db`SELECT count(*)::int AS n, max(created_at)::text AS last FROM drizzle.__drizzle_migrations`;
   await db.close();

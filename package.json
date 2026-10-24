@@ -1,0 +1,13 @@
+{
+  "name": "chowbot",
+  "private": true,
+  "type": "module",
+  "workspaces": ["mcp-server", "auth", "web"],
+  "scripts": {
+    "dev": "bun run --filter './mcp-server' --filter './auth' dev",
+    "dev:web": "bun run --filter './web' dev",
+    "build": "bun run --filter '*' build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test"
+  }
+}

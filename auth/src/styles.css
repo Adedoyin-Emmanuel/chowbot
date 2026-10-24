@@ -1,0 +1,103 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * Palette and type follow Chowdeck's brand (Chow Green, Cucumber, Kiwi,
+ * Pepper; Plus Jakarta Sans) so signing in feels familiar. The font is
+ * self-hosted: the sign-in page loads nothing from third parties.
+ */
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("./assets/fonts/plus-jakarta-sans-latin.woff2") format("woff2");
+}
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --chow-green: #0c513f;
+  --cucumber: #038b5c;
+  --kiwi: #02c27f;
+  --pepper: #e80b2e;
+  --cream: #f6f4ec;
+
+  --radius: 0.875rem;
+  --background: #ffffff;
+  --foreground: #101b17;
+  --card: #ffffff;
+  --card-foreground: #101b17;
+  --popover: #ffffff;
+  --popover-foreground: #101b17;
+  --primary: var(--chow-green);
+  --primary-foreground: #ffffff;
+  --secondary: #eef4f1;
+  --secondary-foreground: var(--chow-green);
+  --muted: #f3f6f5;
+  --muted-foreground: #5f6f69;
+  --accent: #e6f7f0;
+  --accent-foreground: var(--chow-green);
+  --destructive: var(--pepper);
+  --border: #dfe7e4;
+  --input: #d5dfdb;
+  --ring: var(--kiwi);
+}
+
+@theme inline {
+  --font-sans:
+    "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --color-chow-green: var(--chow-green);
+  --color-cucumber: var(--cucumber);
+  --color-kiwi: var(--kiwi);
+  --color-pepper: var(--pepper);
+  --color-cream: var(--cream);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --animate-caret-blink: caret-blink 1.1s ease-out infinite;
+  @keyframes caret-blink {
+    0%,
+    70%,
+    100% {
+      opacity: 1;
+    }
+    20%,
+    50% {
+      opacity: 0;
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply min-h-dvh bg-background font-sans text-foreground antialiased;
+  }
+}

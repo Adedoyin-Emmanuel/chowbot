@@ -1,3 +1,7 @@
+## Repo layout
+
+Bun workspace: `mcp-server/` (MCP server, Express + PostgreSQL), `auth/` (sign-in pages for `/authorize`: React, TanStack Router, Tailwind, shadcn/ui; built with `auth/build.ts` and served by the MCP server from `auth/dist`), `web/` (website: Next.js, Tailwind, shadcn/ui). Run commands inside the app folder (e.g. `bun run --cwd mcp-server test`). Tests live in each app's `tests/` folder. `web/` is the one place Next.js tooling is expected; everything else follows the Bun defaults below.
+
 
 Default to using Bun instead of Node.js.
 

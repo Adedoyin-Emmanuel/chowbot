@@ -1,0 +1,9 @@
+node_modules
+dist
+.next
+out
+coverage
+bun.lock
+*.tsbuildinfo
+next-env.d.ts
+mcp-server/drizzle

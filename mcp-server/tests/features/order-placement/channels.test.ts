@@ -161,8 +161,9 @@ describe("production configuration", () => {
   });
 
   test("tracked configuration leaves live ordering at its default, with no unobserved channel values", async () => {
+    // The image and compose files sit at the repo root, beside mcp-server/.
     for (const file of ["Dockerfile", "compose.yml"]) {
-      expect(await Bun.file(`${ROOT}/${file}`).text()).not.toContain("CHOWBOT_");
+      expect(await Bun.file(`${ROOT}/../${file}`).text()).not.toContain("CHOWBOT_");
     }
     const example = Object.fromEntries(
       (await Bun.file(`${ROOT}/.env.example`).text())

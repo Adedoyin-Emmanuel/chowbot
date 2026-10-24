@@ -11,14 +11,12 @@ import { logger } from "../utils/logger";
 import type { UserStore } from "../lib/users";
 import { AUTHORIZE_PATH } from "./oauth-router";
 import {
-  otpPage,
-  errorPage,
-  phonePage,
-  AUTHORIZE_FONT_PATH,
-  AUTHORIZE_ICON_PATH,
-  AUTHORIZE_LOGO_PATH,
-  type AuthorizationContext,
-} from "./authorize-pages";
+  UNBUILT_SHELL,
+  renderAuthorizePage,
+  AUTHORIZE_ASSETS_PATH,
+  type AuthorizeUi,
+  type AuthorizeState,
+} from "./authorize-ui";
 import {
   isRegisteredRedirectUri,
   type ClientStore,
@@ -37,15 +35,14 @@ import {
 import { bindSession, type SessionStore } from "../lib/session";
 import { ChowdeckApiError, ChowdeckClient } from "../lib/client";
 import { useGolbalRateLimiter } from "../middlewares/rate-limiter";
-import logoPath from "../assets/images/chowbot-logo.svg" with { type: "file" };
-import iconPath from "../assets/images/chowbot-icon.png" with { type: "file" };
-import fontPath from "../assets/fonts/plus-jakarta-sans-latin.woff2" with { type: "file" };
 
 export const AUTHORIZE_PHONE_PATH = `${AUTHORIZE_PATH}/phone`;
+export const AUTHORIZE_RESEND_PATH = `${AUTHORIZE_PATH}/resend`;
 export const AUTHORIZE_VERIFY_PATH = `${AUTHORIZE_PATH}/verify`;
+export const CSRF_HEADER = "x-csrf-token";
 
 const MAX_OTP_ATTEMPTS = 5;
-const FORM_BODY_LIMIT = "4kb";
+const JSON_BODY_LIMIT = "4kb";
 const OTP_PATTERN = /^\d{4,8}$/;
 const STATE_PATTERN = /^[\x20-\x7E]{1,512}$/;
 const PKCE_S256_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
@@ -142,26 +139,6 @@ class PhoneRateLimiter {
   }
 }
 
-/*
- * Paths are resolved against this module so they work both from source and
- * from the bundled dist/ output, where Bun rewrites them relative to the bundle.
- */
-const staticAsset = (path: string, contentType: string) => {
-  let bytes: Promise<Buffer> | undefined;
-  const file = Bun.file(new URL(path, import.meta.url));
-  return {
-    contentType,
-    load: () =>
-      (bytes ??= file.arrayBuffer().then((buffer) => Buffer.from(buffer))),
-  };
-};
-
-const STATIC_ASSETS = {
-  [AUTHORIZE_FONT_PATH]: staticAsset(fontPath, "font/woff2"),
-  [AUTHORIZE_LOGO_PATH]: staticAsset(logoPath, "image/svg+xml"),
-  [AUTHORIZE_ICON_PATH]: staticAsset(iconPath, "image/png"),
-};
-
 const safeEqual = (a: string, b: string) => {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
@@ -176,39 +153,41 @@ const readCookie = (req: Request, name: string) => {
   return undefined;
 };
 
-const redirectSource = (redirectUri: string) => {
-  const url = new URL(redirectUri);
-  return url.protocol === "http:" || url.protocol === "https:"
-    ? url.origin
-    : url.protocol;
+/*
+ * The app is served from this origin and talks only to it. Forms are not
+ * used (the app posts JSON), so form-action is closed entirely; the final
+ * redirect to the client is a plain navigation, which CSP does not govern.
+ * The bundler inlines the brand font into the stylesheet, hence data: fonts.
+ */
+const PAGE_SECURITY_HEADERS = {
+  "content-security-policy":
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
+  "x-frame-options": "DENY",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+};
+
+const API_HEADERS = {
+  "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
 };
 
 /*
- * form-action must allow the client's redirect target as well as 'self':
- * browsers apply it to the redirect that follows the OTP form submission.
+ * Failures on the JSON endpoints carry a message for the user. restart marks
+ * the ones that end the sign-in, so the app shows a final screen instead of
+ * letting them retry.
  */
-const sendPage = (
+type ApiFailure = { message: string; title?: string; restart?: boolean };
+
+const sendJson = (res: ExpressResponse, status: number, body: object) =>
+  res.status(status).set(API_HEADERS).json(body);
+
+const sendFailure = (
   res: ExpressResponse,
   status: number,
-  html: string,
-  redirectUri?: string,
-) => {
-  const formAction = [
-    "'self'",
-    ...(redirectUri ? [redirectSource(redirectUri)] : []),
-  ].join(" ");
-  res
-    .status(status)
-    .set({
-      "content-type": "text/html; charset=utf-8",
-      "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
-      "x-frame-options": "DENY",
-      "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
-    })
-    .send(html);
-};
+  failure: ApiFailure,
+) => sendJson(res, status, { error: failure });
 
 const sameResource = (value: string, resource: URL) =>
   value.replace(/\/$/, "") === resource.href.replace(/\/$/, "");
@@ -320,9 +299,16 @@ const isClientError = (error: unknown) =>
   error.status !== undefined &&
   error.status < 500;
 
+const EXPIRED: ApiFailure = {
+  title: "Sign-in expired",
+  message: "Start again from your assistant.",
+  restart: true,
+};
+
 export type AuthorizeRouterOptions = {
   resourceUrl: URL;
   secureCookies: boolean;
+  ui: AuthorizeUi;
   users: UserStore;
   clients: ClientStore;
   sessions: SessionStore;
@@ -334,6 +320,7 @@ export type AuthorizeRouterOptions = {
 export const createAuthorizeRouter = ({
   resourceUrl,
   secureCookies,
+  ui,
   users,
   clients,
   sessions,
@@ -358,22 +345,47 @@ export const createAuthorizeRouter = ({
       standardHeaders: "draft-7",
       legacyHeaders: false,
       handler: (_req, res) =>
-        sendPage(
-          res,
-          429,
-          errorPage("Too many attempts", "Wait a few minutes and try again."),
-        ),
+        sendFailure(res, 429, {
+          title: "Too many attempts",
+          message: "Wait a few minutes and try again.",
+        }),
     });
 
-  const formParser = express.urlencoded({
-    extended: false,
-    limit: FORM_BODY_LIMIT,
-  });
+  const jsonParser = express.json({ limit: JSON_BODY_LIMIT });
 
-  const contextOf = (pending: PendingAuthorization): AuthorizationContext => ({
-    clientName: pending.clientName,
-    csrfToken: pending.csrfToken,
-  });
+  const sendPage = async (
+    res: ExpressResponse,
+    status: number,
+    state: AuthorizeState,
+  ) => {
+    const shell = await ui.shell();
+    res
+      .status(shell === undefined ? 503 : status)
+      .set({
+        ...PAGE_SECURITY_HEADERS,
+        "content-type": "text/html; charset=utf-8",
+      })
+      .send(renderAuthorizePage(shell ?? UNBUILT_SHELL, state));
+  };
+
+  const sendErrorPage = (
+    res: ExpressResponse,
+    status: number,
+    title: string,
+    message: string,
+  ) => sendPage(res, status, { view: "error", title, message });
+
+  const stepState = (pending: PendingAuthorization): AuthorizeState => {
+    const context = {
+      csrfToken: pending.csrfToken,
+      ...(pending.clientName !== undefined && {
+        clientName: pending.clientName,
+      }),
+    };
+    return pending.phone
+      ? { view: "otp", ...context, maskedPhone: maskPhone(pending.phone) }
+      : { view: "phone", ...context };
+  };
 
   const clearCookie = (res: ExpressResponse) =>
     res.clearCookie(cookieName, {
@@ -383,35 +395,68 @@ export const createAuthorizeRouter = ({
       secure: secureCookies,
     });
 
-  const sendExpired = (res: ExpressResponse) =>
-    sendPage(
-      res,
-      403,
-      errorPage("Sign-in expired", "Start again from your assistant."),
-    );
-
-  const loadPending = (req: Request) => {
+  const pendingFromCookie = (req: Request) => {
     const id = readCookie(req, cookieName);
     const pending = id ? pendingAuthorizations.get(id) : undefined;
-    const csrfToken =
-      typeof req.body?.csrf_token === "string" ? req.body.csrf_token : "";
-    if (!id || !pending || !safeEqual(csrfToken, pending.csrfToken))
+    return id && pending ? { id, pending } : undefined;
+  };
+
+  /*
+   * State-changing calls need both the cookie and the CSRF token from the
+   * page in a custom header, which a cross-site form or fetch cannot send.
+   */
+  const loadPending = (req: Request) => {
+    const loaded = pendingFromCookie(req);
+    const csrfToken = req.get(CSRF_HEADER) ?? "";
+    if (!loaded || !safeEqual(csrfToken, loaded.pending.csrfToken))
       return undefined;
-    return { id, pending };
+    return loaded;
+  };
+
+  /*
+   * Shared by the phone step and "resend code": both count against the
+   * per-phone limit, and a new code resets the attempt counter.
+   */
+  const sendCode = async (
+    res: ExpressResponse,
+    pending: PendingAuthorization,
+    localPhone: string,
+  ) => {
+    if (!phoneLimiter.tryConsume(localPhone)) {
+      return sendFailure(res, 429, {
+        message:
+          "Too many codes have been requested for this number. Please wait and try again.",
+      });
+    }
+
+    try {
+      await sendLoginOtp(chowdeck, localPhone);
+    } catch (error) {
+      logger.warn("Authorization OTP request failed:", describeFailure(error));
+      return sendFailure(res, isClientError(error) ? 400 : 502, {
+        message:
+          "Chowdeck could not send a code to that number. Check it and try again.",
+      });
+    }
+
+    pending.phone = localPhone;
+    pending.otpAttempts = 0;
+    sendJson(res, 200, { maskedPhone: maskPhone(localPhone) });
   };
 
   const router = Router();
 
-  for (const [path, asset] of Object.entries(STATIC_ASSETS)) {
-    router.get(path, async (_req, res) => {
-      res
-        .set({
-          "content-type": asset.contentType,
-          "cache-control": "public, max-age=86400",
-          "x-content-type-options": "nosniff",
-        })
-        .send(await asset.load());
-    });
+  if (ui.assetsDir) {
+    router.use(
+      AUTHORIZE_ASSETS_PATH,
+      express.static(ui.assetsDir, {
+        index: false,
+        immutable: true,
+        maxAge: "365d",
+        setHeaders: (res) => res.set("x-content-type-options", "nosniff"),
+      }),
+      (_req, res) => res.sendStatus(404),
+    );
   }
 
   router.get(AUTHORIZE_PATH, useGolbalRateLimiter, async (req, res) => {
@@ -421,7 +466,7 @@ export const createAuthorizeRouter = ({
       resourceUrl,
     );
     if (!result.ok)
-      return sendPage(res, 400, errorPage(result.title, result.message));
+      return sendErrorPage(res, 400, result.title, result.message);
 
     const pending: PendingAuthorization = {
       ...result.pending,
@@ -439,119 +484,81 @@ export const createAuthorizeRouter = ({
       secure: secureCookies,
       maxAge: PENDING_AUTHORIZATION_TTL_MS,
     });
-    sendPage(res, 200, phonePage(contextOf(pending)), pending.redirectUri);
+    await sendPage(res, 200, stepState(pending));
+  });
+
+  // A refresh on the code step lands here and resumes the same sign-in.
+  router.get(AUTHORIZE_VERIFY_PATH, useGolbalRateLimiter, async (req, res) => {
+    const loaded = pendingFromCookie(req);
+    if (!loaded) return sendErrorPage(res, 403, EXPIRED.title!, EXPIRED.message);
+    await sendPage(res, 200, stepState(loaded.pending));
   });
 
   router.post(
     AUTHORIZE_PHONE_PATH,
     ipLimiter(limits.otpRequestsPerIp),
-    formParser,
+    jsonParser,
     async (req, res) => {
       const loaded = loadPending(req);
-      if (!loaded) return sendExpired(res);
-      const { pending } = loaded;
-      const context = contextOf(pending);
+      if (!loaded) return sendFailure(res, 403, EXPIRED);
 
       const phone =
-        typeof req.body.phone === "string"
+        typeof req.body?.phone === "string"
           ? req.body.phone.replace(/[\s-]/g, "")
           : "";
       if (!NIGERIAN_PHONE_PATTERN.test(phone)) {
-        return sendPage(
-          res,
-          400,
-          phonePage(
-            context,
-            "Enter a valid Nigerian mobile number, e.g. 08012345678.",
-          ),
-          pending.redirectUri,
-        );
+        return sendFailure(res, 400, {
+          message: "Enter a valid Nigerian mobile number, e.g. 08012345678.",
+        });
       }
 
-      const localPhone = toLocalPhone(phone);
-      if (!phoneLimiter.tryConsume(localPhone)) {
-        return sendPage(
-          res,
-          429,
-          phonePage(
-            context,
-            "Too many codes have been requested for this number. Please wait and try again.",
-          ),
-          pending.redirectUri,
-        );
-      }
+      await sendCode(res, loaded.pending, toLocalPhone(phone));
+    },
+  );
 
-      try {
-        await sendLoginOtp(chowdeck, localPhone);
-      } catch (error) {
-        logger.warn(
-          "Authorization OTP request failed:",
-          describeFailure(error),
-        );
-        return sendPage(
-          res,
-          isClientError(error) ? 400 : 502,
-          phonePage(
-            context,
-            "Chowdeck could not send a code to that number. Check it and try again.",
-          ),
-          pending.redirectUri,
-        );
-      }
-
-      pending.phone = localPhone;
-      pending.otpAttempts = 0;
-      sendPage(
-        res,
-        200,
-        otpPage(context, maskPhone(localPhone)),
-        pending.redirectUri,
-      );
+  router.post(
+    AUTHORIZE_RESEND_PATH,
+    ipLimiter(limits.otpRequestsPerIp),
+    async (req, res) => {
+      const loaded = loadPending(req);
+      if (!loaded?.pending.phone) return sendFailure(res, 403, EXPIRED);
+      await sendCode(res, loaded.pending, loaded.pending.phone);
     },
   );
 
   router.post(
     AUTHORIZE_VERIFY_PATH,
     ipLimiter(limits.otpVerificationsPerIp),
-    formParser,
+    jsonParser,
     async (req, res) => {
       const loaded = loadPending(req);
-      if (!loaded || !loaded.pending.phone) return sendExpired(res);
+      if (!loaded || !loaded.pending.phone)
+        return sendFailure(res, 403, EXPIRED);
       const { id, pending } = loaded;
       const phone = loaded.pending.phone;
-      const context = contextOf(pending);
-      const maskedPhone = maskPhone(phone);
 
       if (pending.verifying) {
-        return sendPage(
-          res,
-          409,
-          errorPage("Sign-in in progress", "Your code is being checked."),
-        );
+        return sendFailure(res, 409, {
+          message: "Your code is already being checked.",
+        });
       }
 
-      const otp = typeof req.body.otp === "string" ? req.body.otp.trim() : "";
+      const otp =
+        typeof req.body?.otp === "string" ? req.body.otp.trim() : "";
       if (!OTP_PATTERN.test(otp)) {
-        return sendPage(
-          res,
-          400,
-          otpPage(
-            context,
-            maskedPhone,
-            "Enter the numeric code Chowdeck sent you.",
-          ),
-          pending.redirectUri,
-        );
+        return sendFailure(res, 400, {
+          message: "Enter the numeric code Chowdeck sent you.",
+        });
       }
 
       if (pending.otpAttempts >= MAX_OTP_ATTEMPTS) {
         pendingAuthorizations.delete(id);
         clearCookie(res);
-        return sendPage(
-          res,
-          429,
-          errorPage("Too many attempts", "Start again from your assistant."),
-        );
+        return sendFailure(res, 429, {
+          title: "Too many attempts",
+          message: "Start again from your assistant.",
+          restart: true,
+        });
       }
 
       pending.otpAttempts += 1;
@@ -566,16 +573,9 @@ export const createAuthorizeRouter = ({
           "Authorization OTP verification failed:",
           describeFailure(error),
         );
-        return sendPage(
-          res,
-          isClientError(error) ? 400 : 502,
-          otpPage(
-            context,
-            maskedPhone,
-            "That code did not work. Check it and try again.",
-          ),
-          pending.redirectUri,
-        );
+        return sendFailure(res, isClientError(error) ? 400 : 502, {
+          message: "That code did not work. Check it and try again.",
+        });
       }
 
       pendingAuthorizations.delete(id);
@@ -601,31 +601,31 @@ export const createAuthorizeRouter = ({
           "Authorization completion failed:",
           describeFailure(error),
         );
-        return sendPage(
-          res,
-          500,
-          errorPage("Sign-in failed", "Start again from your assistant."),
-        );
+        return sendFailure(res, 500, {
+          title: "Sign-in failed",
+          message: "Start again from your assistant.",
+          restart: true,
+        });
       }
 
       const redirect = new URL(pending.redirectUri);
       redirect.searchParams.set("code", code);
       redirect.searchParams.set("state", pending.state);
-      res.set("cache-control", "no-store").redirect(303, redirect.href);
+      sendJson(res, 200, { redirectUrl: redirect.href });
     },
   );
 
-  const handleFormError: ErrorRequestHandler = (error, _req, res, next) => {
+  const handleBodyError: ErrorRequestHandler = (error, _req, res, next) => {
     if (res.headersSent) return next(error);
-    logger.warn("Authorization form rejected:", describeFailure(error));
-    sendPage(
-      res,
-      400,
-      errorPage("Invalid request", "Start again from your assistant."),
-    );
+    logger.warn("Authorization request rejected:", describeFailure(error));
+    sendFailure(res, 400, {
+      title: "Invalid request",
+      message: "Start again from your assistant.",
+      restart: true,
+    });
   };
 
-  router.use(AUTHORIZE_PATH, handleFormError);
+  router.use(AUTHORIZE_PATH, handleBodyError);
 
   return router;
 };

@@ -21,6 +21,7 @@ import {
   createAuthorizeRouter,
   type AuthorizeLimits,
 } from "./authorize-router";
+import type { AuthorizeUi } from "./authorize-ui";
 import {
   createInProcessCodeExchange,
   type AuthorizationCodeStore,
@@ -62,9 +63,13 @@ export type HttpAppOptions = {
   paymentStartConfig?: PaymentStartConfig;
   paymentChannelQuery?: PaymentChannelQuery;
   authorizeLimits?: Partial<AuthorizeLimits>;
+  authorizeUi?: AuthorizeUi;
   trustProxyHops?: number;
   serverFactory?: (options: ServerOptions) => McpServer;
 };
+
+// Without the built sign-in app, the sign-in pages answer 503 "unavailable".
+const UNAVAILABLE_AUTHORIZE_UI: AuthorizeUi = { shell: async () => undefined };
 
 /*
  * Process health for probes. isShuttingDown turns readiness off and refuses
@@ -118,6 +123,7 @@ export const createHttpApp = ({
   refreshTokens = new InMemoryRefreshTokenStore(tokens),
   exchange = createInProcessCodeExchange(codes, tokens, refreshTokens),
   authorizeLimits,
+  authorizeUi = UNAVAILABLE_AUTHORIZE_UI,
   serverFactory = createServer,
   paymentChannelQuery,
   paymentStartConfig,
@@ -208,6 +214,7 @@ export const createHttpApp = ({
     createAuthorizeRouter({
       resourceUrl: serverUrl,
       secureCookies: issuerUrl.protocol === "https:",
+      ui: authorizeUi,
       users,
       clients,
       sessions,

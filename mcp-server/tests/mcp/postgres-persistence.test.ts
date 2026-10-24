@@ -15,6 +15,7 @@ import { migrate } from "../../lib/postgres/migrations";
 import { createPostgresStores } from "../../lib/postgres";
 import { hashToken, issueAccessToken } from "../../lib/oauth";
 import { resetGlobalRateLimit } from "../helpers/rate-limit";
+import { csrfFrom, postAuthorizeJson, testAuthorizeUi } from "../helpers/authorize";
 import { createTestDatabase, describePostgres } from "../helpers/postgres";
 
 type TestDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
@@ -54,6 +55,7 @@ const startInstance = async () => {
     ...stores,
     chowdeck: new ChowdeckClient({ baseUrl: chowdeck.url.origin, timeoutMs: 1000 }),
     authorizeLimits: { otpRequestsPerIp: 1000, otpRequestsPerPhone: 1000, otpVerificationsPerIp: 1000 },
+    authorizeUi: testAuthorizeUi(),
     serverFactory: sessionProbe,
   });
   const instance = await new Promise<Instance>((resolve) => {
@@ -78,20 +80,16 @@ const signIn = async (instance: Instance, clientId: string, phone: string) => {
   const start = await fetch(`${instance.baseUrl}/authorize?${query}`, { redirect: "manual" });
   expect(start.status).toBe(200);
   const cookie = /chowbot_authorization=[^;]+/.exec(start.headers.get("set-cookie") ?? "")![0];
-  const csrf = /name="csrf_token" value="([^"]+)"/.exec(await start.text())![1]!;
+  const csrf = csrfFrom(await start.text())!;
 
-  const post = (path: string, fields: Record<string, string>) =>
-    fetch(`${instance.baseUrl}${path}`, {
-      method: "POST",
-      redirect: "manual",
-      headers: { "content-type": "application/x-www-form-urlencoded", cookie },
-      body: new URLSearchParams({ csrf_token: csrf, ...fields }).toString(),
-    });
+  const post = (path: string, body: Record<string, string>) =>
+    postAuthorizeJson(`${instance.baseUrl}${path}`, body, { cookie, csrf });
 
   expect((await post("/authorize/phone", { phone })).status).toBe(200);
   const verified = await post("/authorize/verify", { otp: "111111" });
-  expect(verified.status).toBe(303);
-  return new URL(verified.headers.get("location")!).searchParams.get("code")!;
+  expect(verified.status).toBe(200);
+  const { redirectUrl } = (await verified.json()) as { redirectUrl: string };
+  return new URL(redirectUrl).searchParams.get("code")!;
 };
 
 const callWhoami = async (instance: Instance, token: string) => {
