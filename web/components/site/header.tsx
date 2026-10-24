@@ -6,13 +6,16 @@ import { Menu, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import logo from "@/public/chowbot-logo.svg";
+import { LINKS } from "@/lib/site";
 import { cn } from "@/lib/utils";
 
+import { GithubIcon } from "./brand-icons";
+
 const NAV = [
-  { href: "#features", label: "What it can do" },
-  { href: "#how-it-works", label: "How it works" },
-  { href: "#safety", label: "Safety" },
-  { href: "#faq", label: "FAQ" },
+  { href: "/#features", label: "What it can do" },
+  { href: "/#how-it-works", label: "How it works" },
+  { href: "/#faq", label: "FAQ" },
+  { href: "/about", label: "About" },
 ];
 
 /*
@@ -59,7 +62,7 @@ export function Header() {
               <li key={item.href}>
                 <a
                   href={item.href}
-                  className="block rounded-full px-6 py-3 text-base font-semibold text-ink transition-colors hover:text-cucumber"
+                  className="block rounded-full px-5 py-3 text-base font-semibold xl:px-6 text-ink transition-colors hover:text-cucumber"
                 >
                   {item.label}
                 </a>
@@ -70,10 +73,19 @@ export function Header() {
 
         <div className="flex items-center gap-2">
           <a
-            href="#connect"
+            href="/#connect"
             className="flex h-12 items-center rounded-full bg-white px-6 text-base font-semibold text-chow-green ring-1 ring-ink/5 transition-colors hover:text-cucumber"
           >
             Connect
+          </a>
+          <a
+            href={LINKS.github}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="ChowBot on GitHub"
+            className="grid size-12 place-items-center rounded-full bg-white text-ink ring-1 ring-ink/5 transition-colors hover:text-cucumber"
+          >
+            <GithubIcon className="size-5" />
           </a>
           <button
             type="button"

@@ -13,7 +13,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useSignInStore } from "@/lib/sign-in-context";
 import { StepHeading } from "@/components/sign-in-shell";
 import { SignInError, resendCode, verifyCode } from "@/lib/api";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { clearError, showError, showSuccess } from "@/lib/toast";
 
 /*
  * Chowdeck's codes have been six digits in every capture so far; the server
@@ -40,8 +40,7 @@ export function OtpStep() {
   const router = useRouter();
 
   const [code, setCode] = useState("");
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [invalid, setInvalid] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [resending, setResending] = useState(false);
   const [cooldown, restartCooldown] = useCountdown(RESEND_COOLDOWN_SECONDS);
@@ -53,6 +52,7 @@ export function OtpStep() {
         ? caught
         : new SignInError({ message: "Something went wrong." });
     if (failure.restart) {
+      clearError();
       store.update({
         ended: {
           title: failure.title ?? "Sign-in ended",
@@ -61,15 +61,16 @@ export function OtpStep() {
       });
       return;
     }
-    setError(failure.message);
+    setInvalid(true);
+    showError(failure.message);
   };
 
   const verify = async (otp: string) => {
     if (inFlight.current || otp.length < MIN_CODE_LENGTH) return;
     inFlight.current = true;
     setVerifying(true);
-    setError(undefined);
-    setNotice(undefined);
+    setInvalid(false);
+    clearError();
     try {
       const { redirectUrl } = await verifyCode(csrfToken, otp);
       store.update({ redirectingTo: redirectUrl });
@@ -85,12 +86,12 @@ export function OtpStep() {
   const resend = async () => {
     if (resending || cooldown > 0) return;
     setResending(true);
-    setError(undefined);
-    setNotice(undefined);
+    setInvalid(false);
+    clearError();
     try {
       const { maskedPhone: sentTo } = await resendCode(csrfToken);
       store.update({ maskedPhone: sentTo });
-      setNotice(`New code sent to ${sentTo}.`);
+      showSuccess(`New code sent to ${sentTo}`);
       setCode("");
       restartCooldown();
     } catch (caught) {
@@ -109,7 +110,8 @@ export function OtpStep() {
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (code.length < MIN_CODE_LENGTH) {
-      setError("Enter the code Chowdeck sent you.");
+      setInvalid(true);
+      showError("Enter the code Chowdeck sent you.");
       return;
     }
     void verify(code);
@@ -142,13 +144,15 @@ export function OtpStep() {
             value={code}
             onChange={(value) => {
               setCode(value);
-              if (error) setError(undefined);
+              if (invalid) {
+                setInvalid(false);
+                clearError();
+              }
             }}
             onComplete={(value: string) => void verify(value)}
             disabled={verifying}
             aria-label="One-time code"
-            aria-invalid={error ? true : undefined}
-            aria-describedby={error ? "otp-error" : undefined}
+            aria-invalid={invalid || undefined}
             containerClassName="gap-2"
           >
             <InputOTPGroup className="gap-2 sm:gap-2.5">
@@ -156,37 +160,19 @@ export function OtpStep() {
                 <InputOTPSlot
                   key={index}
                   index={index}
-                  aria-invalid={error ? true : undefined}
-                  className="size-12 rounded-xl border text-xl font-bold first:rounded-xl last:rounded-xl data-[active=true]:border-kiwi sm:size-13"
+                  aria-invalid={invalid || undefined}
+                  className="size-12 rounded-xl border border-transparent bg-muted text-xl font-bold first:rounded-xl last:rounded-xl data-[active=true]:border-kiwi sm:size-13"
                 />
               ))}
             </InputOTPGroup>
           </InputOTP>
         </div>
 
-        {error && (
-          <Alert
-            id="otp-error"
-            variant="destructive"
-            className="animate-in fade-in rounded-xl border-pepper/25 bg-pepper/5"
-          >
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        {notice && !error && (
-          <p
-            role="status"
-            className="animate-in fade-in text-center text-sm font-medium text-cucumber"
-          >
-            {notice}
-          </p>
-        )}
-
         <Button
           type="submit"
           size="lg"
           disabled={verifying}
-          className="h-12 w-full rounded-full text-base font-semibold hover:bg-cucumber"
+          className="h-15 w-full rounded-2xl text-base font-semibold hover:bg-cucumber"
         >
           {verifying ? (
             <>

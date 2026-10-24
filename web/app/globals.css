@@ -94,6 +94,11 @@
 }
 
 @layer base {
+  /* Tailwind v4 resets buttons to the default cursor; enabled ones get the pointer. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
   * {
     @apply border-border outline-ring/50;
   }

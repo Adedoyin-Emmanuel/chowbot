@@ -1,11 +1,12 @@
 import { ArrowRightIcon } from "lucide-react";
-import { useState, type SubmitEvent } from "react";
+import { cn } from "cn";
+import { useState, type ReactNode, type SubmitEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import {
   COUNTRIES,
-  formatNational,
   isValidNational,
+  localDigits,
   nationalDigits,
   toInternational,
   type CountryCode,
@@ -25,7 +26,40 @@ import { Spinner } from "@/components/ui/spinner";
 import { SignInError, requestCode } from "@/lib/api";
 import { useSignInStore } from "@/lib/sign-in-context";
 import { StepHeading } from "@/components/sign-in-shell";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { clearError, showError, showSuccess } from "@/lib/toast";
+
+// Chowdeck form labels: small, bold, spaced capitals with a red asterisk.
+function FieldLabel({
+  htmlFor,
+  children,
+}: {
+  htmlFor: string;
+  children: ReactNode;
+}) {
+  return (
+    <Label
+      htmlFor={htmlFor}
+      className="gap-0.5 text-xs font-extrabold tracking-[0.15em] uppercase"
+    >
+      {children}
+      <span className="text-pepper" aria-hidden="true">
+        *
+      </span>
+    </Label>
+  );
+}
+
+// Drawn rather than an emoji, which Windows shows as the letters "NG".
+function NigeriaFlag() {
+  return (
+    <svg viewBox="0 0 3 2" className="h-4 w-6 rounded-[2px]" aria-hidden="true">
+      <rect width="3" height="2" fill="#008751" />
+      <rect x="1" width="1" height="2" fill="#fff" />
+    </svg>
+  );
+}
+
+const FIELD = "h-15 rounded-2xl border-0 bg-muted";
 
 export function PhoneStep() {
   const store = useSignInStore();
@@ -33,8 +67,8 @@ export function PhoneStep() {
   const navigate = useNavigate();
 
   const [country, setCountry] = useState<CountryCode>("NG");
-  const [digits, setDigits] = useState("");
-  const [error, setError] = useState<string>();
+  const [phone, setPhone] = useState("");
+  const [invalid, setInvalid] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const dialCode = COUNTRIES.find((entry) => entry.code === country)!.dialCode;
@@ -42,11 +76,14 @@ export function PhoneStep() {
   const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (submitting) return;
+    const digits = nationalDigits(phone);
     if (!isValidNational(digits)) {
-      setError("Enter a valid Nigerian mobile number, e.g. 801 234 5678.");
+      setInvalid(true);
+      showError("Enter a valid Nigerian mobile number, e.g. 08012345678.");
       return;
     }
-    setError(undefined);
+    setInvalid(false);
+    clearError();
     setSubmitting(true);
     try {
       const { maskedPhone } = await requestCode(
@@ -54,6 +91,7 @@ export function PhoneStep() {
         toInternational(digits, dialCode),
       );
       store.update({ maskedPhone, sentFromPhoneStep: true });
+      showSuccess(`Code sent to ${maskedPhone}`);
       await navigate({ to: "/authorize/verify" });
     } catch (caught) {
       const failure =
@@ -61,6 +99,7 @@ export function PhoneStep() {
           ? caught
           : new SignInError({ message: "Something went wrong." });
       if (failure.restart) {
+        clearError();
         store.update({
           ended: {
             title: failure.title ?? "Sign-in ended",
@@ -68,7 +107,8 @@ export function PhoneStep() {
           },
         });
       } else {
-        setError(failure.message);
+        setInvalid(true);
+        showError(failure.message);
       }
       setSubmitting(false);
     }
@@ -82,81 +122,88 @@ export function PhoneStep() {
       </StepHeading>
 
       <form onSubmit={submit} noValidate className="grid gap-4">
-        <div className="grid gap-2">
-          <Label htmlFor="phone" className="text-sm font-semibold">
-            Phone number
-          </Label>
-          <div className="flex gap-2">
-            <Select
-              value={country}
-              onValueChange={(value) => setCountry(value as CountryCode)}
-              disabled={submitting}
+        <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-2.5">
+          <FieldLabel htmlFor="country">Country</FieldLabel>
+          <FieldLabel htmlFor="phone">Phone number</FieldLabel>
+          <Select
+            value={country}
+            onValueChange={(value) => setCountry(value as CountryCode)}
+            disabled={submitting}
+          >
+            <SelectTrigger
+              id="country"
+              className={cn(
+                FIELD,
+                "w-full justify-center gap-4 px-3 data-[size=default]:h-15 [&_svg]:opacity-100 [&>svg]:size-5 [&>svg]:text-cucumber!",
+              )}
             >
-              <SelectTrigger
-                aria-label="Country code"
-                className="!h-12 w-[7.5rem] shrink-0 gap-1.5 rounded-xl px-3 text-base font-medium"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent position="popper" className="rounded-xl">
-                {COUNTRIES.map((entry) => (
-                  <SelectItem
-                    key={entry.code}
-                    value={entry.code}
-                    className="py-2 text-base"
-                  >
-                    <span aria-hidden="true">{entry.flag}</span>
-                    <span>{entry.dialCode}</span>
-                    <span className="sr-only">{entry.name}</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              <SelectValue>
+                <NigeriaFlag />
+                <span className="sr-only">
+                  {COUNTRIES.find((entry) => entry.code === country)!.name}
+                </span>
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent position="popper" className="rounded-xl">
+              {COUNTRIES.map((entry) => (
+                <SelectItem
+                  key={entry.code}
+                  value={entry.code}
+                  className="gap-2.5 py-2 text-base"
+                >
+                  <NigeriaFlag />
+                  <span>{entry.name}</span>
+                  <span className="text-muted-foreground">
+                    {entry.dialCode}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div
+            className={cn(
+              FIELD,
+              "flex items-center gap-2.5 px-5 transition-[box-shadow] focus-within:ring-[3px] focus-within:ring-ring/50",
+              invalid && "ring-2 ring-pepper/40 focus-within:ring-pepper/40",
+              submitting && "opacity-50",
+            )}
+          >
+            <span className="text-base font-semibold text-foreground">
+              {dialCode}
+            </span>
             <Input
               id="phone"
               name="phone"
               type="tel"
               inputMode="numeric"
               autoComplete="tel-national"
-              placeholder="801 234 5678"
+              placeholder="08000000000"
               autoFocus
               maxLength={20}
-              value={formatNational(digits)}
+              value={phone}
               onChange={(event) => {
-                setDigits(nationalDigits(event.target.value));
-                if (error) setError(undefined);
+                setPhone(localDigits(event.target.value));
+                if (invalid) {
+                  setInvalid(false);
+                  clearError();
+                }
               }}
               disabled={submitting}
-              aria-invalid={error ? true : undefined}
-              aria-describedby={error ? "phone-error" : "phone-hint"}
-              className="h-12 rounded-xl px-4 text-base font-medium tracking-wide md:text-base"
+              aria-invalid={invalid || undefined}
+              aria-describedby="phone-hint"
+              className="h-full rounded-none border-0 bg-transparent p-0 text-base font-medium tracking-wide focus-visible:ring-0 aria-invalid:ring-0 disabled:opacity-100 md:text-base"
             />
           </div>
-          {!error && (
-            <p
-              id="phone-hint"
-              className="text-[0.8125rem] text-muted-foreground"
-            >
-              Use the number on your Chowdeck account. We'll text you a code.
-            </p>
-          )}
         </div>
-
-        {error && (
-          <Alert
-            id="phone-error"
-            variant="destructive"
-            className="animate-in fade-in rounded-xl border-pepper/25 bg-pepper/5"
-          >
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        <p id="phone-hint" className="text-[0.8125rem] text-muted-foreground">
+          Use the number on your Chowdeck account. We'll text you a code.
+        </p>
 
         <Button
           type="submit"
           size="lg"
           disabled={submitting}
-          className="mt-1 h-12 w-full rounded-full text-base font-semibold hover:bg-cucumber"
+          className="mt-2 h-15 w-full rounded-2xl text-base font-semibold hover:bg-cucumber"
         >
           {submitting ? (
             <>

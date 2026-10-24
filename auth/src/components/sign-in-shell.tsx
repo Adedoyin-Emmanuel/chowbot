@@ -5,59 +5,79 @@ import {
 } from "lucide-react";
 import { cn } from "cn";
 import type { ReactNode } from "react";
+import { Toaster } from "react-hot-toast";
 
 import { Spinner } from "@/components/ui/spinner";
-import logoUrl from "@/assets/images/chowbot-logo.svg";
+import chowbotLogoUrl from "@/assets/images/chowbot-logo.svg";
+import chowdeckLogoUrl from "@/assets/images/chowdeck-logo.svg";
 
-/*
- * ChowBot's own mark next to the app being connected. The logo is
- * ChowBot's, never Chowdeck's.
- */
-function ConnectionMark({ clientName }: { clientName?: string }) {
-  const initial =
-    clientName && clientName !== "your assistant"
-      ? clientName.trim().charAt(0).toUpperCase()
-      : undefined;
+// Chowdeck, then ChowBot: the account being connected to the assistant.
+function ConnectionMark() {
   return (
     <div
       className="mb-7 flex items-center justify-center gap-3"
       aria-hidden="true"
     >
       <img
-        src={logoUrl}
+        src={chowdeckLogoUrl}
         alt=""
         width={56}
         height={56}
-        className="size-14 rounded-full shadow-sm"
+        className="size-14 rounded-full"
       />
-      {initial && (
-        <>
-          <span className="flex gap-1">
-            {[0, 1, 2].map((dot) => (
-              <span key={dot} className="size-1.5 rounded-full bg-kiwi/70" />
-            ))}
-          </span>
-          <span className="flex size-14 items-center justify-center rounded-full border border-border bg-cream text-xl font-bold text-chow-green shadow-sm">
-            {initial}
-          </span>
-        </>
-      )}
+      <span className="flex gap-1">
+        {[0, 1, 2].map((dot) => (
+          <span key={dot} className="size-1.5 rounded-full bg-kiwi/70" />
+        ))}
+      </span>
+      <img
+        src={chowbotLogoUrl}
+        alt=""
+        width={56}
+        height={56}
+        className="size-14 rounded-full"
+      />
     </div>
   );
 }
 
+// An ended sign-in drops the connection mark: nothing is being connected.
 export function SignInShell({
-  clientName,
+  showMark = true,
   children,
 }: {
-  clientName?: string;
+  showMark?: boolean;
   children: ReactNode;
 }) {
   return (
-    <div className="flex min-h-dvh flex-col bg-white sm:bg-[radial-gradient(120%_80%_at_50%_0%,var(--color-accent)_0%,var(--color-cream)_55%,#fff_100%)]">
+    <div className="flex min-h-dvh flex-col bg-white">
+      <Toaster
+        position="top-center"
+        gutter={8}
+        containerStyle={{ top: "max(1rem, env(safe-area-inset-top))" }}
+        toastOptions={{
+          duration: 4000,
+          error: {
+            duration: 5000,
+            iconTheme: { primary: "#e80b2e", secondary: "#fff" },
+          },
+          success: { iconTheme: { primary: "#02c27f", secondary: "#fff" } },
+          style: {
+            maxWidth: "24rem",
+            padding: "0.75rem 1rem",
+            borderRadius: "1rem",
+            border: "1px solid #dfe7e4",
+            boxShadow: "0 12px 32px -16px rgba(12, 81, 63, 0.35)",
+            color: "#101b17",
+            fontFamily: "inherit",
+            fontSize: "0.9375rem",
+            fontWeight: 500,
+          },
+        }}
+      />
       <main className="flex flex-1 flex-col items-center px-5 pt-[max(3.5rem,10vh)] pb-8 sm:justify-center sm:pt-8">
-        <div className="w-full max-w-[24rem] sm:rounded-3xl sm:border sm:border-border/70 sm:bg-white sm:px-9 sm:py-10 sm:shadow-[0_24px_60px_-28px_rgba(12,81,63,0.35)]">
-          <ConnectionMark clientName={clientName} />
+        <div className="w-full max-w-[25.5rem]">
+          {showMark && <ConnectionMark />}
           {children}
         </div>
       </main>
@@ -130,9 +150,6 @@ export function EndedView({
         <CircleAlertIcon className="size-7" />
       </StatusIcon>
       <StepHeading title={title}>{message}</StepHeading>
-      <p className="rounded-2xl bg-muted px-4 py-3 text-sm text-muted-foreground">
-        You can close this page and connect ChowBot again from your assistant.
-      </p>
     </div>
   );
 }

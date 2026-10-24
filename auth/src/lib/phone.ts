@@ -4,7 +4,7 @@
  * the final say.
  */
 export const COUNTRIES = [
-  { code: "NG", name: "Nigeria", dialCode: "+234", flag: "🇳🇬" },
+  { code: "NG", name: "Nigeria", dialCode: "+234" },
 ] as const;
 
 export type CountryCode = (typeof COUNTRIES)[number]["code"];
@@ -24,11 +24,15 @@ export const nationalDigits = (input: string) => {
   return digits.slice(0, NATIONAL_NUMBER_LENGTH);
 };
 
-// 8012345678 → "801 234 5678", as the number is typed.
-export const formatNational = (digits: string) =>
-  [digits.slice(0, 3), digits.slice(3, 6), digits.slice(6)]
-    .filter(Boolean)
-    .join(" ");
+/*
+ * What the phone field shows: the digits as typed, keeping a leading 0 so
+ * 0801… reads the way people write it. A pasted +234 is dropped, since the
+ * field already shows the dial code.
+ */
+export const localDigits = (input: string) => {
+  const national = nationalDigits(input);
+  return input.replace(/\D/g, "").startsWith("0") ? `0${national}` : national;
+};
 
 export const isValidNational = (digits: string) => NATIONAL_NUMBER.test(digits);
 

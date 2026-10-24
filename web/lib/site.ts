@@ -13,3 +13,8 @@ export const SITE = {
   description:
     "ChowBot connects your Chowdeck account to Claude, ChatGPT or any AI assistant that supports MCP. Find food, fill your cart, pay, track your rider and get your delivery PIN, just by asking.",
 } as const;
+
+export const LINKS = {
+  github: "https://github.com/Adedoyin-Emmanuel/chowbot",
+  author: { name: "Adedoyin Emmanuel", site: "https://adedoyin.dev", x: "https://x.com/Emmysoft_Tm" },
+} as const;

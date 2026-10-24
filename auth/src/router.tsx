@@ -28,7 +28,7 @@ function Root() {
   const { clientName, ended, redirectingTo } = useSignIn(store);
 
   return (
-    <SignInShell clientName={clientName}>
+    <SignInShell showMark={!ended}>
       {ended ? (
         <EndedView title={ended.title} message={ended.message} />
       ) : redirectingTo ? (

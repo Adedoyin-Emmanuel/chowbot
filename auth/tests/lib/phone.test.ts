@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  formatNational,
   isValidNational,
+  localDigits,
   nationalDigits,
   toInternational,
 } from "../../src/lib/phone";
@@ -41,11 +41,17 @@ describe("isValidNational", () => {
   );
 });
 
-test("groups the number as it is typed", () => {
-  expect(formatNational("")).toBe("");
-  expect(formatNational("80")).toBe("80");
-  expect(formatNational("8012")).toBe("801 2");
-  expect(formatNational("8012345678")).toBe("801 234 5678");
+describe("localDigits", () => {
+  test.each([
+    ["0", "0"],
+    ["0801", "0801"],
+    ["08012345678", "08012345678"],
+    ["801 234 5678", "8012345678"],
+    ["+234 801 234 5678", "8012345678"],
+    ["080123456789", "08012345678"],
+  ])("shows %s as %s", (input, shown) => {
+    expect(localDigits(input)).toBe(shown);
+  });
 });
 
 test("sends the number in international form, which the server accepts", () => {

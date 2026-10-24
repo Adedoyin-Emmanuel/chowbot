@@ -1,0 +1,166 @@
+<!doctype html>
+<!--
+  Share card, chat variant. Cream sky and city like chowdeck.com's own, the
+  hero line, and a short ChowBot exchange in front. Same art as the hero
+  (components/site/illustrations.tsx).
+  Render with `bun og/render.ts` (see that file).
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      @font-face {
+        font-family: "Jakarta";
+        src: url("../app/fonts/plus-jakarta-sans-latin.woff2") format("woff2");
+        font-weight: 200 800;
+      }
+      * { margin: 0; box-sizing: border-box; }
+      html, body { width: 1200px; height: 630px; overflow: hidden; }
+      body {
+        position: relative;
+        background: #fff4d6;
+        font-family: "Jakarta", sans-serif;
+        color: #101b17;
+      }
+      .abs { position: absolute; }
+
+      .brand {
+        left: 50%;
+        top: 44px;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 34px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        color: #0c513f;
+      }
+      .brand img { width: 50px; height: 50px; }
+
+      h1 {
+        left: 0;
+        right: 0;
+        top: 118px;
+        text-align: center;
+        font-size: 96px;
+        font-weight: 800;
+        letter-spacing: -0.055em;
+        line-height: 0.98;
+        color: #000;
+      }
+
+      .chat {
+        left: 50%;
+        top: 372px;
+        width: 500px;
+        transform: translateX(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .bubble {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        line-height: 1.25;
+      }
+      .ask {
+        align-self: flex-end;
+        background: #0c513f;
+        color: #fff;
+        padding: 14px 22px;
+        border-radius: 26px 26px 6px 26px;
+      }
+      .reply {
+        align-self: flex-start;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      .reply img { width: 46px; height: 46px; flex: none; }
+      .card {
+        background: #fff;
+        padding: 16px 20px 18px;
+        border-radius: 26px 26px 26px 6px;
+        box-shadow: 0 14px 30px -18px rgba(16, 27, 23, 0.35);
+      }
+      .pin {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+        background: #ffc501;
+        color: #101b17;
+        font-size: 19px;
+        font-weight: 700;
+        padding: 8px 16px;
+        border-radius: 999px;
+      }
+      .pin b { font-weight: 800; }
+    </style>
+  </head>
+  <body>
+    <!-- Clouds, after the ones in the hero (components/site/shapes.tsx). -->
+    <svg class="abs" style="left: -60px; top: -14px; width: 300px" viewBox="0 0 220 90">
+      <path fill="#fff" stroke="#fde7b0" stroke-width="6" d="M30 84c-15 0-26-10-26-23s11-23 26-23c2-17 17-30 35-30 12 0 23 6 29 15 5-4 12-7 19-7 15 0 28 11 30 25 4-2 9-3 13-3 17 0 31 13 31 29 0 9-7 17-17 17z" />
+    </svg>
+    <svg class="abs" style="right: -50px; top: 40px; width: 260px" viewBox="0 0 220 90">
+      <path fill="#fff" stroke="#fde7b0" stroke-width="6" d="M30 84c-15 0-26-10-26-23s11-23 26-23c2-17 17-30 35-30 12 0 23 6 29 15 5-4 12-7 19-7 15 0 28 11 30 25 4-2 9-3 13-3 17 0 31 13 31 29 0 9-7 17-17 17z" />
+    </svg>
+    <svg class="abs" style="left: 120px; top: 250px; width: 120px" viewBox="0 0 220 90">
+      <path fill="#fff" stroke="#fde7b0" stroke-width="6" d="M30 84c-15 0-26-10-26-23s11-23 26-23c2-17 17-30 35-30 12 0 23 6 29 15 5-4 12-7 19-7 15 0 28 11 30 25 4-2 9-3 13-3 17 0 31 13 31 29 0 9-7 17-17 17z" />
+    </svg>
+    <svg class="abs" style="right: 150px; top: 230px; width: 110px" viewBox="0 0 220 90">
+      <path fill="#fff" stroke="#fde7b0" stroke-width="6" d="M30 84c-15 0-26-10-26-23s11-23 26-23c2-17 17-30 35-30 12 0 23 6 29 15 5-4 12-7 19-7 15 0 28 11 30 25 4-2 9-3 13-3 17 0 31 13 31 29 0 9-7 17-17 17z" />
+    </svg>
+
+    <!-- Skyline: SkylineArt from components/site/illustrations.tsx. -->
+    <svg id="skyline" class="abs" style="left: 0; bottom: 0; width: 1200px; height: 340px" viewBox="0 0 1440 420" preserveAspectRatio="xMidYMax slice"></svg>
+
+    <!-- Rider on the ground, right of the chat. -->
+    <svg class="abs" style="left: 850px; bottom: 26px; width: 150px" viewBox="0 0 400 260">
+      <path d="M20 120h60M8 150h70M30 180h46" stroke="#fff" stroke-width="8" stroke-linecap="round" opacity=".8" />
+      <ellipse cx="220" cy="238" rx="150" ry="12" fill="#101b17" opacity=".15" />
+      <rect x="96" y="70" width="86" height="80" rx="10" fill="#0c513f" />
+      <rect x="96" y="70" width="86" height="20" rx="8" fill="#083b2e" />
+      <rect x="126" y="104" width="26" height="26" rx="13" fill="#ffc501" />
+      <path d="M110 160h150l40-30h34l-8 22-46 58H130z" fill="#02c27f" />
+      <path d="M300 130l-20-62" stroke="#101b17" stroke-width="10" stroke-linecap="round" />
+      <path d="M268 66h34" stroke="#101b17" stroke-width="10" stroke-linecap="round" />
+      <path d="M184 72c4-20 24-30 42-24l14 52-44 14z" fill="#0c9f6a" />
+      <path d="M228 98l46-12" stroke="#0c9f6a" stroke-width="18" stroke-linecap="round" />
+      <path d="M196 112l40 6 10 42h-22l-6-26-30 0z" fill="#101b17" />
+      <circle cx="226" cy="34" r="26" fill="#ffc501" />
+      <path d="M200 34a26 26 0 0152 0z" fill="#e0a800" />
+      <rect x="226" y="30" width="30" height="12" rx="6" fill="#101b17" opacity=".8" />
+      <circle cx="140" cy="214" r="30" fill="#101b17" />
+      <circle cx="140" cy="214" r="12" fill="#cfd8d4" />
+      <circle cx="312" cy="214" r="30" fill="#101b17" />
+      <circle cx="312" cy="214" r="12" fill="#cfd8d4" />
+    </svg>
+
+    <div class="abs brand">
+      <img src="../public/chowbot-logo.svg" alt="" />
+      ChowBot
+    </div>
+
+    <h1 class="abs">You don chow?<br />Just ask.</h1>
+
+    <div class="abs chat">
+      <div class="bubble ask">Order my usual from Item 7</div>
+      <div class="reply">
+        <img src="../public/chowbot-logo.svg" alt="" />
+        <div class="bubble card">
+          For sure! 1 chicken and 1 beef shawarma from Item 7, same as last time.
+          <div class="pin">Pay <b>₦11,090</b> with OPay →</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="skyline.js"></script>
+    <script>
+      drawSkyline({ ground: 372, trees: [[30, 344, 1], [250, 352, 1.1], [420, 360, 0.9], [1150, 350, 1.1], [1380, 352, 1]] });
+    </script>
+  </body>
+</html>

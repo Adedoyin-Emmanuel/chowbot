@@ -129,11 +129,13 @@ export function NotesArt({ className }: ArtProps) {
   );
 }
 
-// A delivery rider on a scooter with a green box.
-export function RiderArt({ className }: ArtProps) {
+// A delivery rider on a scooter with a green box (drawn in a 400x260 box).
+function RiderShapes({ speedLines = true }: { speedLines?: boolean }) {
   return (
-    <svg viewBox="0 0 400 260" className={className} {...svgProps}>
-      <path d="M20 120h60M8 150h70M30 180h46" stroke="#fff" strokeWidth="8" strokeLinecap="round" opacity=".8" />
+    <>
+      {speedLines && (
+        <path d="M20 120h60M8 150h70M30 180h46" stroke="#fff" strokeWidth="8" strokeLinecap="round" opacity=".8" />
+      )}
       <ellipse cx="220" cy="238" rx="150" ry="12" fill="#101b17" opacity=".15" />
       <rect x="96" y="70" width="86" height="80" rx="10" fill="#0c513f" />
       <rect x="96" y="70" width="86" height="20" rx="8" fill="#083b2e" />
@@ -151,6 +153,14 @@ export function RiderArt({ className }: ArtProps) {
       <circle cx="140" cy="214" r="12" fill="#cfd8d4" />
       <circle cx="312" cy="214" r="30" fill="#101b17" />
       <circle cx="312" cy="214" r="12" fill="#cfd8d4" />
+    </>
+  );
+}
+
+export function RiderArt({ className }: ArtProps) {
+  return (
+    <svg viewBox="0 0 400 260" className={className} {...svgProps}>
+      <RiderShapes />
     </svg>
   );
 }
@@ -185,56 +195,111 @@ export function StarsArt({ className }: ArtProps) {
 }
 
 /*
- * A Lagos-ish skyline for the hero, after the city on chowdeck.com's: a
- * striped yellow tower, a blue tower with a spire, smaller blocks and trees.
- * The middle is left low because the phones stand in front of it.
+ * The hero's city, after the one on chowdeck.com: a striped yellow tower, a
+ * blue tower with a spire, a ChowBot billboard, a buka with a striped awning,
+ * trees, and a road with a rider on it.
  */
 export function SkylineArt({ className }: ArtProps) {
-  const tree = (x: number, y: number, s: number) => (
-    <g key={`${x}-${y}`}>
-      <rect x={x - 3 * s} y={y} width={6 * s} height={26 * s} fill="#6b4a2b" />
-      <circle cx={x} cy={y - 6 * s} r={22 * s} fill="#0a9b63" />
-      <circle cx={x - 16 * s} cy={y + 4 * s} r={16 * s} fill="#02c27f" />
-      <circle cx={x + 16 * s} cy={y + 2 * s} r={17 * s} fill="#0c9f6a" />
+  const tree = (x: number, s: number) => (
+    <g key={x}>
+      <rect x={x - 3 * s} y={392 - 26 * s} width={6 * s} height={26 * s} fill="#6b4a2b" />
+      <circle cx={x} cy={392 - 32 * s} r={22 * s} fill="#0a9b63" />
+      <circle cx={x - 16 * s} cy={392 - 22 * s} r={16 * s} fill="#02c27f" />
+      <circle cx={x + 16 * s} cy={392 - 24 * s} r={17 * s} fill="#0c9f6a" />
     </g>
   );
   return (
-    <svg viewBox="0 0 1440 420" preserveAspectRatio="xMidYMax slice" className={className} {...svgProps}>
-      {/* Left: striped yellow tower */}
-      <rect x="248" y="96" width="40" height="324" fill="#e0a800" />
-      <rect x="40" y="96" width="208" height="324" fill="#ffc501" />
-      {Array.from({ length: 11 }, (_, index) => (
-        <rect key={index} x="40" y={116 + index * 28} width="208" height="12" fill="#101b17" />
+    <svg viewBox="0 0 1440 460" preserveAspectRatio="xMidYMax slice" className={className} {...svgProps}>
+      {/* Striped yellow tower */}
+      <rect x="248" y="100" width="40" height="292" fill="#e0a800" />
+      <rect x="40" y="100" width="208" height="292" fill="#ffc501" />
+      {Array.from({ length: 10 }, (_, index) => (
+        <rect key={index} x="40" y={120 + index * 27} width="208" height="12" fill="#101b17" />
       ))}
-      <rect x="80" y="54" width="130" height="42" fill="#ff8a4c" />
-      <rect x="210" y="54" width="22" height="42" fill="#ed5e3b" />
-      <path d="M110 54V14M150 54V26" stroke="#101b17" strokeWidth="4" />
-      {/* Left: peach block */}
-      <rect x="300" y="226" width="130" height="194" fill="#ffdbc9" />
-      {Array.from({ length: 5 }, (_, row) =>
+      <rect x="80" y="58" width="130" height="42" fill="#ff8a4c" />
+      <rect x="210" y="58" width="22" height="42" fill="#ed5e3b" />
+      <path d="M110 58V18M150 58V30" stroke="#101b17" strokeWidth="4" />
+      {/* Peach block */}
+      <rect x="300" y="232" width="130" height="160" fill="#ffdbc9" />
+      {Array.from({ length: 4 }, (_, row) =>
         Array.from({ length: 4 }, (_, col) => (
-          <rect key={`${row}-${col}`} x={314 + col * 28} y={244 + row * 32} width="16" height="18" rx="2" fill="#ffb38a" />
+          <rect key={`${row}-${col}`} x={314 + col * 28} y={250 + row * 34} width="16" height="18" rx="2" fill="#ffb38a" />
         )),
       )}
-      {/* Right: mint block */}
-      <rect x="1010" y="236" width="130" height="184" fill="#ccf3e5" />
+      {/* Green mid-rise */}
+      <rect x="452" y="196" width="140" height="196" fill="#0c513f" />
       {Array.from({ length: 5 }, (_, row) => (
-        <rect key={row} x="1024" y={254 + row * 32} width="102" height="14" rx="3" fill="#02c27f" opacity=".55" />
+        <rect key={row} x="468" y={214 + row * 34} width="108" height="14" rx="3" fill="#02c27f" opacity=".7" />
       ))}
-      {/* Right: blue tower with spire */}
+      {/* ChowBot billboard */}
+      <path d="M672 300v92M788 300v92" stroke="#101b17" strokeWidth="10" />
+      <rect x="614" y="150" width="232" height="150" rx="14" fill="#fff" stroke="#101b17" strokeWidth="6" />
+      <circle cx="680" cy="225" r="46" fill="#0c513f" />
+      <g fill="#ffc501">
+        <rect x="677" y="186" width="6" height="14" rx="3" />
+        <circle cx="680" cy="185" r="6" />
+        <rect x="652" y="203" width="56" height="42" rx="12" />
+        <path d="M662 244l-6 14 18-10z" />
+      </g>
+      <g fill="#0c513f">
+        <circle cx="668" cy="221" r="5" />
+        <circle cx="692" cy="221" r="5" />
+        <rect x="670" y="231" width="20" height="4" rx="2" />
+      </g>
+      <text x="780" y="218" textAnchor="middle" fontSize="34" fontWeight="700" letterSpacing="-1.5" fill="#101b17" fontFamily="var(--font-jakarta), sans-serif">
+        Just
+      </text>
+      <text x="780" y="256" textAnchor="middle" fontSize="34" fontWeight="700" letterSpacing="-1.5" fill="#0c513f" fontFamily="var(--font-jakarta), sans-serif">
+        ask.
+      </text>
+      {/* Buka with a striped awning */}
+      <rect x="866" y="292" width="128" height="100" fill="#fff4d6" />
+      <rect x="866" y="292" width="128" height="100" fill="none" stroke="#101b17" strokeWidth="4" />
+      {Array.from({ length: 8 }, (_, index) => (
+        <path
+          key={index}
+          d={`M${858 + index * 18} 276h18v16a9 9 0 01-18 0z`}
+          fill={index % 2 === 0 ? "#e80b2e" : "#fff"}
+        />
+      ))}
+      <rect x="854" y="266" width="152" height="12" rx="4" fill="#101b17" />
+      <rect x="884" y="326" width="36" height="66" fill="#0c513f" />
+      <rect x="936" y="318" width="40" height="30" rx="4" fill="#99c8ff" />
+      {/* Mint block */}
+      <rect x="1010" y="236" width="130" height="156" fill="#ccf3e5" />
+      {Array.from({ length: 4 }, (_, row) => (
+        <rect key={row} x="1024" y={254 + row * 34} width="102" height="14" rx="3" fill="#02c27f" opacity=".55" />
+      ))}
+      {/* Blue tower with spire */}
       <path d="M1222 112V20" stroke="#101b17" strokeWidth="6" />
       <rect x="1214" y="60" width="16" height="52" fill="#5aa9ee" />
       <rect x="1150" y="112" width="144" height="12" fill="#ffc501" />
       <rect x="1150" y="124" width="144" height="10" fill="#ffb3ce" />
-      <rect x="1150" y="134" width="144" height="286" fill="#5aa9ee" />
-      <rect x="1294" y="112" width="34" height="308" fill="#101b17" />
-      {/* Far right: lilac block */}
-      <rect x="1340" y="250" width="110" height="170" fill="#dcd6f9" />
-      {/* Ground and trees */}
-      <rect x="0" y="372" width="1440" height="48" fill="#0c513f" />
-      {[
-        [30, 344, 1], [250, 352, 1.1], [420, 360, 0.9], [980, 358, 1], [1150, 350, 1.1], [1380, 352, 1],
-      ].map(([x, y, s]) => tree(x!, y!, s!))}
+      <rect x="1150" y="134" width="144" height="258" fill="#5aa9ee" />
+      <rect x="1294" y="112" width="34" height="280" fill="#101b17" />
+      {/* Lilac block */}
+      <rect x="1340" y="250" width="110" height="142" fill="#dcd6f9" />
+      {[30, 440, 604, 852, 1004, 1146, 1392].map((x, index) => tree(x, index % 2 === 0 ? 1 : 0.85))}
+      {/* Road */}
+      <rect x="0" y="392" width="1440" height="40" fill="#33413c" />
+      {Array.from({ length: 23 }, (_, index) => (
+        <rect key={index} x={index * 64 + 8} y="410" width="30" height="4" rx="2" fill="#fff" opacity=".8" />
+      ))}
+      <rect x="0" y="432" width="1440" height="28" fill="#0c513f" />
+      <g transform="translate(470 308) scale(0.46)">
+        <RiderShapes speedLines={false} />
+      </g>
+    </svg>
+  );
+}
+
+// A flat heart for the footer credit, in the same style as the art above.
+export function HeartArt({ className }: ArtProps) {
+  return (
+    <svg viewBox="0 0 32 28" className={className} {...svgProps}>
+      <path d="M16 27C6 19.5 1 14.3 1 8.6 1 4.4 4.3 1 8.4 1c3.1 0 5.9 1.7 7.6 4.4C17.7 2.7 20.5 1 23.6 1 27.7 1 31 4.4 31 8.6c0 5.7-5 10.9-15 18.4z" fill="#e80b2e" />
+      <path d="M16 27c4.4-3.3 7.8-6.2 10.2-8.9-3.8 2.4-8.6 4.1-10.2 4.1S9.6 20.5 5.8 18.1C8.2 20.8 11.6 23.7 16 27z" fill="#b8001f" />
+      <ellipse cx="8.6" cy="7.4" rx="3.2" ry="2.1" fill="#fff" opacity=".55" transform="rotate(-30 8.6 7.4)" />
     </svg>
   );
 }

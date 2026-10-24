@@ -11,7 +11,7 @@ type PhoneProps = {
 };
 
 /*
- * An iPhone-style bezel around a real screenshot. The screenshots already
+ * A thin iPhone-style bezel around a real screenshot. The screenshots already
  * include the status bar and Dynamic Island, so the frame is only the body.
  */
 export function Phone({
@@ -24,20 +24,21 @@ export function Phone({
   return (
     <div
       className={cn(
-        "relative aspect-[721/1567] rounded-[2.6rem] bg-ink p-[3.2%] shadow-[inset_0_0_0_1.5px_rgba(255,255,255,0.12)]",
+        "relative rounded-[2rem] bg-ink p-[5px] shadow-[inset_0_0_0_1.5px_rgba(255,255,255,0.12)] sm:p-1.5",
         className,
       )}
     >
-      <div className="relative h-full w-full overflow-hidden rounded-[2.2rem] bg-black">
-        <Image
-          src={src}
-          alt={alt}
-          fill
-          priority={priority}
-          sizes={sizes}
-          className="object-cover object-top"
-        />
-      </div>
+      {/*
+       * The screenshot keeps its own aspect ratio, so nothing is cropped;
+       * the bezel is thin and the corner radius small enough not to clip text.
+       */}
+      <Image
+        src={src}
+        alt={alt}
+        priority={priority}
+        sizes={sizes}
+        className="block h-auto w-full rounded-[1.65rem] bg-black"
+      />
       <span
         aria-hidden
         className="absolute top-[18%] -left-[3px] h-[6%] w-[3px] rounded-l bg-ink"
