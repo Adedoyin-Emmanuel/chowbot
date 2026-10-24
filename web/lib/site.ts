@@ -15,5 +15,6 @@ export const LINKS = {
     name: "Adedoyin Emmanuel",
     site: "https://adedoyin.dev",
     x: "https://x.com/Emmysoft_Tm",
+    linkedin: "https://linkedin.com/in/Adedoyin-Emmanuel",
   },
 } as const;

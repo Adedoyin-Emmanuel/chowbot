@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Globe } from "lucide-react";
 
 import {
   Burst,
@@ -11,13 +11,40 @@ import {
 import { LINKS } from "@/lib/site";
 import { Footer } from "@/components/site/footer";
 import { Header } from "@/components/site/header";
-import { GithubIcon, XIcon } from "@/components/site/brand-icons";
+import { XIcon, GithubIcon, LinkedinIcon } from "@/components/site/brand-icons";
 
 export const metadata: Metadata = {
   title: "About ChowBot",
   description:
     "What ChowBot is, how it signs you in and keeps your Chowdeck session safe, the tools it gives your AI assistant, and who built it.",
 };
+
+const MAKER_LINKS = [
+  {
+    href: LINKS.author.x,
+    label: "X",
+    detail: "@Emmysoft_Tm, the quickest way to reach me",
+    Icon: XIcon,
+  },
+  {
+    href: LINKS.author.linkedin,
+    label: "LinkedIn",
+    detail: "Let's connect",
+    Icon: LinkedinIcon,
+  },
+  {
+    href: LINKS.author.site,
+    label: "adedoyin.dev",
+    detail: "See what else I'm building",
+    Icon: Globe,
+  },
+  {
+    href: LINKS.github,
+    label: "GitHub",
+    detail: "Star ChowBot, fork it or open an issue",
+    Icon: GithubIcon,
+  },
+];
 
 const TOOLS = [
   {
@@ -305,37 +332,60 @@ export default function AboutPage() {
           aria-labelledby="maker"
           className="px-4 py-20 sm:px-6 lg:px-10 lg:py-28"
         >
-          <div className="mx-auto flex max-w-7xl flex-col gap-8 rounded-2xl border-4 border-black bg-sun p-8 sm:p-12 lg:flex-row lg:items-end lg:justify-between">
-            <div>
+          {/*
+           * Chowdeck's split promo card: a green half that does the talking,
+           * a yellow half with the actions as big tappable rows.
+           */}
+          <div className="mx-auto grid max-w-7xl overflow-hidden rounded-2xl border-4 border-black lg:grid-cols-[1.1fr_1fr]">
+            <div className="relative bg-chow-green p-8 sm:p-12">
+              <Sparkle className="absolute top-8 right-8 size-8 text-sun sm:top-12 sm:right-12" />
+
               <h2
                 id="maker"
-                className="display text-[2.75rem] text-black sm:text-6xl"
+                className="display mt-6 text-[2.75rem] text-white sm:text-6xl"
               >
-                Made by Adedoyin Emmanuel
+                Hi, I&apos;m Adedoyin.
+                <br />
+                <span className="text-sun">I built ChowBot.</span>
               </h2>
-              <p className="mt-4 max-w-xl text-lg text-black/80">
-                Questions, ideas or a bug to report? Find me on X, or see what
-                else I&apos;m building.
+              <p className="mt-6 max-w-md text-lg text-white/80">
+                Wagwan. Found a bug, want a feature, or just want to tell me
+                ChowBot fed you? I&apos;d love to hear it.
               </p>
             </div>
-            <div className="flex flex-wrap gap-3">
-              <a
-                href={LINKS.author.site}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center rounded-lg bg-black px-6 py-3 font-semibold text-white transition-colors hover:bg-chow-green"
-              >
-                adedoyin.dev
-              </a>
-              <a
-                href={LINKS.author.x}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-2 rounded-lg bg-white px-6 py-3 font-semibold text-black transition-colors hover:bg-hero"
-              >
-                <XIcon className="size-4" />
-                @Emmysoft_Tm
-              </a>
+
+            <div className="border-t-4 border-black bg-sun p-8 sm:p-12 lg:border-t-0 lg:border-l-4">
+              <p className="text-sm font-bold tracking-wide text-black/70 uppercase">
+                Say hi
+              </p>
+              <ul className="mt-4 grid gap-3">
+                {MAKER_LINKS.map(({ href, label, detail, Icon }) => (
+                  <li key={href}>
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="group flex items-center gap-4 rounded-xl border-2 border-black bg-white px-4 py-4 sm:px-5 transition-colors hover:bg-hero"
+                    >
+                      <span className="grid size-10 shrink-0 place-items-center rounded-full bg-black text-white">
+                        <Icon className="size-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-bold text-black">
+                          {label}
+                        </span>
+                        <span className="block text-sm text-black/70">
+                          {detail}
+                        </span>
+                      </span>
+                      <ArrowUpRight
+                        className="size-5 shrink-0 text-black transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+                        aria-hidden
+                      />
+                    </a>
+                  </li>
+                ))}
+              </ul>
             </div>
           </div>
         </section>
