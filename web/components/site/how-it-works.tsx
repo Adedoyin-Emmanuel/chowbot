@@ -56,7 +56,7 @@ export function HowItWorks() {
               <p className="mt-4 flex-1 text-ink/85">{step.body}</p>
               <a
                 href={step.link.href}
-                className="label-caps mt-8 inline-flex items-center gap-2 text-black hover:text-cucumber"
+                className="label-caps mt-8 inline-flex items-center gap-2 text-black hover:text-cucumber tracking-wide md:text-sm text-[13px]"
               >
                 <span className="link-underline">{step.link.label}</span>
                 <ArrowRight className="size-4" aria-hidden />

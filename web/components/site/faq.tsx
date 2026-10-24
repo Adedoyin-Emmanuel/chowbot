@@ -9,7 +9,7 @@ const FAQS: { question: string; answer: React.ReactNode }[] = [
   {
     question: "What is ChowBot?",
     answer:
-      "ChowBot is a connector (an MCP server) that lets AI assistants like Claude and ChatGPT use your Chowdeck account. Once it's connected, you can search for food, fill your cart, check out, pay and track your order just by chatting.",
+      "ChowBot is a connector (an MCP server) that lets AI assistants like Claude, Grok, ChatGPT, Gemini, and others use your Chowdeck account. Once it's connected, you can search for food, fill your cart, check out, pay and track your order just by chatting.",
   },
   {
     question: "Is ChowBot made by Chowdeck?",
@@ -19,7 +19,7 @@ const FAQS: { question: string; answer: React.ReactNode }[] = [
   {
     question: "Which assistants does it work with?",
     answer:
-      "Any AI assistant that supports remote MCP connectors, such as Claude and ChatGPT. Add the connector URL in your assistant's connector settings and sign in once. In Claude, a connector added on the web or desktop also works in the iPhone and Android apps.",
+      "Any AI assistant that supports remote MCP connectors, such as Claude, Grok, Gemini and ChatGPT. Add the connector URL in your assistant's connector settings and sign in once. In Claude, a connector added on the web or desktop also works in the iPhone and Android apps.",
   },
   {
     question: "Can it order food without me knowing?",
@@ -57,7 +57,6 @@ const FAQS: { question: string; answer: React.ReactNode }[] = [
       "Open your assistant's connector settings (in Claude: Settings, then Connectors) and disconnect or remove ChowBot. You can add it back any time.",
   },
 ];
-
 
 export function Faq() {
   const [active, setActive] = useState(0);

@@ -24,7 +24,7 @@ export function Hero() {
           <br />
           Just ask.
         </h1>
-        <p className="mx-auto mt-6 max-w-xl text-lg text-ink/80 sm:text-xl">
+        <p className="mx-auto mt-6 max-w-xl md:text-lg text-ink/80">
           ChowBot connects your Chowdeck account to Claude, ChatGPT or any AI
           assistant that supports MCP. Order, pay and track your food in plain
           conversation.

@@ -270,9 +270,9 @@ export default function AboutPage() {
                 Open source
               </h2>
               <p className="mt-5 max-w-lg text-lg text-white/85">
-                The MCP server, the sign-in pages and this website all live in
-                one repository. Read the code, run it yourself, or open an issue
-                if something&apos;s off.
+                The MCP server, the auth pages and this website all live in one
+                repository. Read the code, run it yourself, or open an issue if
+                something&apos;s off.
               </p>
               <a
                 href={LINKS.github}
