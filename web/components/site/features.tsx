@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
-
 import {
   NotesArt,
   RiderArt,
@@ -40,7 +39,8 @@ const DECKS: Deck[] = [
     icon: Search,
     title: "Find food",
     body: "Search for a dish or a place, see what's open near you, Chowdeck's picks and your usual spots. Full menus with every option, plus shops and pharmacies.",
-    prompt: "Find jollof rice near me that's open now",
+    prompt:
+      "Find jollof rice and chicken from restaurant near me that's open now",
     art: JollofArt,
     card: "bg-deck-lilac",
     accent: "text-lavender",
@@ -50,7 +50,7 @@ const DECKS: Deck[] = [
     icon: ShoppingBasket,
     title: "Build your cart",
     body: "Add dishes with their options, double up or take things out, and leave notes for the kitchen and the rider. One cart per restaurant, like the app.",
-    prompt: "Add another beef shawarma, no onions",
+    prompt: "Add another chicken shawarma",
     art: BasketArt,
     card: "bg-cream",
     accent: "text-sun",
@@ -70,7 +70,7 @@ const DECKS: Deck[] = [
     icon: Wallet,
     title: "Pay your way",
     body: "Card, transfer, USSD, OPay, Pocket or Zap through Chowdeck's own payment link, your Chowdeck wallet, or a pay-for-me link for someone else.",
-    prompt: "Make it a pay-for-me link for my brother",
+    prompt: "I will make payment with OPay",
     art: NotesArt,
     card: "bg-mint",
     accent: "text-[#68b99d]",
@@ -90,7 +90,7 @@ const DECKS: Deck[] = [
     icon: Star,
     title: "Rate it",
     body: "Once it's delivered, rate the restaurant and give each item a thumbs up or down, in your own words.",
-    prompt: "Rate Item 7 five stars, it was very tasty",
+    prompt: "Rate Item 7 five stars, the shawarma gell die",
     art: StarsArt,
     card: "bg-peach",
     accent: "text-tangerine",
@@ -104,13 +104,11 @@ const MAX_OPEN = 760;
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
-
 const dwell = (progress: number) => {
   const card = Math.floor(progress);
   const t = clamp((progress - card - 0.35) / 0.3, 0, 1);
   return card + t * t * (3 - 2 * t);
 };
-
 
 export function Features() {
   const sectionRef = useRef<HTMLElement>(null);
