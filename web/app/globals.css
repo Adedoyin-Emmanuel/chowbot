@@ -1,0 +1,162 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Brand palette. The greens, yellow and pastels are taken from chowdeck.com's
+ * own stylesheet so ChowBot feels familiar next to the Chowdeck app.
+ */
+@theme {
+  --color-chow-green: #0c513f;
+  --color-chow-green-deep: #083b2e;
+  --color-cucumber: #038b5c;
+  --color-kiwi: #02c27f;
+  --color-mint: #ccf3e5;
+  --color-pepper: #e80b2e;
+  --color-ink: #101b17;
+  --color-sun: #ffc501;
+  --color-cream: #ffedb3;
+  --color-butter: #fff6d9;
+  --color-blush: #ffd1e2;
+  --color-lilac: #e4defc;
+  --color-lavender: #8c77ec;
+  --color-sky: #99c8ff;
+  --color-peach: #ffdbc9;
+  --color-tangerine: #ed5e3b;
+  --color-hero: #fff4d6;
+  --color-deck-lilac: #dcd6f9;
+  --color-deck-sky: #99c8ff;
+  --color-deck-pink: #ffb3ce;
+  --color-faq-line: #e7eeec;
+
+  --font-sans:
+    var(--font-jakarta), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+
+  --animate-marquee: marquee 40s linear infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+:root {
+  --radius: 1rem;
+  --background: #ffffff;
+  --foreground: #101b17;
+  --card: #ffffff;
+  --card-foreground: #101b17;
+  --popover: #ffffff;
+  --popover-foreground: #101b17;
+  --primary: #0c513f;
+  --primary-foreground: #ffffff;
+  --secondary: #ccf3e5;
+  --secondary-foreground: #0c513f;
+  --muted: #f3f5f4;
+  --muted-foreground: #4a5a54;
+  --accent: #fff6d9;
+  --accent-foreground: #101b17;
+  --destructive: #e80b2e;
+  --border: #dfe5e2;
+  --input: #dfe5e2;
+  --ring: #038b5c;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "ss01" off;
+  }
+
+  ::selection {
+    background: var(--color-kiwi);
+    color: var(--color-ink);
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-kiwi);
+    outline-offset: 3px;
+  }
+
+  [id] {
+    scroll-margin-top: 6rem;
+  }
+}
+
+@layer components {
+  /* Chowdeck's display type: bold, very tight tracking. */
+  .display {
+    font-weight: 700;
+    letter-spacing: -0.05em;
+    line-height: 1;
+  }
+
+  /* chowdeck.com's green ribbon with kiwi scallops, used as a section trim. */
+  .scallop-band {
+    background:
+      radial-gradient(circle at 50% 0, transparent 13px, var(--color-kiwi) 14px, var(--color-kiwi) 17px, transparent 18px) 0 0 / 36px 22px repeat-x,
+      var(--color-chow-green);
+  }
+
+  /* Chowdeck's small caps-style link labels ("SEE MORE ->"). */
+  .label-caps {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
