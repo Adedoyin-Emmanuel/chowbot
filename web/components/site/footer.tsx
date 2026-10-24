@@ -1,10 +1,9 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
 
-import logo from "@/public/chowbot-logo.svg";
 import { LINKS } from "@/lib/site";
-
 import { HeartArt } from "./illustrations";
+import logo from "@/public/chowbot-logo.svg";
 import { Burst, HalfCircle, Sparkle } from "./shapes";
 
 type FooterLink = { label: string; href?: string; external?: boolean };
@@ -60,15 +59,13 @@ const SOCIALS: { label: string; href: string; mark: ReactNode }[] = [
   },
 ];
 
-// Laid out like chowdeck.com's black footer: ruled link columns over a row of
-// social cells, the wordmark in the corner and a centred copyright line.
 export function Footer() {
   return (
     <footer className="bg-black text-white">
-      <div aria-hidden className="scallop-band h-[22px]" />
+      <div aria-hidden className="scallop-band h-5.5" />
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-10">
         <div className="grid lg:grid-cols-[1fr_2.6fr]">
-          <div className="order-last flex items-end py-10 lg:order-none lg:row-span-2 lg:pr-10 lg:pb-9">
+          <div className="order-last flex items-end py-10 lg:order-0 lg:row-span-2 lg:pr-10 lg:pb-9">
             <p className="flex items-center gap-3 text-4xl font-bold tracking-[-0.04em] sm:text-5xl">
               <Image
                 src={logo}

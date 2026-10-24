@@ -10,7 +10,6 @@ type CopyFieldProps = {
   value: string;
   label: string;
   className?: string;
-  // "bar" is chowdeck.com's hero address bar: a borderless white pill.
   variant?: "outline" | "bar";
 };
 
@@ -32,8 +31,6 @@ export function CopyField({
     try {
       await navigator.clipboard.writeText(value);
     } catch {
-      // Clipboard can be unavailable (insecure context, denied permission):
-      // select the text so the user can copy it themselves.
       inputRef.current?.select();
       return;
     }

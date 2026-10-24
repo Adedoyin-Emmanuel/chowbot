@@ -1,11 +1,7 @@
-/*
- * The MCP endpoint people paste into their assistant's connector settings.
- * TODO: the production URL isn't decided yet. Set NEXT_PUBLIC_MCP_SERVER_URL
- * at build time and drop the placeholder once ChowBot has a real domain.
- */
+
 export const MCP_SERVER_URL =
   process.env.NEXT_PUBLIC_MCP_SERVER_URL?.trim() ||
-  "https://chowbot.example.com";
+  "https://chowbot-mcp.adedoyin.dev";
 
 export const SITE = {
   name: "ChowBot",

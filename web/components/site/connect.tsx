@@ -1,15 +1,15 @@
 import {
-  KeyRound,
-  MessageCircle,
   Plug,
+  KeyRound,
   Settings,
+  MessageCircle,
   type LucideIcon,
 } from "lucide-react";
 
-import { MCP_SERVER_URL } from "@/lib/site";
 
-import { CopyField } from "./copy-field";
 import { Dot } from "./shapes";
+import { CopyField } from "./copy-field";
+import { MCP_SERVER_URL } from "@/lib/site";
 
 const STEPS: { icon: LucideIcon; text: React.ReactNode }[] = [
   {
@@ -50,7 +50,6 @@ const STEPS: { icon: LucideIcon; text: React.ReactNode }[] = [
   },
 ];
 
-// Laid out like chowdeck.com's map-and-restaurant-list card.
 export function Connect() {
   return (
     <section
@@ -60,7 +59,7 @@ export function Connect() {
       <div className="mx-auto max-w-7xl overflow-hidden rounded-2xl border-4 border-black">
         <div
           aria-hidden
-          className="scallop-band h-[22px] border-b-4 border-black"
+          className="scallop-band h-5.5 border-b-4 border-black"
         />
         <div className="grid lg:grid-cols-[1.15fr_1fr]">
           <div className="bg-hero p-7 sm:p-10 lg:p-14">

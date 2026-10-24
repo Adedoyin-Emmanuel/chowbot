@@ -1,40 +1,39 @@
 "use client";
 
 import {
-  BadgePercent,
+  Star,
   Bike,
   Search,
-  ShoppingBasket,
-  Star,
   Wallet,
+  BadgePercent,
+  ShoppingBasket,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
-import { cn } from "@/lib/utils";
 
 import {
-  BasketArt,
-  JollofArt,
   NotesArt,
-  ReceiptArt,
   RiderArt,
   StarsArt,
+  JollofArt,
+  BasketArt,
+  ReceiptArt,
 } from "./illustrations";
+import { cn } from "@/lib/utils";
 import { SectionHeading } from "./section-heading";
 
 type Deck = {
   key: string;
-  icon: LucideIcon;
-  title: string;
   body: string;
-  prompt: string;
-  art: (props: { className?: string }) => React.ReactNode;
   card: string;
+  title: string;
+  prompt: string;
   accent: string;
+  icon: LucideIcon;
+  art: (props: { className?: string }) => React.ReactNode;
 };
 
-// Each card maps to real ChowBot tools (mcp-server/features/*/tools.ts).
 const DECKS: Deck[] = [
   {
     key: "find",
@@ -98,32 +97,21 @@ const DECKS: Deck[] = [
   },
 ];
 
-// Measured from chowdeck.com: closed cards are 180px, the open one ~760px.
-const CLOSED = 180;
 const GAP = 16;
+const CLOSED = 180;
 const MAX_OPEN = 760;
-// Scroll distance that moves the deck on by one card.
-const STEP = 420;
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
-/*
- * Each card holds fully open for most of its share of the scroll and hands
- * over to the next in the middle third, so cards are rarely caught halfway.
- */
+
 const dwell = (progress: number) => {
   const card = Math.floor(progress);
   const t = clamp((progress - card - 0.35) / 0.3, 0, 1);
   return card + t * t * (3 - 2 * t);
 };
 
-/*
- * chowdeck.com's "What's on Deck?": on wide screens the section pins while
- * you scroll, the open card shrinks as the next one grows, and the row
- * slides left. Scroll position alone drives it, so it never animates on its
- * own. On phones the cards stack, all open.
- */
+
 export function Features() {
   const sectionRef = useRef<HTMLElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);

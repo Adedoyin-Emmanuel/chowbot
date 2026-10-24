@@ -1,8 +1,4 @@
-/*
- * Flat illustrations in chowdeck.com's style: solid colours, no outlines,
- * simple shapes. All decorative (aria-hidden); the text beside them says
- * what they show.
- */
+
 type ArtProps = { className?: string };
 
 const svgProps = {
@@ -10,7 +6,6 @@ const svgProps = {
   xmlns: "http://www.w3.org/2000/svg",
 } as const;
 
-// A plate of jollof rice and chicken under a magnifying glass.
 export function JollofArt({ className }: ArtProps) {
   return (
     <svg viewBox="0 0 400 260" className={className} {...svgProps}>
@@ -90,7 +85,6 @@ export function JollofArt({ className }: ArtProps) {
   );
 }
 
-// A woven basket with a drink, bread, greens and a wrapped shawarma.
 export function BasketArt({ className }: ArtProps) {
   return (
     <svg viewBox="0 0 400 260" className={className} {...svgProps}>
@@ -151,9 +145,7 @@ export function BasketArt({ className }: ArtProps) {
   );
 }
 
-// A receipt with a percent coupon and a map pin.
 export function ReceiptArt({ className }: ArtProps) {
-  // Ten teeth back along the bottom edge, from x=270 to x=90.
   const zigzag = "l-9 12l-9-12".repeat(10);
   return (
     <svg viewBox="0 0 400 260" className={className} {...svgProps}>
@@ -208,7 +200,6 @@ export function ReceiptArt({ className }: ArtProps) {
   );
 }
 
-// A fan of naira notes beside a wallet.
 export function NotesArt({ className }: ArtProps) {
   const note = (fill: string, accent: string, rotate: number, dx: number) => (
     <g transform={`rotate(${rotate} 200 200) translate(${dx} 0)`}>
@@ -267,7 +258,6 @@ export function NotesArt({ className }: ArtProps) {
   );
 }
 
-// A delivery rider on a scooter with a green box (drawn in a 400x260 box).
 function RiderShapes({ speedLines = true }: { speedLines?: boolean }) {
   return (
     <>
@@ -339,7 +329,6 @@ export function RiderArt({ className }: ArtProps) {
   );
 }
 
-// Stars and a thumbs-up note.
 export function StarsArt({ className }: ArtProps) {
   const star = (cx: number, cy: number, r: number, fill: string) => {
     const points = Array.from({ length: 10 }, (_, index) => {
@@ -373,11 +362,7 @@ export function StarsArt({ className }: ArtProps) {
   );
 }
 
-/*
- * The hero's city, after the one on chowdeck.com: a striped yellow tower, a
- * blue tower with a spire, a lavender block, a buka with a striped awning,
- * trees, and a road with a rider on it.
- */
+
 export function SkylineArt({ className }: ArtProps) {
   const tree = (x: number, s: number) => (
     <g key={x}>
@@ -416,7 +401,6 @@ export function SkylineArt({ className }: ArtProps) {
       <rect x="80" y="58" width="130" height="42" fill="#ff8a4c" />
       <rect x="210" y="58" width="22" height="42" fill="#ed5e3b" />
       <path d="M110 58V18M150 58V30" stroke="#101b17" strokeWidth="4" />
-      {/* Peach block */}
       <rect x="300" y="232" width="130" height="160" fill="#ffdbc9" />
       {Array.from({ length: 4 }, (_, row) =>
         Array.from({ length: 4 }, (_, col) => (
@@ -431,7 +415,6 @@ export function SkylineArt({ className }: ArtProps) {
           />
         )),
       )}
-      {/* Green mid-rise */}
       <rect x="452" y="196" width="140" height="196" fill="#0c513f" />
       {Array.from({ length: 5 }, (_, row) => (
         <rect
@@ -445,7 +428,6 @@ export function SkylineArt({ className }: ArtProps) {
           opacity=".7"
         />
       ))}
-      {/* Lavender block */}
       <rect x="640" y="222" width="180" height="170" fill="#8c77ec" />
       {Array.from({ length: 4 }, (_, row) =>
         Array.from({ length: 5 }, (_, col) => (
@@ -460,7 +442,6 @@ export function SkylineArt({ className }: ArtProps) {
           />
         )),
       )}
-      {/* Buka with a striped awning */}
       <rect x="866" y="292" width="128" height="100" fill="#fff4d6" />
       <rect
         x="866"
@@ -481,7 +462,6 @@ export function SkylineArt({ className }: ArtProps) {
       <rect x="854" y="266" width="152" height="12" rx="4" fill="#101b17" />
       <rect x="884" y="326" width="36" height="66" fill="#0c513f" />
       <rect x="936" y="318" width="40" height="30" rx="4" fill="#99c8ff" />
-      {/* Mint block */}
       <rect x="1010" y="236" width="130" height="156" fill="#ccf3e5" />
       {Array.from({ length: 4 }, (_, row) => (
         <rect
@@ -495,19 +475,16 @@ export function SkylineArt({ className }: ArtProps) {
           opacity=".55"
         />
       ))}
-      {/* Blue tower with spire */}
       <path d="M1222 112V20" stroke="#101b17" strokeWidth="6" />
       <rect x="1214" y="60" width="16" height="52" fill="#5aa9ee" />
       <rect x="1150" y="112" width="144" height="12" fill="#ffc501" />
       <rect x="1150" y="124" width="144" height="10" fill="#ffb3ce" />
       <rect x="1150" y="134" width="144" height="258" fill="#5aa9ee" />
       <rect x="1294" y="112" width="34" height="280" fill="#101b17" />
-      {/* Lilac block */}
       <rect x="1340" y="250" width="110" height="142" fill="#dcd6f9" />
       {[30, 440, 604, 852, 1004, 1146, 1392].map((x, index) =>
         tree(x, index % 2 === 0 ? 1 : 0.85),
       )}
-      {/* Road */}
       <rect x="0" y="392" width="1440" height="40" fill="#33413c" />
       {Array.from({ length: 23 }, (_, index) => (
         <rect
@@ -529,7 +506,6 @@ export function SkylineArt({ className }: ArtProps) {
   );
 }
 
-// A flat heart for the footer credit, in the same style as the art above.
 export function HeartArt({ className }: ArtProps) {
   return (
     <svg viewBox="0 0 32 28" className={className} {...svgProps}>

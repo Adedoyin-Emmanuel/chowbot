@@ -1,7 +1,6 @@
 import { LINKS, MCP_SERVER_URL } from "@/lib/site";
 
 import { CopyField } from "./copy-field";
-import { GithubIcon } from "./brand-icons";
 import { Cloud, CloudEdge } from "./shapes";
 import { SkylineArt } from "./illustrations";
 

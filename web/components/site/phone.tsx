@@ -3,17 +3,14 @@ import Image, { type StaticImageData } from "next/image";
 import { cn } from "@/lib/utils";
 
 type PhoneProps = {
-  src: StaticImageData;
   alt: string;
-  className?: string;
-  priority?: boolean;
   sizes?: string;
+  priority?: boolean;
+  className?: string;
+  src: StaticImageData;
 };
 
-/*
- * A thin iPhone-style bezel around a real screenshot. The screenshots already
- * include the status bar and Dynamic Island, so the frame is only the body.
- */
+
 export function Phone({
   src,
   alt,
@@ -24,14 +21,11 @@ export function Phone({
   return (
     <div
       className={cn(
-        "relative rounded-[2rem] bg-ink p-[5px] shadow-[inset_0_0_0_1.5px_rgba(255,255,255,0.12)] sm:p-1.5",
+        "relative rounded-4xl bg-ink p-1.25 shadow-[inset_0_0_0_1.5px_rgba(255,255,255,0.12)] sm:p-1.5",
         className,
       )}
     >
-      {/*
-       * The screenshot keeps its own aspect ratio, so nothing is cropped;
-       * the bezel is thin and the corner radius small enough not to clip text.
-       */}
+
       <Image
         src={src}
         alt={alt}
@@ -41,15 +35,15 @@ export function Phone({
       />
       <span
         aria-hidden
-        className="absolute top-[18%] -left-[3px] h-[6%] w-[3px] rounded-l bg-ink"
+        className="absolute top-[18%] -left-0.75 h-[6%] w-0.75 rounded-l bg-ink"
       />
       <span
         aria-hidden
-        className="absolute top-[27%] -left-[3px] h-[9%] w-[3px] rounded-l bg-ink"
+        className="absolute top-[27%] -left-0.75 h-[9%] w-0.75 rounded-l bg-ink"
       />
       <span
         aria-hidden
-        className="absolute top-[24%] -right-[3px] h-[12%] w-[3px] rounded-r bg-ink"
+        className="absolute top-[24%] -right-0.75 h-[12%] w-0.75 rounded-r bg-ink"
       />
     </div>
   );

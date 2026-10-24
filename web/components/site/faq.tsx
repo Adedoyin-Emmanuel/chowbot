@@ -3,7 +3,6 @@
 import { useState } from "react";
 
 import { cn } from "@/lib/utils";
-
 import { Burst } from "./shapes";
 
 const FAQS: { question: string; answer: React.ReactNode }[] = [
@@ -59,12 +58,7 @@ const FAQS: { question: string; answer: React.ReactNode }[] = [
   },
 ];
 
-/*
- * chowdeck.com's FAQ: questions on the left, the open one in black, and its
- * answer in a big yellow card on the right. On phones the answer opens under
- * its question instead. The card straddles the white page and the black
- * section that follows.
- */
+
 export function Faq() {
   const [active, setActive] = useState(0);
   const current = FAQS[active]!;
@@ -96,7 +90,7 @@ export function Faq() {
                       "flex w-full items-center justify-between gap-4 rounded-lg border border-faq-line p-5 text-left text-base font-bold transition-colors",
                       open
                         ? "bg-black text-white"
-                        : "bg-chow-green/[0.02] text-chow-green hover:bg-chow-green/5",
+                        : "bg-chow-green/2 text-chow-green hover:bg-chow-green/5",
                     )}
                   >
                     {faq.question}

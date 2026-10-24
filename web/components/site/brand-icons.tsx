@@ -1,4 +1,3 @@
-// Brand marks (Lucide no longer ships these). Paths from Simple Icons, CC0.
 type IconProps = { className?: string };
 
 export function GithubIcon({ className }: IconProps) {

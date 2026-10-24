@@ -23,7 +23,6 @@ const STEPS = [
   },
 ];
 
-// Laid out like chowdeck.com's "Join our growing network" cards.
 export function HowItWorks() {
   return (
     <section

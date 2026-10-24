@@ -14,6 +14,9 @@ const jakarta = Plus_Jakarta_Sans({
 const siteUrl =
   process.env.NEXT_PUBLIC_SITE_URL?.trim() || "http://localhost:3000";
 
+const ogImageAlt =
+  "ChowBot: you don chow? Just ask. Someone asks to order their usual from Item 7 and ChowBot replies with their chicken and beef shawarma and a link to pay 11,090 naira with OPay.";
+
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: SITE.title,
@@ -36,11 +39,20 @@ export const metadata: Metadata = {
     title: SITE.title,
     description: SITE.description,
     locale: "en_NG",
+    images: [
+      {
+        url: "/opengraph-image.png",
+        width: 1200,
+        height: 630,
+        alt: ogImageAlt,
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
     title: SITE.title,
     description: SITE.description,
+    images: [{ url: "/opengraph-image.png", alt: ogImageAlt }],
   },
 };
 

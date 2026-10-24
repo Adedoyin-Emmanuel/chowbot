@@ -3,21 +3,19 @@ const PROMPTS = [
   "Find jollof rice near me that's open now",
   "Order my usual shawarma from Item 7",
   "Any promo codes I can use?",
+  "Surprise me",
   "Pay with OPay",
   "Where's my rider?",
   "What's my delivery PIN?",
   "Send lunch to my sister",
+  "Surprise me with something to eat",
 ];
 
-/*
- * A scrolling ribbon of things people say to ChowBot, on Chowdeck's green
- * with its scalloped trim. Decorative, so hidden from screen readers.
- */
 export function PromptBand() {
   const items = [...PROMPTS, ...PROMPTS];
   return (
     <div aria-hidden className="relative">
-      <div className="scallop-band h-[22px] rotate-180" />
+      <div className="scallop-band h-5.5 rotate-180" />
       <div className="overflow-hidden bg-chow-green py-6">
         <div className="flex w-max animate-marquee gap-4 motion-reduce:animate-none">
           {items.map((prompt, index) => (
@@ -30,7 +28,7 @@ export function PromptBand() {
           ))}
         </div>
       </div>
-      <div className="scallop-band h-[22px]" />
+      <div className="scallop-band h-5.5" />
     </div>
   );
 }

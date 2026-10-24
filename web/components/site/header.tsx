@@ -1,15 +1,14 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
+import Image from "next/image";
 import { Menu, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import logo from "@/public/chowbot-logo.svg";
-import { LINKS } from "@/lib/site";
 import { cn } from "@/lib/utils";
-
+import { LINKS } from "@/lib/site";
 import { GithubIcon } from "./brand-icons";
+import logo from "@/public/chowbot-logo.svg";
 
 const NAV = [
   { href: "/#features", label: "What it can do" },
@@ -19,11 +18,7 @@ const NAV = [
   { href: "/about", label: "About" },
 ];
 
-/*
- * Chowdeck's header: separate floating pills over the page, not a bar. A
- * green logo pill on the left, the links in one white pill in the middle,
- * GitHub on the right. On phones, round buttons and a dropdown menu.
- */
+
 export function Header() {
   const [open, setOpen] = useState(false);
 

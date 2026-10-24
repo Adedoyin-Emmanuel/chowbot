@@ -1,11 +1,9 @@
 import { ArrowRight } from "lucide-react";
 
+import { Dot } from "./shapes";
+import { Phone } from "./phone";
 import tracking from "@/public/screenshots/order-tracking.png";
 
-import { Phone } from "./phone";
-import { Dot } from "./shapes";
-
-// Laid out like chowdeck.com's "Place your order in seconds" pair of cards.
 export function ClosingCta() {
   return (
     <section
@@ -44,8 +42,7 @@ export function ClosingCta() {
           </div>
         </div>
 
-        {/* The phone sits to the right and runs off the bottom edge. */}
-        <div className="relative min-h-[20rem] overflow-hidden rounded-2xl bg-lavender p-8 sm:min-h-[22rem] sm:p-10">
+        <div className="relative min-h-80 overflow-hidden rounded-2xl bg-lavender p-8 sm:min-h-88 sm:p-10">
           <p className="display max-w-[58%] text-3xl text-black sm:text-5xl">
             Works wherever your assistant does
           </p>
@@ -55,7 +52,7 @@ export function ClosingCta() {
           <Phone
             src={tracking}
             alt="Claude on an iPhone showing an order on its way and the delivery PIN 5051."
-            className="absolute top-10 right-5 w-[38%] max-w-[230px] rotate-6 sm:right-10"
+            className="absolute top-10 right-5 w-[38%] max-w-57.5 rotate-6 sm:right-10"
             sizes="230px"
           />
         </div>
