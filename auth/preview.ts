@@ -5,8 +5,8 @@
  *
  *   bun run dev        (rebuilds on change and serves the preview)
  *
- * Open the printed URL. Any valid Nigerian number works; the code is 123456.
- * 08000000000 simulates Chowdeck refusing to send a code.
+ * Open the printed URL. Any valid Nigerian number works; the code is
+ * PREVIEW_CODE (1234). 08000000000 simulates Chowdeck refusing to send a code.
  */
 import { join } from "node:path";
 
@@ -56,6 +56,11 @@ const client = await registerClient(clients, {
   redirect_uris: [`${origin}/preview/callback`],
 });
 
+/*
+ * Production serves MCP at the root of its domain, but here "/" redirects
+ * into the sign-in flow (below), so MCP sits at /mcp out of the way. The
+ * sign-in pages don't depend on where MCP is mounted.
+ */
 const app = createHttpApp({
   serverUrl: new URL(`${origin}/mcp`),
   users: new InMemoryUserStore(),
