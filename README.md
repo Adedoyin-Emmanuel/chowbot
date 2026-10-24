@@ -36,6 +36,7 @@ bun run test
 - `mcp-server/`: the MCP server, Chowdeck tools, OAuth and PostgreSQL
 - `auth/`: the sign-in pages the server shows at `/authorize`
 - `web/`: the website
+- `video/`: the launch video, made with Remotion. `bun run --cwd video render` writes `video/out/chowbot-launch.mp4`; `render:sky` writes the "Looking to the Sky" cut (put the track at `video/public/music/looking-to-the-sky.mp3` first)
 
 ChowBot is an independent project, not affiliated with Chowdeck. [MIT License](./LICENSE).
 
