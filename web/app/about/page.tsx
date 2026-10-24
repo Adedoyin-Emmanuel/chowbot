@@ -1,17 +1,17 @@
 import type { Metadata } from "next";
 import { ArrowRight } from "lucide-react";
 
-import { GithubIcon, XIcon } from "@/components/site/brand-icons";
-import { Footer } from "@/components/site/footer";
-import { Header } from "@/components/site/header";
 import {
   Burst,
   Cloud,
+  Sparkle,
   CloudEdge,
   HalfCircle,
-  Sparkle,
 } from "@/components/site/shapes";
 import { LINKS } from "@/lib/site";
+import { Footer } from "@/components/site/footer";
+import { Header } from "@/components/site/header";
+import { GithubIcon, XIcon } from "@/components/site/brand-icons";
 
 export const metadata: Metadata = {
   title: "About ChowBot",
@@ -19,7 +19,6 @@ export const metadata: Metadata = {
     "What ChowBot is, how it signs you in and keeps your Chowdeck session safe, the tools it gives your AI assistant, and who built it.",
 };
 
-// The tool groups in mcp-server/features/*/tools.ts (31 tools in all).
 const TOOLS = [
   {
     title: "Restaurants and menus",
@@ -190,7 +189,7 @@ export default function AboutPage() {
           <div className="mx-auto max-w-7xl overflow-hidden rounded-2xl border-4 border-black">
             <div
               aria-hidden
-              className="scallop-band h-[22px] border-b-4 border-black"
+              className="scallop-band h-5.5 border-b-4 border-black"
             />
             <div className="p-7 sm:p-10 lg:p-14">
               <h2

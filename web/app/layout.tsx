@@ -1,16 +1,13 @@
 import type { Metadata, Viewport } from "next";
-import localFont from "next/font/local";
+import { Plus_Jakarta_Sans } from "next/font/google";
 
 import { SITE } from "@/lib/site";
 
 import "./globals.css";
 
-// Plus Jakarta Sans, the typeface chowdeck.com uses. Variable font (OFL, see
-// app/fonts/OFL.txt), self-hosted so the site loads nothing from third parties.
-const jakarta = localFont({
-  src: "./fonts/plus-jakarta-sans-latin.woff2",
+const jakarta = Plus_Jakarta_Sans({
+  subsets: ["latin"],
   variable: "--font-jakarta",
-  weight: "200 800",
   display: "swap",
 });
 
