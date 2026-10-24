@@ -74,7 +74,7 @@ export function Showcase() {
             aria-hidden
             viewBox="0 0 1200 200"
             preserveAspectRatio="none"
-            className="absolute inset-x-10 top-0 hidden h-[200px] lg:block"
+            className="absolute inset-x-10 top-0 hidden h-50 lg:block"
           >
             <path
               d="M0 23C90 23 120 23 200 23C360 23 440 119 600 119C760 119 840 23 1000 23C1080 23 1120 23 1200 23"
@@ -86,21 +86,21 @@ export function Showcase() {
               vectorEffect="non-scaling-stroke"
             />
           </svg>
-          <RiderArt className="absolute top-[-46px] left-0 z-10 hidden w-28 lg:block" />
+          <RiderArt className="absolute -top-11.5 left-0 z-10 hidden w-28 lg:block" />
 
           {/* Scrolls sideways on small screens, so it is focusable for keyboard users. */}
           <div
             role="region"
             aria-label="Screenshots of ChowBot in a chat"
             tabIndex={0}
-            className="snap-x snap-mandatory overflow-x-auto [scrollbar-width:none] focus-visible:outline-offset-[-3px] lg:overflow-visible"
+            className="snap-x snap-mandatory overflow-x-auto scrollbar-none focus-visible:outline-offset-[-3px] lg:overflow-visible"
           >
             <ol className="flex w-max gap-6 px-6 sm:px-10 lg:grid lg:w-auto lg:grid-cols-3 lg:gap-10 lg:px-0">
               {STOPS.map((stop, index) => (
                 <li
                   key={stop.label}
                   className={cn(
-                    "flex w-[72vw] max-w-[300px] shrink-0 snap-center flex-col items-center lg:w-auto lg:max-w-none",
+                    "flex w-[72vw] max-w-75 shrink-0 snap-center flex-col items-center lg:w-auto lg:max-w-none",
                     index === 1 && "lg:mt-24",
                   )}
                 >
@@ -118,10 +118,10 @@ export function Showcase() {
                     <Phone
                       src={stop.src}
                       alt={stop.alt}
-                      className="mx-auto w-full max-w-[280px]"
+                      className="mx-auto w-full max-w-70"
                       sizes="(min-width: 1024px) 280px, 72vw"
                     />
-                    <figcaption className="mx-auto mt-6 max-w-[280px] text-center">
+                    <figcaption className="mx-auto mt-6 max-w-70 text-center">
                       <span className="block text-lg font-bold text-white">
                         {stop.prompt}
                       </span>
